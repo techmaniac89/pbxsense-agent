@@ -53,6 +53,9 @@ def build_home_payload(
     extension_names: dict[str, str],
     now: datetime | None = None,
     timezone_name: str = "",
+    pbx_type: str = "asterisk",
+    pbx_host: str = "",
+    pbx_port: int | str = "",
 ) -> dict:
     now = now or _now(timezone_name)
     active_channels = [
@@ -124,6 +127,9 @@ def build_home_payload(
             "detail": _connection_detail(snapshot, display_name),
             "agentVersion": snapshot.agent_version,
             "lastContact": "Just now" if snapshot.reachable else "Not yet",
+            "pbxType": pbx_type,
+            "pbxHost": pbx_host,
+            "pbxPort": pbx_port,
         },
         "now": current,
         "signals": signals,

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.53",
+    [string]$Version = "0.1.54-beta",
     [string]$OutputDir = ""
 )
 
@@ -15,11 +15,6 @@ if (-not $OutputDir) {
 $BuildRoot = Join-Path $PackagingRoot "build\linux"
 Remove-Item -Recurse -Force $BuildRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $BuildRoot, $OutputDir | Out-Null
-
-$Tar = Get-Command tar -ErrorAction SilentlyContinue
-if (-not $Tar) {
-    throw "tar is required to create Linux release archives."
-}
 
 $Python = Get-Command py -ErrorAction SilentlyContinue
 if ($Python) {
@@ -128,6 +123,7 @@ root = Path(sys.argv[1]).resolve()
 archive_path = Path(sys.argv[2]).resolve()
 kind = sys.argv[3]
 executable_control_scripts = {"postinst", "prerm", "postrm", "preinst"}
+executable_source_scripts = {"scripts/install_linux.sh"}
 
 with tarfile.open(archive_path, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
     for current_root, directories, files in os.walk(root):
@@ -153,6 +149,8 @@ with tarfile.open(archive_path, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
                 continue
 
             if kind == "control" and name in executable_control_scripts:
+                info.mode = 0o755
+            elif kind == "source" and relative in executable_source_scripts:
                 info.mode = 0o755
             else:
                 info.mode = 0o644
@@ -195,12 +193,7 @@ requires=python3,python3-venv,python3-pip,systemd
 
     $ArchivePath = Join-Path $OutputDir "$SourcePackageName.tar.gz"
     Remove-Item -Force $ArchivePath -ErrorAction SilentlyContinue
-    Push-Location $BuildRoot
-    try {
-        & $Tar.Source -czf $ArchivePath $SourcePackageName
-    } finally {
-        Pop-Location
-    }
+    New-TarGzArchive $StageRoot $ArchivePath "source"
     Write-Host "Built $ArchivePath"
 }
 
@@ -232,7 +225,7 @@ Group=pbxpulse
 WorkingDirectory=/opt/pbxpulse-agent
 Environment=PBXPULSE_AGENT_PORT=8765
 EnvironmentFile=/etc/pbxpulse-agent.env
-ExecStart=/opt/pbxpulse-agent/.venv/bin/uvicorn pbxpulse_agent.main:app --host 0.0.0.0 --port `${PBXPULSE_AGENT_PORT}
+ExecStart=/opt/pbxpulse-agent/.venv/bin/uvicorn pbxpulse_agent.main:app --host 0.0.0.0 --port `$`{PBXPULSE_AGENT_PORT`}
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

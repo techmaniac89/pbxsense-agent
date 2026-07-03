@@ -391,10 +391,10 @@ Recommended release asset layout:
 
 ```text
 agent/dist/
-  PBXPulseAgent-0.1.53-debian-i386.deb
-  PBXPulseAgent-0.1.53-debian-amd64.deb
-  PBXPulseAgent-0.1.53-debian-arm64.deb
-  PBXPulseAgent-0.1.53-linux-source-installer.tar.gz
+  PBXPulseAgent-0.1.54-beta-debian-i386.deb
+  PBXPulseAgent-0.1.54-beta-debian-amd64.deb
+  PBXPulseAgent-0.1.54-beta-debian-arm64.deb
+  PBXPulseAgent-0.1.54-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -405,7 +405,7 @@ systemd service, preserve `/etc/pbxpulse-agent.env`, and create the Python
 virtual environment on the target machine. The source-installer archive is for
 non-Debian Linux systems or manual installs.
 
-For a release tag such as `agent-v0.1.53-alpha`, attach the matching files from
+For a release tag such as `agent-v0.1.54-beta`, attach the matching files from
 `agent/dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 

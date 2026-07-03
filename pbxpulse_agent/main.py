@@ -386,7 +386,22 @@ def _home_payload() -> dict:
         display_name=settings.display_name,
         extension_names=settings.extension_names,
         timezone_name=settings.timezone,
+        pbx_type=settings.pbx_type,
+        pbx_host=_pbx_host(),
+        pbx_port=_pbx_port(),
     )
+
+
+def _pbx_host() -> str:
+    if settings.pbx_type == "freeswitch":
+        return settings.freeswitch_host
+    return settings.host
+
+
+def _pbx_port() -> int:
+    if settings.pbx_type == "freeswitch":
+        return settings.freeswitch_port
+    return settings.port
 
 
 def _brand_html() -> str:
