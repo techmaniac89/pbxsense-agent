@@ -1,20 +1,136 @@
 # PBXPulse Agent
 
-The Agent is the first Breeze step: a small service installed near the PBX that
-turns PBX observations into PBXPulse concepts.
+PBXPulse Agent is the local bridge between a phone system and the PBXPulse app.
+It runs near the PBX, observes PBX state through the safest available connector,
+and exposes a small PBXPulse-shaped API that the app can consume without knowing
+PBX-specific protocols.
 
-The app should talk to:
+The Agent keeps PBX integration concerns in one place. The app talks to the
+Agent; the Agent talks to Asterisk, FreeSWITCH, or a development mock connector.
+This keeps AMI, ESL, SIP details, filesystem paths, and distro-specific quirks
+out of the user-facing PBXPulse experience.
+
+## What It Does
+
+- Reads current PBX state from a supported connector.
+- Converts raw PBX observations into PBXPulse Home data, Signals, Tips, and
+  technical details.
+- Streams live Home snapshots so the app can refresh without polling the PBX
+  directly.
+- Serves pairing pages and QR payloads for connecting PBXPulse to the local
+  Agent.
+- Provides diagnostics for connector setup, especially Asterisk AMI.
+- Supports production service installs, Docker Compose installs, and local
+  development mode.
+
+The app should only talk to these Agent surfaces:
 
 - `GET /home`
 - `WS /live`
+- `GET /pair`
+- `GET /diagnostics` and connector-specific diagnostics when troubleshooting
 
-It should not talk directly to AMI, ESL, ARI, SIP, SSH, or raw logs.
+The app should not talk directly to AMI, ESL, ARI, SIP, SSH, or raw PBX logs.
 
-Current connector support:
+## Supported Connectors
 
 - Asterisk through AMI.
 - FreeSWITCH through Event Socket.
-- Mock connector for development.
+- Mock connector for local development and UI testing.
+
+GUI PBX distributions are mapped to their underlying PBX engine:
+
+- FreePBX, Issabel, and VitalPBX use the Asterisk connector.
+- FusionPBX uses the FreeSWITCH connector.
+
+## Usage Overview
+
+Most deployments should use the Linux service installer. It installs the Agent
+under `/opt/pbxpulse-agent`, creates a systemd service, prepares
+`/etc/pbxpulse-agent.env`, and helps configure local Asterisk or FreeSWITCH
+access when possible.
+
+```bash
+sudo ./scripts/install_linux.sh
+```
+
+Docker Compose is available when the PBX is already containerized or when the
+Agent should be managed as a container:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+For local development, use mock mode:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+PBXPULSE_AGENT_MODE=mock uvicorn pbxpulse_agent.main:app --host 0.0.0.0 --port 8765 --reload
+```
+
+After the Agent is running, open:
+
+```text
+http://127.0.0.1:8765/home
+```
+
+For pairing, open:
+
+```text
+http://127.0.0.1:8765/pair
+```
+
+If `PBXPULSE_AGENT_TOKEN` is configured, remote LAN pairing must include the
+token:
+
+```text
+http://<agent-host>:8765/pair?token=<PBXPULSE_AGENT_TOKEN>
+```
+
+## Configuration
+
+The Agent is configured through environment variables. The most important ones
+are:
+
+- `PBXPULSE_PBX_TYPE`: `asterisk`, `freeswitch`, or `mock`.
+- `PBXPULSE_AGENT_MODE`: connector mode; normally `ami`, `freeswitch`, or
+  `mock`.
+- `PBXPULSE_DISPLAY_NAME`: friendly name shown by the Agent.
+- `PBXPULSE_TIMEZONE`: IANA timezone used for timestamps and history.
+- `PBXPULSE_AGENT_TOKEN`: optional shared token for pairing and remote access.
+- `ASTERISK_AMI_*`: Asterisk AMI host, port, username, password, and timeout.
+- `FREESWITCH_ESL_*`: FreeSWITCH Event Socket host, port, and password.
+- `ASTERISK_CDR_CSV_PATH`: Asterisk CDR CSV path for call history.
+- `ASTERISK_VOICEMAIL_PATH`: Asterisk voicemail spool path.
+
+Use `.env.example` as the starting point for Docker and development installs.
+Linux service installs write the final environment file to:
+
+```text
+/etc/pbxpulse-agent.env
+```
+
+## Repository Layout
+
+- `pbxpulse_agent/`: FastAPI app, connector adapters, live stream, settings, and
+  PBXPulse signal generation.
+- `scripts/`: installer and helper scripts.
+- `packaging/`: package metadata and release packaging support.
+- `tests/`: automated tests for Agent behavior.
+- `dist/`: generated release artifacts; keep built packages attached to GitHub
+  Releases instead of committing new generated assets.
+
+## Documentation
+
+- `docs/INSTALL.md`: production service, Docker, and local run instructions.
+- `docs/CONFIGURATION.md`: environment variables, defaults, aliases, and tokens.
+- `docs/CONNECTORS.md`: connector contract and extension guidance.
+- `docs/TROUBLESHOOTING.md`: diagnostics, AMI/ESL failures, pairing, and history.
+- `docs/DEVELOPMENT.md`: local setup, tests, project layout, and release notes.
+- `SECURITY.md`: network boundaries, credentials, tokens, and service hardening.
 
 ## Recommended Install
 
@@ -25,8 +141,8 @@ starts with the machine, and it can auto-detect supported local PBX services.
 On the PBX host, or on a small Linux machine that can reach the PBX connector:
 
 ```bash
-cd PBXPulse
-sudo ./agent/scripts/install_linux.sh
+cd pbxpulse-agent
+sudo ./scripts/install_linux.sh
 ```
 
 The installer:
@@ -83,7 +199,7 @@ The token lives in `/etc/pbxpulse-agent.env`. The installer also creates:
 Set the PBX type explicitly when auto-detection is not enough:
 
 ```bash
-sudo PBXPULSE_PBX_TYPE=freeswitch ./agent/scripts/install_linux.sh
+sudo PBXPULSE_PBX_TYPE=freeswitch ./scripts/install_linux.sh
 ```
 
 Supported values today:
@@ -165,13 +281,13 @@ permit = 127.0.0.1/255.255.255.255
 If the Agent runs from another LAN host, install with:
 
 ```bash
-sudo ASTERISK_AMI_HOST=192.168.x.x ASTERISK_AMI_PERMIT=192.168.x.x/255.255.255.255 ./agent/scripts/install_linux.sh
+sudo ASTERISK_AMI_HOST=192.168.x.x ASTERISK_AMI_PERMIT=192.168.x.x/255.255.255.255 ./scripts/install_linux.sh
 ```
 
 If the Agent host does not have a stable IP, use the trusted LAN range instead:
 
 ```bash
-sudo ASTERISK_AMI_HOST=192.168.0.254 ASTERISK_AMI_PERMIT=192.168.0.0/255.255.255.0 ./agent/scripts/install_linux.sh
+sudo ASTERISK_AMI_HOST=192.168.0.254 ASTERISK_AMI_PERMIT=192.168.0.0/255.255.255.0 ./scripts/install_linux.sh
 ```
 
 If Asterisk is not installed directly on the same Linux host, set
@@ -226,10 +342,9 @@ Docker is the secondary deployment option. Use it when the PBX already runs in
 Compose, when you prefer container lifecycle management, or when the Agent
 should stay separate from the host Python environment.
 
-Create `agent/.env` from the example:
+Create `.env` from the example:
 
 ```bash
-cd agent
 cp .env.example .env
 ```
 
@@ -269,11 +384,11 @@ To generate a random token into `.env` before creating the container:
 python3 scripts/ensure_token.py .env
 ```
 
-If your main compose file lives one folder above `PBXPulse`, run it from that
-parent folder like this:
+If your main compose file lives one folder above `pbxpulse-agent`, run it from
+that parent folder like this:
 
 ```bash
-python3 ./PBXPulse/agent/scripts/ensure_token.py ./PBXPulse/agent/.env
+python3 ./pbxpulse-agent/scripts/ensure_token.py ./pbxpulse-agent/.env
 ```
 
 The script only fills `PBXPULSE_AGENT_TOKEN` when it is empty. It will not rotate
@@ -330,7 +445,7 @@ If that file does not appear after calls, enable/load the Asterisk CDR CSV
 backend in the Asterisk container before expecting Insights and Tips from call
 history.
 
-If `agent/docker-compose.yml` lives beside the `asterisk` folder, keep:
+If this `pbxpulse-agent` repository lives beside the `asterisk` folder, keep:
 
 ```text
 ASTERISK_LOGS_HOST_PATH=../asterisk/logs
@@ -345,15 +460,15 @@ ASTERISK_LOGS_HOST_PATH=./asterisk/logs
 ASTERISK_SPOOL_HOST_PATH=./asterisk/spool
 ```
 
-If your main compose file is one folder above `PBXPulse` and also contains the
-`asterisk` folder, use `agent/docker-compose.parent-example.yml` as the shape for
+If your main compose file is one folder above `pbxpulse-agent` and also contains
+the `asterisk` folder, use `docker-compose.parent-example.yml` as the shape for
 the PBXPulse service. In that layout the important paths are:
 
 ```yaml
 build:
-  context: ./PBXPulse/agent
+  context: ./pbxpulse-agent
 env_file:
-  - ./PBXPulse/agent/.env
+  - ./pbxpulse-agent/.env
 volumes:
   - ./asterisk/logs:/var/log/asterisk:ro
   - ./asterisk/spool:/var/spool/asterisk:ro
@@ -405,7 +520,7 @@ Releases instead of committing them.
 Recommended release asset layout:
 
 ```text
-agent/dist/
+dist/
   PBXPulseAgent-0.1.58-beta-debian-i386.deb
   PBXPulseAgent-0.1.58-beta-debian-amd64.deb
   PBXPulseAgent-0.1.58-beta-debian-arm64.deb
@@ -413,7 +528,7 @@ agent/dist/
 ```
 
 Create the Linux release packages from a Linux release host and attach the
-generated files from `agent/dist/`.
+generated files from `dist/`.
 
 The Debian packages install the Agent under `/opt/pbxpulse-agent`, create the
 systemd service, preserve `/etc/pbxpulse-agent.env`, and create the Python
@@ -421,7 +536,7 @@ virtual environment on the target machine. The source-installer archive is for
 non-Debian Linux systems or manual installs.
 
 For a release tag such as `agent-v0.1.58-beta`, attach the matching files from
-`agent/dist/`. The GitHub Release notes should include the Agent version, the
+`dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 
 ## Development Mode
@@ -429,7 +544,6 @@ supported PBX connectors, upgrade notes, and any installer changes.
 Use mock mode only for local app or Agent development:
 
 ```bash
-cd agent
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -446,7 +560,6 @@ http://127.0.0.1:8765/home
 To run against AMI without installing a service:
 
 ```bash
-cd agent
 . .venv/bin/activate
 PBXPULSE_AGENT_MODE=ami \
 ASTERISK_AMI_HOST=127.0.0.1 \
@@ -571,7 +684,7 @@ Agent v1 intentionally starts small:
 - Reads active channels with `CoreShowChannels`.
 - Reads PJSIP endpoints with `PJSIPShowEndpoints`.
 - Tries to infer extension display names from AMI endpoint fields.
-- Produces `/home` in the existing Breeze contract shape.
+- Produces `/home` in the PBXPulse app contract shape.
 - Streams periodic `home_snapshot` events over `/live`.
 - Keeps raw AMI fields inside `technical`, one layer deeper.
 

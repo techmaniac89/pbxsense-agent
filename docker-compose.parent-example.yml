@@ -1,12 +1,12 @@
 services:
   pbxpulse-agent:
     build:
-      context: ./PBXPulse/agent
+      context: ./pbxpulse-agent
     container_name: pbxpulse-agent
     restart: unless-stopped
     network_mode: host
     env_file:
-      - ./PBXPulse/agent/.env
+      - ./pbxpulse-agent/.env
     volumes:
       - pbxpulse-agent-data:/var/lib/pbxpulse-agent
       - pbxpulse-agent-logs:/var/log/pbxpulse-agent

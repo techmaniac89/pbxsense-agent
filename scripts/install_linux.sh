@@ -26,7 +26,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" /var/lib/pbxpulse-agent /var/log/pbxpulse-agent
 
-for entry in pbxpulse_agent scripts requirements.txt .env.example README.md CONNECTORS.md Dockerfile docker-compose.yml docker-compose.lan.yml docker-compose.parent-example.yml; do
+for entry in pbxpulse_agent scripts docs requirements.txt .env.example README.md SECURITY.md Dockerfile docker-compose.yml docker-compose.lan.yml docker-compose.parent-example.yml; do
   if [ -e "$SOURCE_DIR/$entry" ]; then
     rm -rf "$INSTALL_DIR/$entry"
     cp -R "$SOURCE_DIR/$entry" "$INSTALL_DIR/$entry"
