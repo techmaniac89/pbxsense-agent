@@ -32,7 +32,7 @@ class VoicemailMessage:
 
 def read_recent_cdr_calls(path: str, *, limit: int = 30) -> list[CdrCall]:
     cdr_path = Path(path)
-    if not cdr_path.is_file():
+    if not _is_file(cdr_path):
         return []
 
     rows: list[list[str]] = []
@@ -104,7 +104,7 @@ def _looks_like_ivr_reached(call: CdrCall) -> bool:
 
 def read_recent_voicemails(path: str, *, limit: int = 20) -> list[VoicemailMessage]:
     voicemail_root = Path(path)
-    if not voicemail_root.is_dir():
+    if not _is_dir(voicemail_root):
         return []
 
     messages: list[VoicemailMessage] = []
@@ -134,18 +134,22 @@ def read_recent_voicemails(path: str, *, limit: int = 20) -> list[VoicemailMessa
 def history_diagnostics(cdr_csv_path: str, voicemail_path: str) -> dict[str, object]:
     cdr_path = Path(cdr_csv_path)
     voicemail_root = Path(voicemail_path)
-    cdr_exists = cdr_path.is_file()
-    voicemail_exists = voicemail_root.is_dir()
+    cdr_exists = _is_file(cdr_path)
+    voicemail_exists = _is_dir(voicemail_root)
+    cdr_access_error = _access_error(cdr_path, "file")
+    voicemail_access_error = _access_error(voicemail_root, "dir")
 
     return {
         "cdrCsvPath": str(cdr_path),
         "cdrCsvExists": cdr_exists,
         "cdrCsvReadable": _is_readable_file(cdr_path),
+        "cdrCsvAccessError": cdr_access_error,
         "cdrCsvSizeBytes": _file_size(cdr_path) if cdr_exists else 0,
         "cdrRecentRowsReadable": len(read_recent_cdr_calls(str(cdr_path), limit=5)),
         "voicemailPath": str(voicemail_root),
         "voicemailPathExists": voicemail_exists,
         "voicemailPathReadable": _is_readable_dir(voicemail_root),
+        "voicemailPathAccessError": voicemail_access_error,
         "voicemailMessagesReadable": len(
             read_recent_voicemails(str(voicemail_root), limit=5)
         ),
@@ -172,6 +176,31 @@ def _is_readable_file(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _access_error(path: Path, kind: str) -> str:
+    try:
+        if kind == "dir":
+            path.is_dir()
+        else:
+            path.is_file()
+    except OSError as exc:
+        return str(exc)
+    return ""
 
 
 def _is_readable_dir(path: Path) -> bool:

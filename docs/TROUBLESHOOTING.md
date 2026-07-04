@@ -91,7 +91,8 @@ If `/pair` opens locally but not from another device:
 
 - Confirm the other device can reach `http://<agent-host>:8765/`.
 - Confirm host firewall rules allow TCP port `8765`.
-- Include the token for remote LAN pairing:
+- Private LAN/VPN client IPs should not need the token in the URL for Agent
+  HTTP or `/live` access. The pairing payload still includes the token:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXPULSE_AGENT_TOKEN>
@@ -117,6 +118,9 @@ If live calls work but history, tips, or voicemail evidence is missing:
 - Confirm `ASTERISK_CDR_CSV_PATH` points to the CDR CSV visible inside the Agent runtime.
 - Confirm `ASTERISK_VOICEMAIL_PATH` points to the voicemail spool visible inside the Agent runtime.
 - For Docker, confirm the host log and spool folders are mounted read-only.
+- For Linux service installs, confirm the `pbxpulse` service user can traverse
+  each parent folder and read the CDR/voicemail files. Home directories are
+  often private, so paths under `/home/...` may need ACLs or a shared mount.
 
 Common CDR paths:
 
@@ -124,6 +128,10 @@ Common CDR paths:
 /var/log/asterisk/cdr-csv/Master.csv
 /var/log/asterisk/cdr-custom/Master.csv
 ```
+
+If journalctl shows `Permission denied`, either move/mount the Asterisk logs
+under a service-readable path or grant read/traverse access. Also check for
+typos: Asterisk commonly uses `cdr-custom`, not `csv-custom`.
 
 ## Docker Network Problems
 

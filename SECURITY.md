@@ -18,6 +18,10 @@ internet.
 
 Set `PBXPULSE_AGENT_TOKEN` for production and LAN deployments.
 
+When a token is set, requests from localhost, private LAN, or VPN client IPs are
+trusted for Agent HTTP pages, JSON endpoints, and `/live`; browser HTML pages
+also get an HTTP-only cookie. Non-private clients still need the token.
+
 Generate a token:
 
 ```bash

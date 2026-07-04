@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from pbxpulse_agent.ami import (
@@ -21,6 +22,7 @@ from pbxpulse_agent.history import (
     read_recent_voicemails,
 )
 from pbxpulse_agent.live import home_live_events
+from pbxpulse_agent.network import is_private_or_loopback_host
 from pbxpulse_agent.pulse import AmiChannel, AmiEndpoint, AmiSnapshot, build_home_payload
 from pbxpulse_agent.settings import AgentSettings, _normalize_pbx_type
 
@@ -50,12 +52,20 @@ class PulseMappingTest(unittest.TestCase):
             voicemail_path="/tmp/voicemail",
             timezone="UTC",
             token="",
-            live_interval_seconds=2,
         )
 
         connector = connector_for_settings(settings)
 
         self.assertIsInstance(connector, FreeSwitchClient)
+
+    def test_private_or_loopback_host_detection_for_lan_web_unlock(self) -> None:
+        self.assertTrue(is_private_or_loopback_host("127.0.0.1"))
+        self.assertTrue(is_private_or_loopback_host("192.168.1.20"))
+        self.assertTrue(is_private_or_loopback_host("10.0.0.8"))
+        self.assertTrue(is_private_or_loopback_host("172.16.4.5"))
+        self.assertTrue(is_private_or_loopback_host("localhost"))
+        self.assertFalse(is_private_or_loopback_host("8.8.8.8"))
+        self.assertFalse(is_private_or_loopback_host("example.com"))
 
     def test_freeswitch_channel_row_maps_to_pbxpulse_snapshot_channel(self) -> None:
         channel = _channel_from_row(
@@ -903,6 +913,23 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(diagnostics["cdrRecentRowsReadable"], 1)
         self.assertTrue(diagnostics["voicemailPathExists"])
         self.assertEqual(diagnostics["voicemailMessagesReadable"], 1)
+
+    def test_history_readers_tolerate_permission_denied_paths(self) -> None:
+        with patch.object(Path, "is_file", side_effect=PermissionError("denied")):
+            self.assertEqual(read_recent_cdr_calls("/private/Master.csv"), [])
+            diagnostics = history_diagnostics("/private/Master.csv", "/tmp/voicemail")
+
+        self.assertFalse(diagnostics["cdrCsvExists"])
+        self.assertFalse(diagnostics["cdrCsvReadable"])
+        self.assertIn("denied", diagnostics["cdrCsvAccessError"])
+
+        with patch.object(Path, "is_dir", side_effect=PermissionError("denied")):
+            self.assertEqual(read_recent_voicemails("/private/voicemail"), [])
+            diagnostics = history_diagnostics("/tmp/Master.csv", "/private/voicemail")
+
+        self.assertFalse(diagnostics["voicemailPathExists"])
+        self.assertFalse(diagnostics["voicemailPathReadable"])
+        self.assertIn("denied", diagnostics["voicemailPathAccessError"])
 
     def test_pulse_engine_adds_tip_for_repeated_missed_calls(self) -> None:
         calls = [

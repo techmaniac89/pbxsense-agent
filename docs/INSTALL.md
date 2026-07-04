@@ -13,12 +13,23 @@ the PBX connector.
 
 ```bash
 cd pbxpulse-agent
-sudo ./scripts/install_linux.sh
+sudo sh ./scripts/install_linux.sh
 ```
+
+If the folder was copied from Windows to Linux, the scripts may arrive as
+`664`. Running them with `sh` works without needing the executable bit. Release
+archives preserve executable modes.
 
 The installer:
 
 - Installs Python runtime packages when `apt-get` is available.
+- Auto-detects local Asterisk or FreeSWITCH files and commands when possible.
+- Lets you confirm `asterisk`, `freeswitch`, or `mock` mode interactively.
+- Prompts for timezone, Agent port, and connector timeout.
+- Prompts for AMI or ESL credentials and keeps existing values on reinstall.
+- Suggests Asterisk CDR CSV and voicemail paths from common local locations.
+- Reuses a readable Asterisk `manager.conf` user secret or FreeSWITCH Event
+  Socket password as a default when it can find one.
 - Creates `/opt/pbxpulse-agent`.
 - Creates a private `pbxpulse` service user.
 - Creates `/etc/pbxpulse-agent.env` from `.env.example` when missing.
@@ -26,7 +37,11 @@ The installer:
 - Creates and starts `pbxpulse-agent.service`.
 - Runs Uvicorn on `0.0.0.0:8765` by default.
 
-After install, edit the environment file for the target PBX:
+The installer writes Agent settings only. It does not edit Asterisk or
+FreeSWITCH server configuration, so AMI/ESL must still be enabled and permitted
+on the PBX side.
+
+After install, review the environment file for the target PBX:
 
 ```bash
 sudo nano /etc/pbxpulse-agent.env
@@ -56,6 +71,29 @@ The token lives in:
 
 ```text
 /etc/pbxpulse-agent.env
+```
+
+## Linux Service Uninstall
+
+Remove the systemd service and installed application files:
+
+```bash
+sudo sh ./scripts/uninstall_linux.sh
+```
+
+By default, the uninstaller removes `/etc/pbxpulse-agent.env` so future
+installer runs start with fresh choices. It preserves:
+
+```text
+/var/lib/pbxpulse-agent
+/var/log/pbxpulse-agent
+```
+
+To remove the service, installed files, local data, logs, and the `pbxpulse`
+service user:
+
+```bash
+sudo sh ./scripts/uninstall_linux.sh --purge
 ```
 
 ## Asterisk Install Notes
@@ -89,6 +127,10 @@ If the Agent runs on another LAN host, set `ASTERISK_AMI_HOST` to the PBX IP and
 permit only the Agent host or a trusted private subnet. Never expose AMI to the
 internet.
 
+When `/etc/asterisk/manager.conf` is readable, the installer can use the first
+manager section with a `secret` as the default AMI username/password prompt. It
+does not create, rotate, or edit AMI users.
+
 GUI distributions such as FreePBX, Issabel, and VitalPBX use the Asterisk
 connector.
 
@@ -110,6 +152,9 @@ The standard password location is:
 ```text
 /etc/freeswitch/autoload_configs/event_socket.conf.xml
 ```
+
+When that file is readable, the installer can use its password value as the
+default ESL password prompt. It does not edit FreeSWITCH configuration.
 
 FusionPBX uses the FreeSWITCH connector.
 
@@ -163,6 +208,27 @@ folder, use:
 ```text
 ASTERISK_LOGS_HOST_PATH=./asterisk/logs
 ASTERISK_SPOOL_HOST_PATH=./asterisk/spool
+```
+
+For an Agent container, the Agent should still use the container-visible paths:
+
+```text
+ASTERISK_CDR_CSV_PATH=/var/log/asterisk/cdr-csv/Master.csv
+ASTERISK_VOICEMAIL_PATH=/var/spool/asterisk/voicemail
+```
+
+If your Asterisk distribution writes custom CDR CSV, use:
+
+```text
+ASTERISK_CDR_CSV_PATH=/var/log/asterisk/cdr-custom/Master.csv
+```
+
+For a normal host-installed Agent watching an Asterisk container, use the Docker
+host bind-mount paths instead, such as:
+
+```text
+ASTERISK_CDR_CSV_PATH=/path/to/asterisk/logs/cdr-csv/Master.csv
+ASTERISK_VOICEMAIL_PATH=/path/to/asterisk/spool/voicemail
 ```
 
 ## Parent Compose Layout

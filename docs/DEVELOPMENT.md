@@ -40,7 +40,7 @@ ASTERISK_AMI_PASSWORD=your-secret \
 The current test suite uses Python `unittest`:
 
 ```bash
-python -m unittest
+python -m unittest discover -s tests
 ```
 
 Run a single test module:
@@ -103,9 +103,6 @@ Expected release asset names look like:
 
 ```text
 dist/
-  PBXPulseAgent-<version>-debian-i386.deb
-  PBXPulseAgent-<version>-debian-amd64.deb
-  PBXPulseAgent-<version>-debian-arm64.deb
   PBXPulseAgent-<version>-linux-source-installer.tar.gz
 ```
 

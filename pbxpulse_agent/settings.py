@@ -22,7 +22,6 @@ class AgentSettings:
     voicemail_path: str
     timezone: str
     token: str
-    live_interval_seconds: float
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
@@ -69,7 +68,6 @@ class AgentSettings:
             ),
             timezone=os.getenv("PBXPULSE_TIMEZONE", os.getenv("TZ", "")).strip(),
             token=os.getenv("PBXPULSE_AGENT_TOKEN", "").strip(),
-            live_interval_seconds=float(os.getenv("PBXPULSE_LIVE_INTERVAL_SECONDS", "1")),
         )
 
 

@@ -47,11 +47,12 @@ GUI PBX distributions are mapped to their underlying PBX engine:
 
 Most deployments should use the Linux service installer. It installs the Agent
 under `/opt/pbxpulse-agent`, creates a systemd service, prepares
-`/etc/pbxpulse-agent.env`, and helps configure local Asterisk or FreeSWITCH
-access when possible.
+`/etc/pbxpulse-agent.env`, auto-detects the likely PBX connector, prompts for
+connector settings, and generates a local pairing token when one is not already
+configured.
 
 ```bash
-sudo ./scripts/install_linux.sh
+sudo sh ./scripts/install_linux.sh
 ```
 
 Docker Compose is available when the PBX is already containerized or when the
@@ -83,8 +84,9 @@ For pairing, open:
 http://127.0.0.1:8765/pair
 ```
 
-If `PBXPULSE_AGENT_TOKEN` is configured, remote LAN pairing must include the
-token:
+If `PBXPULSE_AGENT_TOKEN` is configured, LAN browser visits can open the Agent
+page directly. The pairing page still embeds the token in the `pbxpulse://`
+payload for the app:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXPULSE_AGENT_TOKEN>
@@ -136,38 +138,44 @@ Linux service installs write the final environment file to:
 
 The main installation path is a small Linux service installed near the PBX.
 This is the simplest production shape: no Docker knowledge required, the Agent
-starts with the machine, and it can auto-detect supported local PBX services.
+starts with the machine, and the installer helps fill the root-owned
+environment file.
 
 On the PBX host, or on a small Linux machine that can reach the PBX connector:
 
 ```bash
 cd pbxpulse-agent
-sudo ./scripts/install_linux.sh
+sudo sh ./scripts/install_linux.sh
 ```
+
+If the folder was copied from Windows to Linux, the scripts may arrive as
+`664`. Running them with `sh` works without needing the executable bit. Release
+archives preserve executable modes.
 
 The installer:
 
 - Installs Python runtime packages when `apt-get` is available.
-- Auto-detects Asterisk or FreeSWITCH when possible.
-- Lets you choose the PBX connector manually when detection is not enough.
-- Prompts for connector credentials when they are not already configured.
-- Prompts for the Agent timezone.
-- Shows CDR and voicemail path previews so you can adjust them before install.
+- Auto-detects local Asterisk or FreeSWITCH files and commands when possible.
+- Lets you confirm `asterisk`, `freeswitch`, or `mock` mode interactively.
+- Prompts for timezone, Agent port, and connector timeout.
+- Prompts for AMI or ESL credentials and preserves existing values on reinstall.
+- Suggests Asterisk CDR CSV and voicemail paths from common local locations.
+- Reuses a readable Asterisk `manager.conf` user secret or FreeSWITCH Event
+  Socket password as a default when it can find one.
 - Creates `/opt/pbxpulse-agent`.
 - Creates a private `pbxpulse` service user.
 - Creates `/etc/pbxpulse-agent.env`.
 - Generates a local pairing token when one is not provided.
-- Backs up `/etc/asterisk/manager.conf`.
-- Enables AMI when it is disabled.
-- Reuses an existing AMI user when one is already configured.
-- Creates a dedicated `pbxpulse` AMI user when one is missing.
-- Generates a strong AMI password for that user.
-- Restricts the AMI user to localhost by default.
-- Reloads Asterisk manager when the local `asterisk` CLI is available.
-- Verifies AMI login before starting the Agent.
-- Verifies FreeSWITCH Event Socket login when FreeSWITCH is detected.
-- Writes a pairing QR SVG to `/var/lib/pbxpulse-agent/pairing.svg`.
+- Creates a Python virtual environment and installs `requirements.txt`.
+- Copies the Agent code, scripts, docs, compose examples, and support files.
 - Creates and starts `pbxpulse-agent.service`.
+
+The installer writes Agent settings only. It does not edit Asterisk or
+FreeSWITCH server configuration, so AMI/ESL must still be enabled and permitted
+on the PBX side.
+
+After install, review `/etc/pbxpulse-agent.env`. If you change connector
+credentials, timezone, or file paths, restart the service.
 
 After install, useful commands are:
 
@@ -175,6 +183,16 @@ After install, useful commands are:
 systemctl status pbxpulse-agent
 journalctl -u pbxpulse-agent -f
 ```
+
+To uninstall the Linux service and installed app files:
+
+```bash
+sudo sh ./scripts/uninstall_linux.sh
+```
+
+This also removes `/etc/pbxpulse-agent.env`, so the installer does not reuse
+saved choices on the next install. Use `--purge` to also remove local data,
+logs, and the `pbxpulse` service user.
 
 Open the Agent page:
 
@@ -188,18 +206,15 @@ To pair the app, open:
 http://<agent-host>:8765/pair?token=<PBXPULSE_AGENT_TOKEN>
 ```
 
-The token lives in `/etc/pbxpulse-agent.env`. The installer also creates:
-
-```text
-/var/lib/pbxpulse-agent/pairing.svg
-```
+The token lives in `/etc/pbxpulse-agent.env`.
 
 ### Installer Defaults
 
-Set the PBX type explicitly when auto-detection is not enough:
+Set the PBX type before install if you want to skip auto-detection and force a
+connector mode:
 
 ```bash
-sudo PBXPULSE_PBX_TYPE=freeswitch ./scripts/install_linux.sh
+sudo PBXPULSE_PBX_TYPE=freeswitch sh ./scripts/install_linux.sh
 ```
 
 Supported values today:
@@ -246,13 +261,10 @@ Prefer a single Agent host permit when the Agent has a stable IP. Use a subnet
 permit only when the Agent IP can move or the deployment is managed inside a
 trusted private LAN/VPN. Never expose AMI to the internet.
 
-The installer prepares a dedicated read-only AMI user only when it cannot find
-usable AMI credentials. If an AMI user already exists in `manager.conf`, the
-installer reads its `secret` and continues from the connection verification
-step. It does not rotate an existing AMI password, and the existing user does
-not need to be named `pbxpulse`.
+The installer does not edit Asterisk configuration. Prepare AMI in Asterisk,
+then put the connection values in `/etc/pbxpulse-agent.env`.
 
-Do not expose AMI to the internet. By default the installer writes:
+Do not expose AMI to the internet. A typical Agent environment looks like:
 
 ```text
 PBXPULSE_AGENT_MODE=ami
@@ -260,42 +272,36 @@ PBXPULSE_DISPLAY_NAME=Asterisk
 ASTERISK_AMI_HOST=127.0.0.1
 ASTERISK_AMI_PORT=5038
 ASTERISK_AMI_USERNAME=pbxpulse
-ASTERISK_AMI_PASSWORD=<generated-or-existing-secret>
+ASTERISK_AMI_PASSWORD=<secret>
 ASTERISK_CDR_CSV_PATH=/var/log/asterisk/cdr-csv/Master.csv
 ASTERISK_VOICEMAIL_PATH=/var/spool/asterisk/voicemail
 ```
 
-It also writes or updates this AMI section:
+Create or verify an AMI section like this in Asterisk:
 
 ```ini
 [general]
 enabled = yes
 
 [pbxpulse]
-secret = <generated-password>
+secret = <secret>
 read = system,call,reporting,command
 write =
 permit = 127.0.0.1/255.255.255.255
 ```
 
-If the Agent runs from another LAN host, install with:
+If the Agent runs from another LAN host, set the AMI host in
+`/etc/pbxpulse-agent.env`:
 
-```bash
-sudo ASTERISK_AMI_HOST=192.168.x.x ASTERISK_AMI_PERMIT=192.168.x.x/255.255.255.255 ./scripts/install_linux.sh
+```text
+ASTERISK_AMI_HOST=192.168.x.x
 ```
 
-If the Agent host does not have a stable IP, use the trusted LAN range instead:
-
-```bash
-sudo ASTERISK_AMI_HOST=192.168.0.254 ASTERISK_AMI_PERMIT=192.168.0.0/255.255.255.0 ./scripts/install_linux.sh
-```
-
-If Asterisk is not installed directly on the same Linux host, set
-`PBXPULSE_CONFIGURE_ASTERISK_AMI=0` and prepare AMI in that Asterisk environment.
+Then configure Asterisk `permit` for that Agent host or trusted LAN/VPN range.
 
 ### FreeSWITCH Defaults
 
-For FreeSWITCH, the installer uses Event Socket:
+For FreeSWITCH, configure the Agent to use Event Socket:
 
 ```text
 PBXPULSE_PBX_TYPE=freeswitch
@@ -304,7 +310,8 @@ FREESWITCH_ESL_PORT=8021
 FREESWITCH_ESL_PASSWORD=<event_socket password>
 ```
 
-It tries to read the password from:
+Read the password from your FreeSWITCH configuration and place it in
+`/etc/pbxpulse-agent.env`. The standard location is:
 
 ```text
 /etc/freeswitch/autoload_configs/event_socket.conf.xml
@@ -499,11 +506,13 @@ To pair the app, open the Agent pairing page:
 http://127.0.0.1:8765/pair
 ```
 
-If `PBXPULSE_AGENT_TOKEN` is set, local browser visits to `localhost` or
-`127.0.0.1` unlock with an HTTP-only browser cookie. The real Agent token is not
-added to local page links.
+If `PBXPULSE_AGENT_TOKEN` is set, requests from localhost, private LAN, or VPN
+client IPs are treated as trusted for Agent HTTP pages, JSON endpoints, and
+`/live`. Browser HTML pages also receive an HTTP-only cookie, and the real Agent
+token is not added to normal page links.
 
-Remote LAN access still needs the token:
+The pairing page still embeds the token in the QR payload so the app can store
+it for non-LAN or stricter future access:
 
 ```text
 http://<agent-host>:8765/pair?token=your-token
@@ -521,21 +530,18 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXPulseAgent-0.1.58-beta-debian-i386.deb
-  PBXPulseAgent-0.1.58-beta-debian-amd64.deb
-  PBXPulseAgent-0.1.58-beta-debian-arm64.deb
-  PBXPulseAgent-0.1.58-beta-linux-source-installer.tar.gz
+  PBXPulseAgent-0.2.0-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
 generated files from `dist/`.
 
-The Debian packages install the Agent under `/opt/pbxpulse-agent`, create the
-systemd service, preserve `/etc/pbxpulse-agent.env`, and create the Python
-virtual environment on the target machine. The source-installer archive is for
-non-Debian Linux systems or manual installs.
+The source-installer archive includes the Agent code, docs, install script, and
+uninstall script. It installs under `/opt/pbxpulse-agent`, creates the systemd
+service, writes `/etc/pbxpulse-agent.env`, and creates the Python virtual
+environment on the target machine.
 
-For a release tag such as `agent-v0.1.58-beta`, attach the matching files from
+For a release tag such as `agent-v0.2.0-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 

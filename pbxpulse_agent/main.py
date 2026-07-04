@@ -15,6 +15,7 @@ from .connectors import connector_for_settings
 from .history import history_diagnostics, read_recent_cdr_calls, read_recent_voicemails
 from .live import home_live_events
 from .mock import mock_snapshot
+from .network import is_private_or_loopback_host
 from .pulse import build_home_payload
 from .settings import AgentSettings
 from .version import AGENT_VERSION
@@ -23,6 +24,7 @@ settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
 app = FastAPI(title="PBXPulse Agent", version=AGENT_VERSION)
 LOCAL_WEB_COOKIE = "pbxpulse_agent_local_web"
+LIVE_INTERVAL_SECONDS = 1
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,22 +98,26 @@ def _page(*, title: str, body: str) -> str:
         <title>{escape(title)}</title>
         <style>
           :root {{
-            color-scheme: light;
-            --cream: #fff7ea;
-            --ink: #2f241a;
-            --muted: #806f5c;
-            --line: #eadac2;
-            --sage: #6e8f69;
-            --sage-dark: #4f7549;
-            --coral: #e98573;
+            color-scheme: dark;
+            --bg: #151310;
+            --panel: #211d18;
+            --panel-soft: #2a241e;
+            --ink: #f8efe0;
+            --muted: #c1ad93;
+            --line: #493c2f;
+            --sage: #8eb486;
+            --sage-dark: #263b2b;
+            --coral: #f09a83;
+            --gold: #d8ae62;
           }}
           * {{ box-sizing: border-box; }}
           body {{
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background:
-              radial-gradient(circle at top left, rgba(232, 184, 95, 0.20), transparent 32rem),
-              linear-gradient(180deg, #fffaf1 0%, var(--cream) 100%);
+              radial-gradient(circle at top left, rgba(216, 174, 98, 0.16), transparent 30rem),
+              radial-gradient(circle at bottom right, rgba(142, 180, 134, 0.12), transparent 34rem),
+              linear-gradient(180deg, #18140f 0%, var(--bg) 100%);
             color: var(--ink);
           }}
           main {{
@@ -123,11 +129,11 @@ def _page(*, title: str, body: str) -> str:
             align-items: center;
           }}
           .hero-card, .json-card {{
-            background: rgba(255, 252, 246, 0.92);
+            background: rgba(33, 29, 24, 0.94);
             border: 1px solid var(--line);
             border-radius: 26px;
             padding: 28px;
-            box-shadow: 0 12px 36px rgba(47, 36, 26, 0.10);
+            box-shadow: 0 18px 46px rgba(0, 0, 0, 0.34);
           }}
           .brand {{
             display: flex;
@@ -141,9 +147,9 @@ def _page(*, title: str, body: str) -> str:
             display: grid;
             place-items: center;
             border-radius: 18px;
-            background: #f4ead9;
+            background: #30281f;
             color: var(--coral);
-            box-shadow: inset 0 0 0 1px rgba(110, 143, 105, 0.18);
+            box-shadow: inset 0 0 0 1px rgba(216, 174, 98, 0.22);
           }}
           .mark svg {{ width: 30px; height: 30px; }}
           h1 {{ margin: 0; font-size: clamp(30px, 6vw, 44px); letter-spacing: 0; }}
@@ -157,14 +163,14 @@ def _page(*, title: str, body: str) -> str:
             border-radius: 20px;
             font-weight: 750;
           }}
-          .status.ok {{ background: #e5f0dc; color: #4f7549; }}
-          .status.attention {{ background: #ffe1d8; color: #aa4b3d; }}
+          .status.ok {{ background: rgba(142, 180, 134, 0.17); color: #b7d6af; }}
+          .status.attention {{ background: rgba(240, 154, 131, 0.17); color: #ffb29f; }}
           .dot {{
             width: 14px;
             height: 14px;
             border-radius: 50%;
             background: currentColor;
-            box-shadow: 0 0 0 7px rgba(110, 143, 105, 0.16);
+            box-shadow: 0 0 0 7px rgba(142, 180, 134, 0.14);
             flex: 0 0 auto;
           }}
           .status small {{
@@ -185,27 +191,29 @@ def _page(*, title: str, body: str) -> str:
             min-height: 42px;
             padding: 0 16px;
             border-radius: 999px;
-            background: #f4ead9;
-            color: var(--sage-dark);
+            background: #30281f;
+            color: #d9c8ad;
             text-decoration: none;
             font-weight: 800;
+            border: 1px solid var(--line);
           }}
           .button.primary {{
             background: var(--sage);
-            color: #fffaf1;
+            color: #11170f;
+            border-color: transparent;
           }}
           .panel {{
             margin-top: 24px;
             padding: 18px;
             border: 1px solid var(--line);
             border-radius: 20px;
-            background: #fff8ee;
+            background: var(--panel-soft);
           }}
           .pairing-code {{
             margin-top: 18px;
             padding: 14px;
             border-radius: 16px;
-            background: #fff8ee;
+            background: #191612;
             border: 1px solid var(--line);
             color: var(--muted);
             overflow-wrap: anywhere;
@@ -217,8 +225,8 @@ def _page(*, title: str, body: str) -> str:
             margin-top: 18px;
             padding: 12px;
             border-radius: 20px;
-            background: #ffffff;
-            border: 1px solid var(--line);
+            background: #fffaf1;
+            border: 1px solid #6a5742;
           }}
           .qr svg {{ width: 100%; height: auto; display: block; }}
           .section-heading {{
@@ -239,7 +247,7 @@ def _page(*, title: str, body: str) -> str:
             grid-template-columns: minmax(86px, 0.45fr) 1fr;
             gap: 16px;
             padding: 10px 0;
-            border-bottom: 1px solid #f0e3cf;
+            border-bottom: 1px solid #3d3228;
           }}
           .diagnostics div:last-child {{ border-bottom: 0; }}
           dt {{ color: var(--muted); }}
@@ -253,8 +261,8 @@ def _page(*, title: str, body: str) -> str:
             margin: 18px 0 0;
             padding: 18px;
             border-radius: 18px;
-            background: #201711;
-            color: #fff7ea;
+            background: #100d0a;
+            color: #f8efe0;
             overflow: auto;
             line-height: 1.55;
             font-size: 13px;
@@ -362,7 +370,7 @@ async def live(websocket: WebSocket) -> None:
     )
     await websocket.send_json({"type": "home_snapshot", "data": previous_payload})
     while True:
-        await asyncio.sleep(settings.live_interval_seconds)
+        await asyncio.sleep(LIVE_INTERVAL_SECONDS)
         current_payload = await asyncio.to_thread(
             _home_payload,
             moment_hours=moment_hours,
@@ -501,7 +509,7 @@ def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
         return None
     if _has_valid_local_web_cookie(request):
         return None
-    if not _wants_html(request) or not _is_localhost_web_request(request):
+    if not _wants_html(request) or not _is_trusted_request(request):
         return None
     response = RedirectResponse(str(request.url))
     response.set_cookie(
@@ -514,17 +522,13 @@ def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
     return response
 
 
-def _is_localhost_web_request(request: Request) -> bool:
-    hostname = (request.url.hostname or "").lower()
+def _is_trusted_request(request: Request) -> bool:
     client_host = request.client.host if request.client else ""
-    return hostname in {"localhost", "127.0.0.1", "::1"} and client_host in {
-        "127.0.0.1",
-        "::1",
-    }
+    return is_private_or_loopback_host(client_host)
 
 
 def _has_valid_local_web_cookie(request: Request) -> bool:
-    if not settings.token or not _is_localhost_web_request(request):
+    if not settings.token or not _is_trusted_request(request):
         return False
     cookie_value = request.cookies.get(LOCAL_WEB_COOKIE, "")
     return hmac.compare_digest(cookie_value, _local_web_cookie_value())
@@ -545,6 +549,10 @@ def _request_token(request: Request) -> str:
     query_token = request.query_params.get("token", "").strip()
     if query_token:
         return query_token
+    # The Agent is intended to live on a trusted LAN/VPN beside the PBX.
+    # Private clients can inspect local Agent endpoints without token URLs.
+    if _is_trusted_request(request):
+        return settings.token
     if _has_valid_local_web_cookie(request):
         return settings.token
     return request.headers.get("x-pbxpulse-token", "").strip()
@@ -552,6 +560,10 @@ def _request_token(request: Request) -> str:
 
 def _websocket_authorized(websocket: WebSocket) -> bool:
     if not settings.token:
+        return True
+    client_host = websocket.client.host if websocket.client else ""
+    # Match HTTP behavior for local app clients that do not put tokens on /live.
+    if is_private_or_loopback_host(client_host):
         return True
     authorization = websocket.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):

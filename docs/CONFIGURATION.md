@@ -19,7 +19,6 @@ Use `.env.example` as the starting point.
 | `PBXPULSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
 | `PBXPULSE_AGENT_TOKEN` | empty | Optional shared token for pairing and remote access. |
 | `PBXPULSE_CONNECT_TIMEOUT` | `3` | Connector TCP/login timeout in seconds. |
-| `PBXPULSE_LIVE_INTERVAL_SECONDS` | `1` | WebSocket refresh cadence for `/live`. |
 | `PBXPULSE_AGENT_PORT` | `8765` | Service port used by the Linux systemd installer. |
 | `PBXPULSE_EXTENSION_NAMES` | empty | Optional friendly-name map such as `101=Reception,120=Support`. |
 
@@ -85,8 +84,10 @@ If `PBXPULSE_AGENT_TOKEN` is empty, local testing is simpler but remote access i
 not protected by the Agent token. Production and LAN deployments should set a
 long random token.
 
-Local browser visits to `localhost` or `127.0.0.1` can unlock pairing with a
-browser cookie. Remote LAN pairing should include the token explicitly:
+Requests from localhost, private LAN, or VPN client IPs are treated as trusted
+for Agent HTTP pages, JSON endpoints, and `/live`. Browser HTML pages also get
+an HTTP-only cookie. The pairing page still embeds the token in the QR payload
+so the app can store it for non-LAN or stricter future access:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXPULSE_AGENT_TOKEN>
