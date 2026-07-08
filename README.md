@@ -696,4 +696,4 @@ Agent v1 intentionally starts small:
 - Keeps raw AMI fields inside `technical`, one layer deeper.
 
 This is enough to test real data while preserving the PBXPulse philosophy:
-Signals first, raw Asterisk second.
+Signals first, raw PBX second.
