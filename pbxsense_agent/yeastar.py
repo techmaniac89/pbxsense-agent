@@ -106,6 +106,12 @@ class YeastarClient:
                     extension=number,
                     device_state="Reachable" if online else "Unavailable",
                     label=_string(row, "caller_id_name", "name"),
+                    presence=_string(
+                        row,
+                        "presence_status",
+                        "presence",
+                        "presence_state",
+                    ),
                 )
             )
         return endpoints

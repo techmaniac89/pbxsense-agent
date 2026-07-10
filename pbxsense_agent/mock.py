@@ -25,8 +25,18 @@ def mock_snapshot() -> AmiSnapshot:
                 active_channels=1,
                 label="Reception",
             ),
-            AmiEndpoint(extension="120", device_state="Reachable", label="Support"),
-            AmiEndpoint(extension="130", device_state="Reachable", label="Sales"),
+            AmiEndpoint(
+                extension="120",
+                device_state="Reachable",
+                label="Support",
+                presence="Away",
+            ),
+            AmiEndpoint(
+                extension="130",
+                device_state="Reachable",
+                label="Sales",
+                presence="Do Not Disturb",
+            ),
             AmiEndpoint(extension="200", device_state="Unavailable", label="Warehouse"),
             AmiEndpoint(
                 extension="sip-provider",

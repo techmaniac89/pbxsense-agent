@@ -32,6 +32,9 @@ class AmiEndpoint:
     label: str = ""
     role: str = "extension"
     number: str = ""
+    # A PBX-provided presence state, such as DND or Away. This is kept apart
+    # from device_state: a phone can be registered while its owner is away.
+    presence: str = ""
 
 
 @dataclass(frozen=True)
@@ -155,17 +158,24 @@ def _build_people(
             continue
 
         name = _extension_name(endpoint.extension, extension_names, endpoint.label)
-        if endpoint.extension in talking_extensions or endpoint.active_channels > 0:
+        presence, presence_label = _person_presence(
+            endpoint,
+            is_talking=(
+                endpoint.extension in talking_extensions
+                or endpoint.active_channels > 0
+            ),
+        )
+        if presence == "on_call":
             status = "talking"
             status_text = "On a call"
             detail = "Active now"
-        elif _endpoint_unavailable(endpoint):
+        elif presence == "offline":
             status = "unavailable"
             status_text = "Unavailable"
             detail = endpoint.device_state or "Not reachable"
         else:
             status = "online"
-            status_text = "Available"
+            status_text = presence_label
             detail = endpoint.device_state or "Reachable"
 
         people.append(
@@ -175,10 +185,60 @@ def _build_people(
                 "status": status,
                 "statusText": status_text,
                 "detail": detail,
+                "presence": {
+                    "state": presence,
+                    "label": presence_label,
+                },
             }
         )
 
     return people
+
+
+def _person_presence(
+    endpoint: AmiEndpoint,
+    *,
+    is_talking: bool,
+) -> tuple[str, str]:
+    """Return a stable person-presence state from PBX presence and device data.
+
+    Calls take priority over a stale user-set presence state.  The returned
+    state is deliberately connector-neutral so clients do not need to know
+    whether the source was AMI, ESL, or a vendor API.
+    """
+    if is_talking:
+        return "on_call", "On a call"
+    device_presence = _normalized_presence(endpoint.device_state)
+    # Do not let a stale user-set state conceal a phone that is unreachable,
+    # ringing, or otherwise actively busy at the PBX right now.
+    if device_presence and device_presence[0] in {"offline", "ringing", "busy"}:
+        return device_presence
+    return _normalized_presence(endpoint.presence) or device_presence or ("unknown", "Unknown")
+
+
+def _normalized_presence(raw: str) -> tuple[str, str] | None:
+    value = raw.strip()
+    if not value:
+        return None
+    normalized = value.lower().replace("_", " ").replace("-", " ")
+    if any(marker in normalized for marker in ("unavailable", "unreachable", "offline", "removed")):
+        return "offline", "Offline"
+    if "do not disturb" in normalized or normalized == "dnd":
+        return "do_not_disturb", "Do not disturb"
+    if "away" in normalized:
+        return "away", "Away"
+    if "ringing" in normalized:
+        return "ringing", "Ringing"
+    if any(marker in normalized for marker in ("busy", "in use", "on hold")):
+        return "busy", "Busy"
+    if any(
+        marker in normalized
+        for marker in ("available", "reachable", "registered", "not in use", "idle")
+    ):
+        return "available", "Available"
+    if "unknown" in normalized:
+        return "unknown", "Unknown"
+    return None
 
 
 def _build_trunks(

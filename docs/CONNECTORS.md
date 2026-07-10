@@ -14,7 +14,7 @@ specific vendor UI or raw protocol feed.
 
 ```text
 PBX connector
-  -> channels, endpoints, trunks, history evidence
+  -> channels, endpoints, trunks, extension presence, history evidence
   -> Pulse snapshot
   -> Signals
   -> App
@@ -69,6 +69,26 @@ as TCP connection, authentication, command support, or missing configuration.
 The names `AmiSnapshot`, `AmiChannel`, and `AmiEndpoint` are historical from the
 first Asterisk connector. Treat them as the Agent's current neutral snapshot
 shape until the internal model is renamed.
+
+### Extension Presence
+
+The `people` entries in `GET /home` include an additive `presence` object:
+
+```json
+{
+  "presence": {
+    "state": "do_not_disturb",
+    "label": "Do not disturb"
+  }
+}
+```
+
+The supported neutral states are `available`, `on_call`, `busy`, `ringing`,
+`away`, `do_not_disturb`, `offline`, and `unknown`. `on_call` takes priority
+over a PBX-provided presence state while a live channel exists. Connectors may
+provide a raw presence value through `AmiEndpoint.presence`; otherwise the
+Agent derives presence from the endpoint device state. Existing `status`,
+`statusText`, and `detail` fields remain available for older app versions.
 
 ## Add A Connector
 

@@ -420,6 +420,79 @@ class PulseMappingTest(unittest.TestCase):
         self.assertIs(payload["now"]["isActive"], True)
         self.assertEqual(payload["signals"][0]["title"], "Reception is talking to Maria.")
         self.assertEqual(payload["people"][0]["status"], "talking")
+        self.assertEqual(payload["people"][0]["presence"], {"state": "on_call", "label": "On a call"})
+
+    def test_person_presence_preserves_explicit_extension_state(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                endpoints=[
+                    AmiEndpoint(
+                        extension="101",
+                        device_state="Reachable",
+                        label="Reception",
+                        presence="Do Not Disturb",
+                    ),
+                    AmiEndpoint(
+                        extension="102",
+                        device_state="Reachable",
+                        label="Support",
+                        presence="Away",
+                    ),
+                    AmiEndpoint(
+                        extension="103",
+                        device_state="Ringing",
+                        label="Sales",
+                    ),
+                    AmiEndpoint(
+                        extension="104",
+                        device_state="Unavailable",
+                        label="Warehouse",
+                        presence="Do Not Disturb",
+                    ),
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        people = {person["extension"]: person for person in payload["people"]}
+        self.assertEqual(people["101"]["presence"], {"state": "do_not_disturb", "label": "Do not disturb"})
+        self.assertEqual(people["101"]["statusText"], "Do not disturb")
+        self.assertEqual(people["102"]["presence"], {"state": "away", "label": "Away"})
+        self.assertEqual(people["103"]["presence"], {"state": "ringing", "label": "Ringing"})
+        self.assertEqual(people["104"]["presence"], {"state": "offline", "label": "Offline"})
+
+    def test_active_call_overrides_stale_extension_presence(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                channels=[
+                    AmiChannel(
+                        channel="PJSIP/101-00000042",
+                        extension="101",
+                        caller="Maria",
+                        connected="Reception",
+                        state="Up",
+                    )
+                ],
+                endpoints=[
+                    AmiEndpoint(
+                        extension="101",
+                        device_state="Reachable",
+                        presence="Away",
+                    )
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={"101": "Reception"},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        self.assertEqual(payload["people"][0]["presence"]["state"], "on_call")
 
     def test_unreachable_ami_becomes_health_signal(self) -> None:
         payload = build_home_payload(

@@ -15,6 +15,8 @@ out of the user-facing PBXSense experience.
 - Reads current PBX state from a supported connector.
 - Converts raw PBX observations into PBXSense Home data, Signals, Tips, and
   technical details.
+- Reports extension presence in People, including available, on-call, busy,
+  ringing, away, DND, and offline states when the connector can observe them.
 - Streams live Home snapshots so the app can refresh without polling the PBX
   directly.
 - Serves pairing pages and QR payloads for connecting PBXSense to the local

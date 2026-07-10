@@ -300,6 +300,12 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
                 ),
                 role=_endpoint_role(extension, fields),
                 number=_endpoint_number(fields),
+                presence=_first_value(
+                    fields,
+                    "PresenceState",
+                    "Presence",
+                    "CustomPresence",
+                ),
             )
         )
     return endpoints
