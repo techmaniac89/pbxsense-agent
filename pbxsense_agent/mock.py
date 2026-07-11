@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .pulse import AmiChannel, AmiEndpoint, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .version import AGENT_VERSION
 
 
@@ -44,5 +44,15 @@ def mock_snapshot() -> AmiSnapshot:
                 label="Main SIP trunk",
                 role="trunk",
             ),
+        ],
+        queues=[
+            AmiQueue(
+                name="support",
+                waiting_callers=2,
+                longest_wait_seconds=94,
+                available_members=1,
+                busy_members=1,
+                total_members=2,
+            )
         ],
     )

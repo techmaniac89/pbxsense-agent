@@ -25,12 +25,23 @@ class AgentSettings:
     timezone: str
     token: str
     asterisk_recordings_path: str = "/var/spool/asterisk/monitor"
+    asterisk_security_log_path: str = "/var/log/asterisk/security"
     freeswitch_recordings_path: str = ""
     yeastar_base_url: str = ""
     yeastar_client_id: str = ""
     yeastar_client_secret: str = ""
     yeastar_api_version: str = "v1.0"
     yeastar_verify_tls: bool = True
+    grandstream_ami_host: str = "127.0.0.1"
+    grandstream_ami_port: int = 7777
+    grandstream_ami_username: str = ""
+    grandstream_ami_password: str = ""
+    grandstream_ami_tls: bool = False
+    grandstream_ami_verify_tls: bool = True
+    grandstream_cdr_csv_path: str = ""
+    grandstream_voicemail_path: str = ""
+    grandstream_recordings_path: str = ""
+    grandstream_security_log_path: str = ""
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
@@ -38,8 +49,10 @@ class AgentSettings:
         pbx_type = _normalize_pbx_type(
             os.getenv("PBXSENSE_PBX_TYPE", mode or "asterisk")
         )
+        grandstream_tls = _env_bool("GRANDSTREAM_UCM_AMI_TLS", False)
+        grandstream_timeout = _env_float("GRANDSTREAM_UCM_AMI_TIMEOUT", 3)
         return cls(
-            mode=mode or ("ami" if pbx_type == "asterisk" else pbx_type),
+            mode=mode or ("ami" if pbx_type in {"asterisk", "grandstream"} else pbx_type),
             pbx_type=pbx_type,
             host=os.getenv("ASTERISK_AMI_HOST", "127.0.0.1"),
             port=_env_int("ASTERISK_AMI_PORT", 5038),
@@ -56,7 +69,11 @@ class AgentSettings:
             ),
             timeout_seconds=_env_float(
                 "PBXSENSE_CONNECT_TIMEOUT",
-                _env_float("ASTERISK_AMI_TIMEOUT", 3),
+                (
+                    grandstream_timeout
+                    if pbx_type == "grandstream"
+                    else _env_float("ASTERISK_AMI_TIMEOUT", 3)
+                ),
             ),
             extension_names=_parse_extension_names(
                 os.getenv(
@@ -81,12 +98,32 @@ class AgentSettings:
                 "ASTERISK_RECORDINGS_PATH",
                 "/var/spool/asterisk/monitor",
             ),
+            asterisk_security_log_path=os.getenv(
+                "ASTERISK_SECURITY_LOG_PATH",
+                "/var/log/asterisk/security",
+            ),
             freeswitch_recordings_path=os.getenv("FREESWITCH_RECORDINGS_PATH", ""),
             yeastar_base_url=os.getenv("YEASTAR_BASE_URL", "").strip().rstrip("/"),
             yeastar_client_id=os.getenv("YEASTAR_CLIENT_ID", "").strip(),
             yeastar_client_secret=os.getenv("YEASTAR_CLIENT_SECRET", "").strip(),
             yeastar_api_version=os.getenv("YEASTAR_API_VERSION", "v1.0").strip() or "v1.0",
             yeastar_verify_tls=_env_bool("YEASTAR_VERIFY_TLS", True),
+            grandstream_ami_host=os.getenv("GRANDSTREAM_UCM_AMI_HOST", "127.0.0.1").strip(),
+            grandstream_ami_port=_env_int(
+                "GRANDSTREAM_UCM_AMI_PORT",
+                5039 if grandstream_tls else 7777,
+            ),
+            grandstream_ami_username=os.getenv("GRANDSTREAM_UCM_AMI_USERNAME", "").strip(),
+            grandstream_ami_password=os.getenv("GRANDSTREAM_UCM_AMI_PASSWORD", ""),
+            grandstream_ami_tls=grandstream_tls,
+            grandstream_ami_verify_tls=_env_bool("GRANDSTREAM_UCM_AMI_VERIFY_TLS", True),
+            grandstream_cdr_csv_path=os.getenv("GRANDSTREAM_UCM_CDR_CSV_PATH", "").strip(),
+            grandstream_voicemail_path=os.getenv("GRANDSTREAM_UCM_VOICEMAIL_PATH", "").strip(),
+            grandstream_recordings_path=os.getenv("GRANDSTREAM_UCM_RECORDINGS_PATH", "").strip(),
+            grandstream_security_log_path=os.getenv(
+                "GRANDSTREAM_UCM_SECURITY_LOG_PATH",
+                "",
+            ).strip(),
         )
 
 
@@ -112,6 +149,18 @@ def _normalize_pbx_type(raw: str) -> str:
         "freepbx": "asterisk",
         "issabel": "asterisk",
         "vitalpbx": "asterisk",
+        "grandstream": "grandstream",
+        "grandstreamucm": "grandstream",
+        "ucm": "grandstream",
+        "ucm6xxx": "grandstream",
+        "ucm62xx": "grandstream",
+        "ucm63xx": "grandstream",
+        "ucm6100": "grandstream",
+        "ucm6200": "grandstream",
+        "ucm6300": "grandstream",
+        "ucm6300a": "grandstream",
+        "ucm6300audio": "grandstream",
+        "ucm6510": "grandstream",
         "fs": "freeswitch",
         "freeswitch": "freeswitch",
         "fusionpbx": "freeswitch",
@@ -125,6 +174,7 @@ def _normalize_pbx_type(raw: str) -> str:
 def _default_display_name(pbx_type: str) -> str:
     return {
         "asterisk": "Asterisk",
+        "grandstream": "Grandstream UCM",
         "freeswitch": "FreeSWITCH",
         "yeastar": "Yeastar P-Series",
         "mock": "Mock PBX",

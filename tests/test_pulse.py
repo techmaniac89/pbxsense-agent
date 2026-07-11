@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +13,7 @@ from pbxsense_agent.ami import (
     _endpoint_role,
     _endpoints_from_events,
     _number_from_pjsip_value,
+    _queues_from_events,
 )
 from pbxsense_agent.connectors import connector_for_settings
 from pbxsense_agent.freeswitch import (
@@ -20,16 +22,26 @@ from pbxsense_agent.freeswitch import (
     _read_json_cdr_calls,
     _read_voicemails as _read_freeswitch_voicemails,
 )
+from pbxsense_agent.grandstream import GrandstreamUcmClient
 from pbxsense_agent.recordings import find_recording
 from pbxsense_agent.history import (
     CdrCall,
+    SecurityEvent,
     history_diagnostics,
     read_recent_cdr_calls,
+    read_recent_security_events,
     read_recent_voicemails,
 )
 from pbxsense_agent.live import home_live_events
 from pbxsense_agent.network import is_private_or_loopback_host
-from pbxsense_agent.pulse import AmiChannel, AmiEndpoint, AmiSnapshot, build_home_payload
+from pbxsense_agent.pulse import (
+    AmiChannel,
+    AmiEndpoint,
+    AmiQueue,
+    AmiSnapshot,
+    MomentTracker,
+    build_home_payload,
+)
 from pbxsense_agent.settings import AgentSettings, _normalize_pbx_type
 from pbxsense_agent.yeastar import YeastarClient, _channels_from_call_response
 
@@ -39,6 +51,8 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(_normalize_pbx_type("freepbx"), "asterisk")
         self.assertEqual(_normalize_pbx_type("issabel"), "asterisk")
         self.assertEqual(_normalize_pbx_type("vitalpbx"), "asterisk")
+        self.assertEqual(_normalize_pbx_type("grandstream-ucm"), "grandstream")
+        self.assertEqual(_normalize_pbx_type("ucm6300"), "grandstream")
         self.assertEqual(_normalize_pbx_type("fusionpbx"), "freeswitch")
         self.assertEqual(_normalize_pbx_type("yeastar-p-series"), "yeastar")
 
@@ -94,6 +108,25 @@ class PulseMappingTest(unittest.TestCase):
         )
 
         self.assertIsInstance(connector_for_settings(settings), YeastarClient)
+
+    def test_grandstream_connector_uses_its_own_ami_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PBXSENSE_PBX_TYPE": "grandstream-ucm",
+                "GRANDSTREAM_UCM_AMI_HOST": "ucm.example.test",
+            },
+            clear=True,
+        ):
+            settings = AgentSettings.from_env()
+
+        connector = connector_for_settings(settings)
+
+        self.assertEqual(settings.pbx_type, "grandstream")
+        self.assertEqual(settings.grandstream_ami_host, "ucm.example.test")
+        self.assertEqual(settings.grandstream_ami_port, 7777)
+        self.assertFalse(settings.grandstream_ami_tls)
+        self.assertIsInstance(connector, GrandstreamUcmClient)
 
     def test_yeastar_active_call_response_maps_to_snapshot_channels(self) -> None:
         channels = _channels_from_call_response(
@@ -320,6 +353,86 @@ class PulseMappingTest(unittest.TestCase):
             "+302105550000",
         )
 
+    def test_ami_queue_status_maps_waiting_callers_and_members(self) -> None:
+        queues = _queues_from_events(
+            [
+                AmiEvent(
+                    name="QueueParams",
+                    fields={"Queue": "support", "Calls": "2"},
+                ),
+                AmiEvent(
+                    name="QueueEntry",
+                    fields={"Queue": "support", "Wait": "34"},
+                ),
+                AmiEvent(
+                    name="QueueEntry",
+                    fields={"Queue": "support", "Wait": "95"},
+                ),
+                AmiEvent(
+                    name="QueueMember",
+                    fields={"Queue": "support", "Status": "1", "Paused": "0"},
+                ),
+                AmiEvent(
+                    name="QueueMember",
+                    fields={"Queue": "support", "Status": "2", "Paused": "0"},
+                ),
+                AmiEvent(
+                    name="QueueMember",
+                    fields={"Queue": "support", "Status": "1", "Paused": "1"},
+                ),
+            ]
+        )
+
+        self.assertEqual(len(queues), 1)
+        self.assertEqual(queues[0].name, "support")
+        self.assertEqual(queues[0].waiting_callers, 2)
+        self.assertEqual(queues[0].longest_wait_seconds, 95)
+        self.assertEqual(queues[0].available_members, 1)
+        self.assertEqual(queues[0].busy_members, 1)
+        self.assertEqual(queues[0].paused_members, 1)
+        self.assertEqual(queues[0].total_members, 3)
+
+    def test_home_payload_includes_queue_summary_without_caller_details(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                queues=[
+                    AmiQueue(
+                        name="support",
+                        waiting_callers=2,
+                        longest_wait_seconds=95,
+                        available_members=0,
+                        busy_members=1,
+                        paused_members=1,
+                        total_members=2,
+                    )
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        self.assertEqual(
+            payload["queues"],
+            [
+                {
+                    "name": "support",
+                    "queue": "support",
+                    "status": "needs_attention",
+                    "statusText": "2 callers waiting",
+                    "detail": "Longest wait 1m 35s · No members available · 1 busy · 1 paused",
+                    "waitingCallers": 2,
+                    "longestWaitSeconds": 95,
+                    "availableMembers": 0,
+                    "busyMembers": 1,
+                    "pausedMembers": 1,
+                    "totalMembers": 2,
+                }
+            ],
+        )
+
     def test_live_events_describe_changed_home_snapshot_parts(self) -> None:
         previous = {
             "connection": {"kind": "local", "label": "Connected"},
@@ -345,6 +458,9 @@ class PulseMappingTest(unittest.TestCase):
                     "name": "Cosmote",
                     "statusText": "Available",
                 }
+            ],
+            "queues": [
+                {"queue": "support", "waitingCallers": 0},
             ],
         }
         current = {
@@ -377,6 +493,9 @@ class PulseMappingTest(unittest.TestCase):
                     "statusText": "Carrying a call",
                 }
             ],
+            "queues": [
+                {"queue": "support", "waitingCallers": 2},
+            ],
         }
 
         events = home_live_events(previous, current)
@@ -391,6 +510,7 @@ class PulseMappingTest(unittest.TestCase):
                 "calls_updated",
                 "person_updated",
                 "trunk_updated",
+                "queue_updated",
             ],
         )
 
@@ -998,7 +1118,7 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(payload["now"]["title"], "The office is quiet.")
         self.assertIn("Linphone missed Support.", [call["title"] for call in payload["calls"]])
 
-    def test_reachable_payload_includes_a_configurable_moment_signal(self) -> None:
+    def test_call_history_does_not_create_a_calculated_moment(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
         recent_record = CdrCall(
             source="101",
@@ -1030,46 +1150,124 @@ class PulseMappingTest(unittest.TestCase):
         moments = [
             signal for signal in payload["signals"] if signal["category"] == "moment"
         ]
-        self.assertEqual(len(moments), 1)
-        self.assertIn(
-            moments[0]["kind"],
+        self.assertEqual(moments, [])
+
+    def test_moment_tracker_emits_real_pbx_transitions(self) -> None:
+        now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
+        tracker = MomentTracker()
+        active = AmiChannel(
+            channel="PJSIP/101-00000042",
+            extension="101",
+            caller="Maria",
+            connected="Reception",
+            state="Up",
+        )
+        tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                channels=[active],
+                queues=[AmiQueue(name="support", waiting_callers=2)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Unavailable")],
+            ),
+            now,
+        )
+        events = tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                queues=[AmiQueue(name="support", waiting_callers=0)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Reachable")],
+            ),
+            now + timedelta(minutes=1),
+        )
+
+        self.assertEqual(
+            {event["kind"] for event in events},
             {
-                "pbx_daily_flow_moment",
-                "pbx_answered_cleanly_moment",
-                "pbx_quieter_than_previous_window_moment",
+                "pbx_queue_cleared_moment",
+                "pbx_phone_recovered_moment",
             },
         )
-        self.assertEqual(moments[0]["timeLabel"], "Last 3 hours")
-        self.assertEqual(moments[0]["technical"]["recent_calls"], "1")
-        self.assertEqual(moments[0]["technical"]["answered_calls"], "1")
-        self.assertEqual(moments[0]["technical"]["moment_hours"], "3")
-        self.assertEqual(moments[0]["technical"]["visible_window"], "last 3 hours")
-        self.assertIn("moment_pool", moments[0]["technical"])
-
-    def test_daily_moment_rotates_calm_wording_by_day(self) -> None:
-        payload_one = build_home_payload(
+        payload = build_home_payload(
             AmiSnapshot(reachable=True, agent_version="test"),
             display_name="Office PBX",
             extension_names={},
-            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+            now=now + timedelta(minutes=1),
+            moment_events=events,
         )
-        payload_two = build_home_payload(
-            AmiSnapshot(reachable=True, agent_version="test"),
-            display_name="Office PBX",
-            extension_names={},
-            now=datetime(2026, 6, 27, 20, tzinfo=ZoneInfo("Europe/Athens")),
-        )
-
-        moment_one = next(
-            signal for signal in payload_one["signals"] if signal["category"] == "moment"
-        )
-        moment_two = next(
-            signal for signal in payload_two["signals"] if signal["category"] == "moment"
+        self.assertEqual(
+            {signal["kind"] for signal in payload["signals"] if signal["category"] == "moment"},
+            {event["kind"] for event in events},
         )
 
-        self.assertNotEqual(moment_one["id"], moment_two["id"])
-        self.assertNotEqual(moment_one["title"], moment_two["title"])
-        self.assertIn("pbx_calm_day_moment", moment_one["technical"]["moment_pool"])
+    def test_moment_tracker_removes_reversed_recovery_and_clear_moments(self) -> None:
+        now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
+        tracker = MomentTracker()
+        active = AmiChannel(
+            channel="PJSIP/101-00000042",
+            extension="101",
+            caller="Maria",
+            connected="Reception",
+            state="Up",
+        )
+        tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                channels=[active],
+                queues=[AmiQueue(name="support", waiting_callers=2)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Unavailable")],
+            ),
+            now,
+        )
+        tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                queues=[AmiQueue(name="support", waiting_callers=0)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Reachable")],
+            ),
+            now + timedelta(minutes=1),
+        )
+        events = tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                channels=[active],
+                queues=[AmiQueue(name="support", waiting_callers=1)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Unavailable")],
+            ),
+            now + timedelta(minutes=2),
+        )
+
+        self.assertEqual(events, [])
+
+    def test_moment_tracker_ignores_state_changes_while_pbx_is_unreachable(self) -> None:
+        now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
+        tracker = MomentTracker()
+        tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                endpoints=[AmiEndpoint(extension="101", device_state="Unavailable")],
+            ),
+            now,
+        )
+        tracker.observe(
+            AmiSnapshot(reachable=False, agent_version="test"),
+            now + timedelta(minutes=1),
+        )
+        events = tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                endpoints=[AmiEndpoint(extension="101", device_state="Reachable")],
+            ),
+            now + timedelta(minutes=2),
+        )
+
+        self.assertEqual(events, [])
 
     def test_cdr_history_replaces_placeholder_destination_with_trunk_number(self) -> None:
         record = CdrCall(
@@ -1450,6 +1648,90 @@ class PulseMappingTest(unittest.TestCase):
         security = [signal for signal in payload["signals"] if signal["category"] == "security"]
         self.assertEqual(security[0]["kind"], "failed_call_cluster")
         self.assertEqual(security[0]["technical"]["attempts"], "3")
+
+    def test_security_log_events_create_authentication_signal_without_sensitive_data(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                security_events=[
+                    SecurityEvent("InvalidPassword", "AMI", datetime(2026, 6, 26, 19, 50)),
+                    SecurityEvent("InvalidAccountID", "SIP", datetime(2026, 6, 26, 19, 52)),
+                    SecurityEvent("ChallengeResponseFailed", "AMI", datetime(2026, 6, 26, 19, 54)),
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        security = [signal for signal in payload["signals"] if signal["category"] == "security"]
+        authentication = next(signal for signal in security if signal["kind"] == "authentication_failure_cluster")
+        self.assertEqual(authentication["technical"]["attempts"], "3")
+        self.assertEqual(authentication["technical"]["services"], "AMI, SIP")
+        self.assertNotIn("RemoteAddress", str(authentication))
+
+    def test_security_log_reader_filters_old_entries_and_parses_acl_failures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "security"
+            log_path.write_text(
+                '\n'.join(
+                    [
+                        '[2026-06-26 19:40:00] SECURITY[1]: SecurityEvent="FailedACL",Service="AMI",RemoteAddress="IPV4/TCP/10.0.0.5/5000"',
+                        '[2026-06-26 19:55:00] SECURITY[1]: SecurityEvent="FailedACL",Service="SIP",RemoteAddress="IPV4/UDP/10.0.0.6/5060"',
+                        '[2026-06-26 19:58:00] SECURITY[1]: SecurityEvent="InvalidPassword",Service="AMI",RemoteAddress="IPV4/TCP/10.0.0.7/5001"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            events = read_recent_security_events(
+                str(log_path),
+                now=datetime(2026, 6, 26, 20, 0),
+            )
+
+        self.assertEqual([(event.kind, event.service) for event in events], [("FailedACL", "SIP"), ("InvalidPassword", "AMI")])
+
+    def test_malformed_request_cluster_becomes_security_signal(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                security_events=[
+                    SecurityEvent("RequestBadFormat", "AMI", datetime(2026, 6, 26, 19, 51)),
+                    SecurityEvent("RequestBadFormat", "AMI", datetime(2026, 6, 26, 19, 53)),
+                    SecurityEvent("RequestBadFormat", "AMI", datetime(2026, 6, 26, 19, 55)),
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        kinds = {signal["kind"] for signal in payload["signals"]}
+        self.assertIn("malformed_request_cluster", kinds)
+
+    def test_unavailable_trunk_stays_in_health_not_security(self) -> None:
+        payload = build_home_payload(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                endpoints=[
+                    AmiEndpoint(
+                        extension="sip-provider",
+                        device_state="Unavailable",
+                        role="trunk",
+                    )
+                ],
+            ),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        trunk = next(signal for signal in payload["signals"] if signal["kind"] == "trunk_unavailable")
+        self.assertEqual(trunk["category"], "health")
+        self.assertFalse(any(signal["kind"] == "trunk_security_watch" for signal in payload["signals"]))
 
     def test_home_payload_can_carry_every_signal_category(self) -> None:
         calls = [

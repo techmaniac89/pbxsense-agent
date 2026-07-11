@@ -4,6 +4,7 @@ from typing import Protocol
 
 from .ami import AmiClient
 from .freeswitch import FreeSwitchClient
+from .grandstream import GrandstreamUcmClient
 from .mock import mock_snapshot
 from .pulse import AmiSnapshot
 from .settings import AgentSettings
@@ -43,4 +44,6 @@ def connector_for_settings(settings: AgentSettings) -> PBXConnector:
         return FreeSwitchClient(settings)
     if settings.pbx_type == "yeastar":
         return YeastarClient(settings)
+    if settings.pbx_type == "grandstream":
+        return GrandstreamUcmClient(settings)
     return AmiClient(settings)

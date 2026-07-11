@@ -13,7 +13,7 @@ Use `.env.example` as the starting point.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PBXSENSE_PBX_TYPE` | `asterisk` | PBX family. Supports `asterisk`, `freeswitch`, `yeastar`, `mock`, and aliases listed below. |
+| `PBXSENSE_PBX_TYPE` | `asterisk` | PBX family. Supports `asterisk`, `grandstream`, `freeswitch`, `yeastar`, `mock`, and aliases listed below. |
 | `PBXSENSE_AGENT_MODE` | derived | Connector mode. Usually `ami`, `freeswitch`, `yeastar`, or `mock`. |
 | `PBXSENSE_DISPLAY_NAME` | connector name | Friendly PBX name shown by the Agent. |
 | `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
@@ -28,6 +28,7 @@ Use `.env.example` as the starting point.
 | --- | --- |
 | `ami`, `asteriskami`, `asterisk` | `asterisk` |
 | `freepbx`, `issabel`, `vitalpbx` | `asterisk` |
+| `grandstream`, `grandstream-ucm`, `ucm`, `ucm6xxx`, `ucm62xx`, `ucm63xx`, `ucm6100`, `ucm6200`, `ucm6300`, `ucm6300a`, `ucm6300audio`, `ucm6510` | `grandstream` |
 | `fs`, `freeswitch` | `freeswitch` |
 | `fusionpbx` | `freeswitch` |
 | `yeastar`, `yeastar-p-series`, `pseries` | `yeastar` |
@@ -46,6 +47,7 @@ Use `.env.example` as the starting point.
 | `ASTERISK_CDR_CUSTOM_PATH` | unset | Legacy fallback for `ASTERISK_CDR_CSV_PATH`. |
 | `ASTERISK_VOICEMAIL_PATH` | `/var/spool/asterisk/voicemail` | Voicemail spool path inside the Agent runtime. |
 | `ASTERISK_RECORDINGS_PATH` | `/var/spool/asterisk/monitor` | MixMonitor recording root visible to the Agent. |
+| `ASTERISK_SECURITY_LOG_PATH` | `/var/log/asterisk/security` | Local Asterisk security log used for aggregate authentication/ACL Security Signals. |
 
 For Docker, the CDR and voicemail paths are container paths. Mount the host
 folders into those locations with:
@@ -54,6 +56,31 @@ folders into those locations with:
 ASTERISK_LOGS_HOST_PATH=../asterisk/logs
 ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
 ```
+
+## Grandstream UCM AMI Settings
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GRANDSTREAM_UCM_AMI_HOST` | `127.0.0.1` | UCM AMI host or LAN IP. |
+| `GRANDSTREAM_UCM_AMI_PORT` | `7777` | Plain AMI port. Use `5039` when TLS is enabled unless the UCM was customized. |
+| `GRANDSTREAM_UCM_AMI_USERNAME` | empty | Dedicated UCM AMI username. |
+| `GRANDSTREAM_UCM_AMI_PASSWORD` | empty | Dedicated UCM AMI password. |
+| `GRANDSTREAM_UCM_AMI_TLS` | `false` | Set `true` for UCM's TLS AMI listener. |
+| `GRANDSTREAM_UCM_AMI_VERIFY_TLS` | `true` | Set `false` only for a trusted local UCM with a self-signed certificate. |
+| `GRANDSTREAM_UCM_AMI_TIMEOUT` | `3` | Connector timeout fallback when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
+| `GRANDSTREAM_UCM_CDR_CSV_PATH` | empty | Optional UCM CDR CSV file visible to the Agent. |
+| `GRANDSTREAM_UCM_VOICEMAIL_PATH` | empty | Optional UCM voicemail folder visible to the Agent. |
+| `GRANDSTREAM_UCM_RECORDINGS_PATH` | empty | Optional UCM recording root visible to the Agent. |
+| `GRANDSTREAM_UCM_SECURITY_LOG_PATH` | empty | Optional UCM security log used for aggregate authentication/ACL Security Signals. |
+
+UCM AMI users are created under **Value-added Features > AMI**. Restrict the
+user to the Agent IP and grant only `system`, `call`, `reporting`, `command`,
+and `agent` read privileges. The `agent` privilege enables read-only queue
+metrics.
+
+Security logs are optional. When configured, PBXSense reads only recent
+security-event types and returns aggregate counts/service names; raw log lines,
+account names, and source addresses never leave the Agent.
 
 ## FreeSWITCH ESL Settings
 

@@ -24,7 +24,7 @@ The installer:
 
 - Installs Python runtime packages when `apt-get` is available.
 - Auto-detects local Asterisk or FreeSWITCH files and commands when possible.
-- Lets you confirm `asterisk`, `freeswitch`, `yeastar`, or `mock` mode interactively.
+- Lets you confirm `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or `mock` mode interactively.
 - Prompts for timezone, Agent port, and connector timeout.
 - Prompts for AMI, ESL, or Yeastar API credentials and keeps existing values on reinstall.
 - Suggests Asterisk CDR CSV, voicemail, and recording paths from common local locations.
@@ -119,7 +119,7 @@ Agent host:
 ```ini
 [pbxsense]
 secret = <secret>
-read = system,call,reporting,command
+read = system,call,reporting,command,agent
 write =
 permit = 127.0.0.1/255.255.255.255
 ```
@@ -134,6 +134,16 @@ does not create, rotate, or edit AMI users.
 
 GUI distributions such as FreePBX, Issabel, and VitalPBX use the Asterisk
 connector.
+
+## Grandstream UCM / SoftwareUCM
+
+Use `PBXSENSE_PBX_TYPE=grandstream-ucm` when installing the Agent near a
+Grandstream UCM. The installer prompts for UCM-specific AMI configuration,
+defaulting to port `7777` (or `5039` for TLS). In the UCM web UI, create the
+AMI user under **Value-added Features > AMI**, permit only the Agent's IP
+address, and grant read privileges for `system`, `call`, `reporting`, `command`,
+and `agent`. The `agent` privilege enables read-only queue counts. Do not expose
+AMI outside the trusted LAN or VPN.
 
 ## FreeSWITCH Install Notes
 

@@ -4,7 +4,7 @@ import re
 import socket
 from dataclasses import dataclass
 
-from .pulse import AmiChannel, AmiEndpoint, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -22,6 +22,7 @@ class AmiError(OSError):
 class AmiClient:
     name = "asterisk"
     diagnostics_label = "Asterisk AMI"
+    pbx_type = "asterisk"
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
@@ -34,6 +35,7 @@ class AmiClient:
                 agent_version=AGENT_VERSION,
                 channels=_channels_from_events(events),
                 endpoints=_endpoints_from_events(events),
+                queues=_queues_from_events(events),
             )
         except OSError as exc:
             return AmiSnapshot(
@@ -44,10 +46,10 @@ class AmiClient:
 
     def diagnostics(self) -> dict:
         result: dict[str, object] = {
-            "pbxType": "asterisk",
-            "host": self._settings.host,
-            "port": self._settings.port,
-            "username": self._settings.username,
+            "pbxType": self.pbx_type,
+            "host": self._ami_host(),
+            "port": self._ami_port(),
+            "username": self._ami_username(),
             "timeoutSeconds": self._settings.timeout_seconds,
             "tcpConnected": False,
             "bannerReceived": False,
@@ -88,7 +90,7 @@ class AmiClient:
                 )
             )
             events.extend(
-                self._collect_action_events(
+                self._collect_optional_action_events(
                     sock,
                     action="PJSIPShowEndpoints",
                     complete_event="EndpointListComplete",
@@ -104,6 +106,13 @@ class AmiClient:
             events.extend(
                 self._collect_optional_action_events(
                     sock,
+                    action="QueueStatus",
+                    complete_event="QueueStatusComplete",
+                )
+            )
+            events.extend(
+                self._collect_optional_action_events(
+                    sock,
                     action="SIPpeers",
                     complete_event="PeerlistComplete",
                 )
@@ -113,29 +122,43 @@ class AmiClient:
             return events
 
     def _connect(self) -> socket.socket:
+        host = self._ami_host()
+        port = self._ami_port()
         try:
             sock = socket.create_connection(
-                (self._settings.host, self._settings.port),
+                (host, port),
                 timeout=self._settings.timeout_seconds,
             )
             sock.settimeout(self._settings.timeout_seconds)
             return sock
         except TimeoutError as exc:
             raise AmiError(
-                f"AMI TCP connect to {self._settings.host}:{self._settings.port} timed out"
+                f"AMI TCP connect to {host}:{port} timed out"
             ) from exc
         except OSError as exc:
             raise AmiError(
-                f"AMI TCP connect to {self._settings.host}:{self._settings.port} failed: {exc}"
+                f"AMI TCP connect to {host}:{port} failed: {exc}"
             ) from exc
+
+    def _ami_host(self) -> str:
+        return self._settings.host
+
+    def _ami_port(self) -> int:
+        return self._settings.port
+
+    def _ami_username(self) -> str:
+        return self._settings.username
+
+    def _ami_password(self) -> str:
+        return self._settings.password
 
     def _login(self, sock: socket.socket) -> dict[str, str]:
         self._send_action(
             sock,
             {
                 "Action": "Login",
-                "Username": self._settings.username,
-                "Secret": self._settings.password,
+                "Username": self._ami_username(),
+                "Secret": self._ami_password(),
                 "Events": "off",
             },
         )
@@ -309,6 +332,60 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
             )
         )
     return endpoints
+
+
+def _queues_from_events(events: list[AmiEvent]) -> list[AmiQueue]:
+    queue_params: dict[str, dict[str, str]] = {}
+    entry_counts: dict[str, int] = {}
+    longest_waits: dict[str, int] = {}
+    member_counts: dict[str, dict[str, int]] = {}
+
+    for event in events:
+        fields = event.fields
+        queue = fields.get("Queue", "").strip()
+        if not queue:
+            continue
+        if event.name == "QueueParams":
+            queue_params[queue] = fields
+        elif event.name == "QueueEntry":
+            entry_counts[queue] = entry_counts.get(queue, 0) + 1
+            longest_waits[queue] = max(
+                longest_waits.get(queue, 0),
+                _parse_int(fields.get("Wait", "0")),
+            )
+        elif event.name == "QueueMember":
+            counts = member_counts.setdefault(
+                queue,
+                {"available": 0, "busy": 0, "paused": 0, "total": 0},
+            )
+            counts["total"] += 1
+            if fields.get("Paused", "").strip().lower() in {"1", "yes", "true"}:
+                counts["paused"] += 1
+            elif _parse_int(fields.get("Status", "0")) == 1:
+                counts["available"] += 1
+            elif _parse_int(fields.get("Status", "0")) in {2, 3, 6, 7, 8}:
+                counts["busy"] += 1
+
+    queue_names = set(queue_params) | set(entry_counts) | set(member_counts)
+    queues: list[AmiQueue] = []
+    for queue in sorted(queue_names):
+        members = member_counts.get(queue, {})
+        queues.append(
+            AmiQueue(
+                name=queue,
+                waiting_callers=(
+                    entry_counts[queue]
+                    if queue in entry_counts
+                    else _parse_int(queue_params.get(queue, {}).get("Calls", "0"))
+                ),
+                longest_wait_seconds=longest_waits.get(queue, 0),
+                available_members=members.get("available", 0),
+                busy_members=members.get("busy", 0),
+                paused_members=members.get("paused", 0),
+                total_members=members.get("total", 0),
+            )
+        )
+    return queues
 
 
 def _sip_peer_device_state(status: str) -> str:

@@ -65,6 +65,7 @@ normalize_pbx_type() {
   normalized="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '_' | tr -d '-' | tr -d '[:space:]')"
   case "$normalized" in
     ami|asteriskami|asterisk|freepbx|issabel|vitalpbx) printf '%s\n' "asterisk" ;;
+    grandstream|grandstreamucm|ucm|ucm6xxx|ucm62xx|ucm63xx|ucm6100|ucm6200|ucm6300|ucm6300a|ucm6300audio|ucm6510) printf '%s\n' "grandstream" ;;
     fs|freeswitch|fusionpbx) printf '%s\n' "freeswitch" ;;
     yeastar|yeastarpseries|pseries) printf '%s\n' "yeastar" ;;
     mock) printf '%s\n' "mock" ;;
@@ -228,7 +229,7 @@ choose_pbx_type() {
     [ "$has_asterisk" -eq 1 ] && echo "  - Asterisk files or commands found." >&2
     [ "$has_freeswitch" -eq 1 ] && echo "  - FreeSWITCH files or commands found." >&2
     [ "$has_asterisk" -eq 0 ] && [ "$has_freeswitch" -eq 0 ] && echo "  - No local PBX files found; using Asterisk defaults." >&2
-    printf "PBX type: asterisk, freeswitch, yeastar, or mock [%s]: " "$detected" >&2
+    printf "PBX type: asterisk, grandstream, freeswitch, yeastar, or mock [%s]: " "$detected" >&2
     read -r answer
     if [ -n "$answer" ]; then
       detected="$answer"
@@ -280,6 +281,27 @@ configure_freeswitch_env() {
   prompt_value FREESWITCH_RECORDINGS_PATH "FreeSWITCH recordings folder (optional)" "${FREESWITCH_RECORDINGS_PATH:-}"
 }
 
+configure_grandstream_env() {
+  echo "Configuring Grandstream UCM AMI settings in $ENV_FILE"
+  set_env_value PBXSENSE_PBX_TYPE "grandstream"
+  set_env_value PBXSENSE_AGENT_MODE "ami"
+  prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Grandstream UCM"
+  prompt_value GRANDSTREAM_UCM_AMI_HOST "Grandstream UCM AMI host" "${GRANDSTREAM_UCM_AMI_HOST:-127.0.0.1}"
+  prompt_value GRANDSTREAM_UCM_AMI_TLS "Use Grandstream UCM AMI TLS (true/false)" "${GRANDSTREAM_UCM_AMI_TLS:-false}"
+  if [ "$(env_value GRANDSTREAM_UCM_AMI_TLS)" = "true" ]; then
+    prompt_value GRANDSTREAM_UCM_AMI_PORT "Grandstream UCM AMI TLS port" "${GRANDSTREAM_UCM_AMI_PORT:-5039}"
+  else
+    prompt_value GRANDSTREAM_UCM_AMI_PORT "Grandstream UCM AMI port" "${GRANDSTREAM_UCM_AMI_PORT:-7777}"
+  fi
+  prompt_value GRANDSTREAM_UCM_AMI_USERNAME "Grandstream UCM AMI username" "${GRANDSTREAM_UCM_AMI_USERNAME:-pbxsense}"
+  prompt_secret GRANDSTREAM_UCM_AMI_PASSWORD "Grandstream UCM AMI password" "${GRANDSTREAM_UCM_AMI_PASSWORD:-}"
+  prompt_value GRANDSTREAM_UCM_AMI_VERIFY_TLS "Verify Grandstream UCM TLS certificate (true/false)" "${GRANDSTREAM_UCM_AMI_VERIFY_TLS:-true}"
+  prompt_value GRANDSTREAM_UCM_AMI_TIMEOUT "Grandstream UCM AMI timeout seconds" "${GRANDSTREAM_UCM_AMI_TIMEOUT:-3}"
+  prompt_value GRANDSTREAM_UCM_CDR_CSV_PATH "Grandstream UCM CDR CSV path (optional)" "${GRANDSTREAM_UCM_CDR_CSV_PATH:-}"
+  prompt_value GRANDSTREAM_UCM_VOICEMAIL_PATH "Grandstream UCM voicemail path (optional)" "${GRANDSTREAM_UCM_VOICEMAIL_PATH:-}"
+  prompt_value GRANDSTREAM_UCM_RECORDINGS_PATH "Grandstream UCM recordings path (optional)" "${GRANDSTREAM_UCM_RECORDINGS_PATH:-}"
+}
+
 configure_yeastar_env() {
   echo "Configuring Yeastar P-Series API settings in $ENV_FILE"
   set_env_value PBXSENSE_PBX_TYPE "yeastar"
@@ -307,6 +329,7 @@ configure_agent_env() {
   AGENT_PORT="$(env_value PBXSENSE_AGENT_PORT)"
 
   case "$pbx_type" in
+    grandstream) configure_grandstream_env ;;
     freeswitch) configure_freeswitch_env ;;
     yeastar) configure_yeastar_env ;;
     mock) configure_mock_env ;;

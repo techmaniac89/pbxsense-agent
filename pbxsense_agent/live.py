@@ -45,6 +45,16 @@ def home_live_events(previous: dict, current: dict) -> list[dict]:
         )
     )
 
+    events.extend(
+        _collection_events(
+            previous.get("queues", []),
+            current.get("queues", []),
+            key="queue",
+            created_type="queue_updated",
+            updated_type="queue_updated",
+        )
+    )
+
     return events
 
 

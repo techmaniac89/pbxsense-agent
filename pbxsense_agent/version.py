@@ -1,1 +1,1 @@
-AGENT_VERSION = "0.2.10-beta"
+AGENT_VERSION = "0.2.20-beta"

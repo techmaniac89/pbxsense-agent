@@ -24,8 +24,9 @@ PBX connector
 
 | PBX | Connector | Status |
 | --- | --- | --- |
-| Asterisk | `ami.py` | Active calls, endpoints, trunks, CDR history, voicemail |
+| Asterisk | `ami.py` | Active calls, endpoints, trunks, queue wait/member state, CDR history, voicemail |
 | FreePBX, Issabel, VitalPBX | `ami.py` | Supported as Asterisk-based systems |
+| Grandstream UCM / SoftwareUCM | `grandstream.py` | Restricted AMI with UCM port/TLS defaults, live calls, endpoints, trunks, queues; optional local history paths |
 | FreeSWITCH | `freeswitch.py` | Event Socket connection, active channels, optional JSON CDR/voicemail paths |
 | FusionPBX | `freeswitch.py` | Supported as a FreeSWITCH-based system |
 | Yeastar P-Series | `yeastar.py` | OAuth API, extension status, live calls, CDR, voicemail, recordings |
@@ -39,6 +40,35 @@ dashboard metadata.
 
 The Asterisk connector reads PJSIP endpoints and also asks for classic
 `chan_sip` peers when that AMI action is available.
+
+It also uses AMI's read-only `QueueStatus` action when the AMI user has the
+`agent` read permission. The Agent reports queue counts and wait times only;
+it does not return caller names or numbers, nor does it add/remove/pause queue
+members.
+
+When `ASTERISK_SECURITY_LOG_PATH` is visible, the Agent also turns recent
+failed authentication, ACL-block, and malformed-request security events into
+aggregate Security Signals. An unavailable trunk remains a Health Signal, not
+a Security Signal.
+
+### Grandstream UCM Notes
+
+Grandstream UCM and SoftwareUCM use the dedicated `grandstream.py` connector.
+Set `PBXSENSE_PBX_TYPE=grandstream-ucm` (or `grandstream`, `ucm`, or a
+UCM-series alias) and configure `GRANDSTREAM_UCM_AMI_*` with a dedicated,
+IP-restricted AMI user. The connector defaults to UCM plain AMI port `7777`;
+set `GRANDSTREAM_UCM_AMI_TLS=true` to use UCM TLS AMI (default port `5039`).
+The UCM web UI exposes AMI under **Value-added Features > AMI**. Grant only the
+read privileges required by the Agent:
+`system`, `call`, `reporting`, `command`, and `agent`.
+
+Queue visibility uses AMI `QueueStatus`; it is read-only and reports aggregate
+wait/member counts, not caller identities. CDR, voicemail, and recording paths
+are optional because their UCM locations vary by model and firmware.
+
+The connector tries both modern PJSIP endpoint actions and classic SIP peer
+actions. This preserves endpoint visibility on older UCM firmware that does not
+offer the PJSIP AMI action.
 
 ## Connector Contract
 

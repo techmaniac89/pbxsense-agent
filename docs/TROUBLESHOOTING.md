@@ -61,7 +61,7 @@ Minimal AMI user:
 ```ini
 [pbxsense]
 secret = your-secret
-read = system,call,reporting,command
+read = system,call,reporting,command,agent
 write =
 permit = 127.0.0.1/255.255.255.255
 ```

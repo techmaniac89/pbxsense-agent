@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from threading import Lock
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from .engine import build_engine_signals
-from .history import CdrCall, VoicemailMessage, interpreted_call_kind
+from .history import CdrCall, SecurityEvent, VoicemailMessage, interpreted_call_kind
 
 
 @dataclass(frozen=True)
@@ -38,14 +39,189 @@ class AmiEndpoint:
 
 
 @dataclass(frozen=True)
+class AmiQueue:
+    name: str
+    waiting_callers: int = 0
+    longest_wait_seconds: int = 0
+    available_members: int = 0
+    busy_members: int = 0
+    paused_members: int = 0
+    total_members: int = 0
+
+
+@dataclass(frozen=True)
 class AmiSnapshot:
     reachable: bool
     agent_version: str
     channels: list[AmiChannel] = field(default_factory=list)
     endpoints: list[AmiEndpoint] = field(default_factory=list)
+    queues: list[AmiQueue] = field(default_factory=list)
     recent_calls: list[CdrCall] = field(default_factory=list)
     voicemails: list[VoicemailMessage] = field(default_factory=list)
+    security_events: list[SecurityEvent] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class _MomentState:
+    reachable: bool
+    queue_waiting: tuple[tuple[str, int], ...]
+    unavailable_extensions: frozenset[str]
+    voicemail_keys: frozenset[str]
+
+
+class MomentTracker:
+    """Keeps short-lived, event-based Moments between PBX snapshots."""
+
+    def __init__(self, *, keep_for: timedelta = timedelta(hours=24)) -> None:
+        self._keep_for = keep_for
+        self._previous: _MomentState | None = None
+        self._events: list[dict] = []
+        self._lock = Lock()
+
+    def observe(self, snapshot: AmiSnapshot, now: datetime) -> list[dict]:
+        current = _moment_state(snapshot)
+        with self._lock:
+            if (
+                self._previous is not None
+                and self._previous.reachable
+                and current.reachable
+            ):
+                self._record_transitions(self._previous, current, now)
+            if current.reachable:
+                self._events = [
+                    event
+                    for event in self._events
+                    if _moment_event_is_still_current(event, current)
+                ]
+            self._previous = current
+            cutoff = now - self._keep_for
+            self._events = [
+                event for event in self._events if event["observed_at"] >= cutoff
+            ]
+            return list(reversed(self._events))
+
+    def _record_transitions(
+        self,
+        previous: _MomentState,
+        current: _MomentState,
+        now: datetime,
+    ) -> None:
+        previous_queues = dict(previous.queue_waiting)
+        current_queues = dict(current.queue_waiting)
+        for queue, previous_waiting in previous_queues.items():
+            if previous_waiting <= 0 or current_queues.get(queue, 0) != 0:
+                continue
+            self._add_event(
+                now,
+                kind="pbx_queue_cleared_moment",
+                title=f"{queue} has cleared its waiting callers.",
+                body=f"The queue moved from {previous_waiting} waiting caller(s) to none.",
+                why="The PBX queue snapshot no longer reports callers waiting.",
+                technical={
+                    "queue": queue,
+                    "previous_waiting_callers": str(previous_waiting),
+                },
+                scope=queue,
+            )
+
+        recovered = previous.unavailable_extensions - current.unavailable_extensions
+        if recovered:
+            count = len(recovered)
+            if not current.unavailable_extensions:
+                title = "All monitored phones are reachable again."
+                body = "The previously unavailable phone(s) recovered."
+            else:
+                title = f"{count} phone{'s' if count != 1 else ''} came back online."
+                body = "PBXSense saw the phone availability recover."
+            self._add_event(
+                now,
+                kind="pbx_phone_recovered_moment",
+                title=title,
+                body=body,
+                why="An endpoint changed from unavailable to reachable.",
+                technical={"recovered_extensions": ",".join(sorted(recovered))},
+            )
+
+        new_voicemail = current.voicemail_keys - previous.voicemail_keys
+        if new_voicemail:
+            count = len(new_voicemail)
+            self._add_event(
+                now,
+                kind="pbx_voicemail_received_moment",
+                title=(
+                    "A new voicemail arrived."
+                    if count == 1
+                    else f"{count} new voicemails arrived."
+                ),
+                body="The PBX recorded new voicemail since the previous snapshot.",
+                why="The local voicemail history contains new messages.",
+                technical={"new_voicemails": str(count)},
+            )
+
+    def _add_event(
+        self,
+        observed_at: datetime,
+        *,
+        kind: str,
+        title: str,
+        body: str,
+        why: str,
+        technical: dict[str, str],
+        scope: str = "",
+    ) -> None:
+        suffix = _safe_id(scope) if scope else "office"
+        self._events.append(
+            {
+                "id": f"sig_moment_{kind}_{suffix}_{int(observed_at.timestamp())}",
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "why": why,
+                "technical": technical,
+                "observed_at": observed_at,
+            }
+        )
+
+
+def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
+    queue_waiting = tuple(
+        sorted((queue.name, max(0, queue.waiting_callers)) for queue in snapshot.queues)
+    )
+    unavailable_extensions = frozenset(
+        endpoint.extension
+        for endpoint in snapshot.endpoints
+        if endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
+    )
+    voicemail_keys = frozenset(
+        f"{message.mailbox}|{message.caller}|{message.created_at.isoformat()}"
+        for message in snapshot.voicemails
+        if message.created_at is not None
+    )
+    return _MomentState(
+        reachable=snapshot.reachable,
+        queue_waiting=queue_waiting,
+        unavailable_extensions=unavailable_extensions,
+        voicemail_keys=voicemail_keys,
+    )
+
+
+def _moment_event_is_still_current(event: dict, current: _MomentState) -> bool:
+    """Remove event Moments when the PBX state they describe has reversed."""
+    kind = event["kind"]
+    if kind == "pbx_queue_cleared_moment":
+        queue = event["technical"]["queue"]
+        return dict(current.queue_waiting).get(queue, 0) == 0
+    if kind == "pbx_phone_recovered_moment":
+        recovered = frozenset(
+            extension
+            for extension in event["technical"]["recovered_extensions"].split(",")
+            if extension
+        )
+        if event["title"] == "All monitored phones are reachable again.":
+            return not current.unavailable_extensions
+        return recovered.isdisjoint(current.unavailable_extensions)
+    return True
 
 
 def build_home_payload(
@@ -59,6 +235,7 @@ def build_home_payload(
     pbx_host: str = "",
     pbx_port: int | str = "",
     moment_hours: int = 24,
+    moment_events: list[dict] | None = None,
 ) -> dict:
     now = now or _now(timezone_name)
     moment_hours = _valid_moment_hours(moment_hours)
@@ -79,6 +256,7 @@ def build_home_payload(
     }
     people = _build_people(snapshot.endpoints, active_channels, extension_names)
     trunks = _build_trunks(snapshot.endpoints, extension_names)
+    queues = _build_queues(snapshot.queues)
     active_calls = [
         _call_from_channel(
             channel,
@@ -109,12 +287,14 @@ def build_home_payload(
         endpoint_numbers,
         now,
         moment_hours,
+        moment_events or [],
     )
     signals.extend(
         build_engine_signals(
             endpoints=snapshot.endpoints,
             recent_calls=snapshot.recent_calls,
             voicemails=snapshot.voicemails,
+            security_events=snapshot.security_events,
             extension_names=extension_names,
             now=now,
         )
@@ -141,6 +321,7 @@ def build_home_payload(
         "calls": calls,
         "people": people,
         "trunks": trunks,
+        "queues": queues,
     }
 
 
@@ -278,6 +459,70 @@ def _build_trunks(
     return trunks
 
 
+def _build_queues(queues: list[AmiQueue]) -> list[dict]:
+    result: list[dict] = []
+    for queue in sorted(queues, key=lambda item: item.name):
+        waiting = max(0, queue.waiting_callers)
+        available = max(0, queue.available_members)
+        if waiting == 0:
+            status = "ready"
+            status_text = "No callers waiting"
+        elif available == 0:
+            status = "needs_attention"
+            status_text = f"{waiting} {_caller_label(waiting)} waiting"
+        else:
+            status = "waiting"
+            status_text = f"{waiting} {_caller_label(waiting)} waiting"
+
+        details = []
+        if waiting:
+            details.append(f"Longest wait {_wait_label(queue.longest_wait_seconds)}")
+        details.append(
+            f"{available} {_member_label(available)} available"
+            if available
+            else "No members available"
+        )
+        if queue.busy_members:
+            details.append(f"{queue.busy_members} busy")
+        if queue.paused_members:
+            details.append(f"{queue.paused_members} paused")
+
+        result.append(
+            {
+                "name": queue.name,
+                "queue": queue.name,
+                "status": status,
+                "statusText": status_text,
+                "detail": " · ".join(details),
+                "waitingCallers": waiting,
+                "longestWaitSeconds": max(0, queue.longest_wait_seconds),
+                "availableMembers": available,
+                "busyMembers": max(0, queue.busy_members),
+                "pausedMembers": max(0, queue.paused_members),
+                "totalMembers": max(0, queue.total_members),
+            }
+        )
+    return result
+
+
+def _caller_label(count: int) -> str:
+    return "caller" if count == 1 else "callers"
+
+
+def _member_label(count: int) -> str:
+    return "member" if count == 1 else "members"
+
+
+def _wait_label(seconds: int) -> str:
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, remainder = divmod(seconds, 60)
+    if remainder == 0:
+        return f"{minutes}m"
+    return f"{minutes}m {remainder}s"
+
+
 def _build_signals(
     snapshot: AmiSnapshot,
     active_channels: list[AmiChannel],
@@ -287,6 +532,7 @@ def _build_signals(
     endpoint_numbers: dict[str, str],
     now: datetime,
     moment_hours: int,
+    moment_events: list[dict],
 ) -> list[dict]:
     signals: list[dict] = []
 
@@ -421,7 +667,9 @@ def _build_signals(
                 }
             )
 
-    signals.extend(_moment_signals(snapshot, active_channels, now, moment_hours))
+    signals.extend(
+        _moment_signals(snapshot, active_channels, now, moment_hours, moment_events)
+    )
 
     return signals
 
@@ -431,237 +679,67 @@ def _moment_signals(
     active_channels: list[AmiChannel],
     now: datetime,
     moment_hours: int,
+    moment_events: list[dict],
 ) -> list[dict]:
-    recent_calls = _calls_in_window(snapshot.recent_calls, now, moment_hours)
-    signal_id = f"sig_moment_{now.date().isoformat()}_{moment_hours}h"
-    window_label = _moment_window_label(moment_hours)
-
+    signals: list[dict] = []
     if active_channels:
         active_count = len(_dedupe_call_channels(active_channels))
-        return [
+        signals.append(
             {
-                "id": signal_id,
-                "kind": "pbx_active_moment",
+                "id": "sig_moment_live_calls",
+                "kind": "pbx_live_calls_moment",
                 "category": "moment",
                 "importance": "feed",
                 "state": "active",
-                "title": "Calls are moving right now.",
-                "body": "PBXSense sees live call activity and is keeping the moment visible.",
+                "title": "Live calls are under way.",
+                "body": "PBXSense is seeing call activity on the PBX right now.",
                 "timeLabel": "Now",
                 "actionLabel": None,
                 "why": [
-                    "The PBX connector reported at least one active channel.",
-                    "Moments summarize what the PBX feels like without asking for action.",
+                    "The PBX connector reported active call channels.",
+                    "This is a live event, not a comparison with earlier call history.",
                 ],
-                "technical": {
-                    "active_calls": str(active_count),
-                    "visible_window": window_label,
-                },
-            }
-        ]
-
-    moment = _daily_behavior_moment(
-        snapshot.recent_calls,
-        recent_calls,
-        now,
-        moment_hours,
-    )
-    return [
-        {
-            "id": signal_id,
-            "kind": moment["kind"],
-            "category": "moment",
-            "importance": "feed",
-            "state": "active",
-            "title": moment["title"],
-            "body": moment["body"],
-            "timeLabel": _moment_time_label(moment_hours),
-            "actionLabel": None,
-            "why": [
-                "The PBX connector responded successfully.",
-                moment["why"],
-                "PBXSense chooses one useful daily Moment so the feed feels alive without becoming noisy.",
-            ],
-            "technical": {
-                **moment["technical"],
-                "visible_window": window_label,
-                "moment_pool": moment["pool"],
-            },
-        }
-    ]
-
-
-def _daily_behavior_moment(
-    all_calls: list[CdrCall],
-    recent_calls: list[CdrCall],
-    now: datetime,
-    moment_hours: int,
-) -> dict:
-    recent_answered = _history_kind_count(recent_calls, "answered")
-    recent_missed = _history_kind_count(recent_calls, "missed")
-    recent_ivr_reached = _history_kind_count(recent_calls, "ivr_reached")
-    previous_window_calls = _calls_between(
-        all_calls,
-        now.replace(tzinfo=None) - timedelta(hours=moment_hours * 2),
-        now.replace(tzinfo=None) - timedelta(hours=moment_hours),
-    )
-    window_label = _moment_window_label(moment_hours)
-    busiest_hour = _busiest_hour_label(recent_calls)
-    pool: list[dict] = []
-
-    if recent_calls:
-        call_word = "call" if len(recent_calls) == 1 else "calls"
-        pool.append(
-            {
-                "kind": "pbx_daily_flow_moment",
-                "title": f"{len(recent_calls)} {call_word} passed through in the {window_label}.",
-                "body": "PBXSense sees the day's call flow and is keeping a calm eye on it.",
-                "why": f"PBXSense counted recent call history inside the {window_label}.",
+                "technical": {"active_calls": str(active_count)},
             }
         )
 
-    if recent_answered > 0 and recent_missed == 0:
-        pool.append(
+    cutoff = now - timedelta(hours=moment_hours)
+    for event in moment_events:
+        if event["observed_at"] < cutoff:
+            continue
+        signals.append(
             {
-                "kind": "pbx_answered_cleanly_moment",
-                "title": "Recent calls are being answered cleanly.",
-                "body": f"PBXSense found answered calls without missed-call pressure in the {window_label}.",
-                "why": "Recent call history has answered calls and no missed calls.",
+                "id": event["id"],
+                "kind": event["kind"],
+                "category": "moment",
+                "importance": "feed",
+                "state": "active",
+                "title": event["title"],
+                "body": event["body"],
+                "timeLabel": _moment_event_time_label(event["observed_at"], now),
+                "actionLabel": None,
+                "why": [
+                    "PBXSense observed a change between PBX snapshots.",
+                    event["why"],
+                ],
+                "technical": event["technical"],
             }
         )
-
-    if recent_missed > recent_answered and recent_missed > 0:
-        pool.append(
-            {
-                "kind": "pbx_missed_weight_moment",
-                "title": "Missed calls shaped the day more than answered calls.",
-                "body": f"PBXSense noticed the {window_label} leaned toward calls that did not connect.",
-                "why": "Missed calls outnumbered answered calls in recent history.",
-            }
-        )
-
-    if busiest_hour is not None:
-        hour, count = busiest_hour
-        pool.append(
-            {
-                "kind": "pbx_busy_hour_moment",
-                "title": f"Calls clustered around {hour}.",
-                "body": f"{count} call(s) landed in that hour during the {window_label}.",
-                "why": "PBXSense grouped recent calls by hour and found the busiest one.",
-            }
-        )
-
-    if previous_window_calls:
-        if len(recent_calls) >= max(3, len(previous_window_calls) * 1.5):
-            pool.append(
-                {
-                    "kind": "pbx_busier_than_previous_window_moment",
-                    "title": "The PBX is busier than the previous window.",
-                    "body": f"The {window_label} has more visible call flow than the window before it.",
-                    "why": f"PBXSense compared the {window_label} with the same period before it.",
-                }
-            )
-        elif len(recent_calls) <= max(1, len(previous_window_calls) * 0.45):
-            pool.append(
-                {
-                    "kind": "pbx_quieter_than_previous_window_moment",
-                    "title": "The PBX is quieter than the previous window.",
-                    "body": f"The {window_label} has less visible call flow than the window before it.",
-                    "why": f"PBXSense compared the {window_label} with the same period before it.",
-                }
-            )
-
-    if not pool:
-        calm_pool = [
-            {
-                "kind": "pbx_reachable_moment",
-                "title": "The PBX is reachable right now.",
-                "body": "PBXSense is connected and waiting for something meaningful to happen.",
-                "why": "No live call or recent call history needed attention.",
-            },
-            {
-                "kind": "pbx_calm_day_moment",
-                "title": "The PBX has had a quiet day so far.",
-                "body": "PBXSense can reach the PBX, but recent call history is calm.",
-                "why": "The PBX is reachable and no recent call history was visible.",
-            },
-            {
-                "kind": "pbx_ready_moment",
-                "title": "The PBX is ready and waiting.",
-                "body": "PBXSense is connected and will surface activity when the day starts moving.",
-                "why": "The PBX connector responded and no active calls were present.",
-            },
-        ]
-        pool = calm_pool
-
-    selected = pool[now.toordinal() % len(pool)]
-    selected["technical"] = {
-        "recent_calls": str(len(recent_calls)),
-        "previous_window_calls": str(len(previous_window_calls)),
-        "answered_calls": str(recent_answered),
-        "missed_calls": str(recent_missed),
-        "ivr_reached_calls": str(recent_ivr_reached),
-        "moment_hours": str(moment_hours),
-    }
-    selected["pool"] = ",".join(item["kind"] for item in pool)
-    return selected
+    return signals[:5]
 
 
-def _calls_in_window(
-    calls: list[CdrCall],
-    now: datetime,
-    hours: int,
-) -> list[CdrCall]:
-    window_start = now.replace(tzinfo=None) - timedelta(hours=hours)
-    window_end = now.replace(tzinfo=None)
-    return _calls_between(calls, window_start, window_end)
+def _moment_event_time_label(observed_at: datetime, now: datetime) -> str:
+    elapsed_seconds = max(0, int((now - observed_at).total_seconds()))
+    if elapsed_seconds < 60:
+        return "Just now"
+    minutes = elapsed_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    return "Earlier today"
 
 
 def _valid_moment_hours(hours: int) -> int:
     return hours if hours in {1, 3, 6, 12, 24} else 24
-
-
-def _moment_window_label(hours: int) -> str:
-    return f"last {hours} hours"
-
-
-def _moment_time_label(hours: int) -> str:
-    return f"Last {hours} hours"
-
-
-def _calls_between(
-    calls: list[CdrCall],
-    window_start: datetime,
-    window_end: datetime,
-) -> list[CdrCall]:
-    return [
-        call
-        for call in calls
-        if call.started_at is not None
-        and window_start <= call.started_at.replace(tzinfo=None) < window_end
-    ]
-
-
-def _history_kind_count(calls: list[CdrCall], kind: str) -> int:
-    return sum(1 for call in calls if interpreted_call_kind(call) == kind)
-
-
-def _busiest_hour_label(calls: list[CdrCall]) -> tuple[str, int] | None:
-    counts: dict[int, int] = {}
-    for call in calls:
-        if call.started_at is None:
-            continue
-        hour = call.started_at.hour
-        counts[hour] = counts.get(hour, 0) + 1
-
-    if not counts:
-        return None
-
-    hour, count = max(counts.items(), key=lambda item: (item[1], -item[0]))
-    if count < 2:
-        return None
-
-    return f"{hour:02d}:00", count
 
 
 def _trunk_signals(

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.2.10-beta",
+    [string]$Version = "0.2.20-beta",
     [string]$OutputDir = ""
 )
 
@@ -69,6 +69,18 @@ function Copy-AgentPayload([string]$DestinationRoot) {
         Remove-Item -Recurse -Force
     Get-ChildItem -Path $DestinationRoot -Recurse -File -Include "*.pyc", "*.pyo" |
         Remove-Item -Force
+
+    # Release archives are frequently built on Windows and installed on Linux.
+    # Keep /bin/sh scripts in Unix form even when the source checkout uses CRLF.
+    foreach ($Script in @("scripts/install_linux.sh", "scripts/uninstall_linux.sh")) {
+        $ScriptPath = Join-Path $DestinationRoot $Script
+        if (-not (Test-Path $ScriptPath)) {
+            continue
+        }
+        $Content = [System.IO.File]::ReadAllText($ScriptPath)
+        $Content = $Content.Replace("`r`n", "`n").Replace("`r", "`n")
+        Write-Utf8NoBom $ScriptPath $Content
+    }
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {

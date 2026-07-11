@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+import re
 
 MISSED_CDR_DISPOSITIONS = {"NO ANSWER", "BUSY", "FAILED", "CONGESTION"}
 IVR_REACHED_KIND = "ivr_reached"
@@ -29,6 +30,25 @@ class VoicemailMessage:
     mailbox: str
     caller: str
     created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SecurityEvent:
+    kind: str
+    service: str
+    occurred_at: datetime | None
+
+
+_SECURITY_EVENT_PATTERN = re.compile(r'SecurityEvent="?([^",\s]+)')
+_SECURITY_SERVICE_PATTERN = re.compile(r'Service="?([^",\s]+)')
+_SECURITY_LOG_TIME_PATTERN = re.compile(r"^\[([^\]]+)\]")
+_SUPPORTED_SECURITY_EVENTS = {
+    "InvalidAccountID",
+    "InvalidPassword",
+    "ChallengeResponseFailed",
+    "FailedACL",
+    "RequestBadFormat",
+}
 
 
 def read_recent_cdr_calls(path: str, *, limit: int = 30) -> list[CdrCall]:
@@ -156,6 +176,76 @@ def history_diagnostics(cdr_csv_path: str, voicemail_path: str) -> dict[str, obj
             read_recent_voicemails(str(voicemail_root), limit=5)
         ),
     }
+
+
+def read_recent_security_events(
+    path: str,
+    *,
+    window_minutes: int = 15,
+    limit: int = 100,
+    now: datetime | None = None,
+) -> list[SecurityEvent]:
+    security_path = Path(path)
+    if not _is_file(security_path):
+        return []
+    try:
+        with security_path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - 262_144))
+            raw = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    cutoff = (now or datetime.now()) - timedelta(minutes=window_minutes)
+    events: list[SecurityEvent] = []
+    for line in raw.splitlines()[-limit * 10 :]:
+        event = _security_event_from_line(line)
+        if event is None:
+            continue
+        # Lines without a recognizable timestamp are excluded so an old entry
+        # cannot become a permanent Security signal.
+        if event.occurred_at is None or event.occurred_at < cutoff:
+            continue
+        events.append(event)
+    return events[-limit:]
+
+
+def security_diagnostics(path: str) -> dict[str, object]:
+    security_path = Path(path)
+    exists = _is_file(security_path)
+    return {
+        "securityLogPath": str(security_path),
+        "securityLogExists": exists,
+        "securityLogReadable": _is_readable_file(security_path),
+        "securityLogAccessError": _access_error(security_path, "file"),
+        "recentSecurityEvents": len(read_recent_security_events(str(security_path))),
+    }
+
+
+def _security_event_from_line(line: str) -> SecurityEvent | None:
+    event_match = _SECURITY_EVENT_PATTERN.search(line)
+    if event_match is None or event_match.group(1) not in _SUPPORTED_SECURITY_EVENTS:
+        return None
+    service_match = _SECURITY_SERVICE_PATTERN.search(line)
+    return SecurityEvent(
+        kind=event_match.group(1),
+        service=service_match.group(1) if service_match else "PBX",
+        occurred_at=_security_log_time(line),
+    )
+
+
+def _security_log_time(line: str) -> datetime | None:
+    match = _SECURITY_LOG_TIME_PATTERN.match(line)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value[:19], fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def _read_voicemail_metadata(path: Path) -> dict[str, str]:

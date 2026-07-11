@@ -17,6 +17,10 @@ out of the user-facing PBXSense experience.
   technical details.
 - Reports extension presence in People, including available, on-call, busy,
   ringing, away, DND, and offline states when the connector can observe them.
+- Shows Asterisk queue pressure, including callers waiting, longest wait, and
+  available, busy, or paused queue members.
+- Groups recent PBX authentication failures and blocked ACL attempts into
+  privacy-preserving Security Signals when the local security log is visible.
 - Streams live Home snapshots so the app can refresh without polling the PBX
   directly.
 - Serves pairing pages and QR payloads for connecting PBXSense to the local
@@ -40,12 +44,14 @@ The app should not talk directly to AMI, ESL, ARI, SIP, SSH, or raw PBX logs.
 - Asterisk through AMI.
 - FreeSWITCH through Event Socket.
 - Yeastar P-Series through its OAuth-protected OpenAPI.
+- Grandstream UCM through its restricted Asterisk Manager Interface (AMI).
 - Mock connector for local development and UI testing.
 
 GUI PBX distributions are mapped to their underlying PBX engine:
 
 - FreePBX, Issabel, and VitalPBX use the Asterisk connector.
 - FusionPBX uses the FreeSWITCH connector.
+- Grandstream UCM and SoftwareUCM use the dedicated UCM AMI connector.
 
 ## Usage Overview
 
@@ -101,7 +107,7 @@ http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
 The Agent is configured through environment variables. The most important ones
 are:
 
-- `PBXSENSE_PBX_TYPE`: `asterisk`, `freeswitch`, `yeastar`, or `mock`.
+- `PBXSENSE_PBX_TYPE`: `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or `mock`.
 - `PBXSENSE_AGENT_MODE`: connector mode; normally `ami`, `freeswitch`, `yeastar`, or `mock`.
 - `PBXSENSE_DISPLAY_NAME`: friendly name shown by the Agent.
 - `PBXSENSE_TIMEZONE`: IANA timezone used for timestamps and history.
@@ -111,6 +117,7 @@ are:
 - `ASTERISK_CDR_CSV_PATH`: Asterisk CDR CSV path for call history.
 - `ASTERISK_VOICEMAIL_PATH`: Asterisk voicemail spool path.
 - `ASTERISK_RECORDINGS_PATH`: Asterisk MixMonitor recording root.
+- `ASTERISK_SECURITY_LOG_PATH`: Asterisk security log for aggregate security Signals.
 - `FREESWITCH_RECORDINGS_PATH`: optional FreeSWITCH recording root.
 - `YEASTAR_*`: P-Series API base URL and client credentials.
 
@@ -281,6 +288,7 @@ ASTERISK_AMI_USERNAME=pbxsense
 ASTERISK_AMI_PASSWORD=<secret>
 ASTERISK_CDR_CSV_PATH=/var/log/asterisk/cdr-csv/Master.csv
 ASTERISK_VOICEMAIL_PATH=/var/spool/asterisk/voicemail
+ASTERISK_SECURITY_LOG_PATH=/var/log/asterisk/security
 ```
 
 Create or verify an AMI section like this in Asterisk:
@@ -291,7 +299,7 @@ enabled = yes
 
 [pbxsense]
 secret = <secret>
-read = system,call,reporting,command
+read = system,call,reporting,command,agent
 write =
 permit = 127.0.0.1/255.255.255.255
 ```
@@ -334,8 +342,9 @@ those FreeSWITCH modules/files are available.
 PBXSense connects to the PBX engine, not to the web GUI. FreePBX, Issabel, and
 VitalPBX are treated as Asterisk systems and use the AMI connector. FusionPBX is
 treated as a FreeSWITCH system and uses Event Socket. Set
-`PBXSENSE_PBX_TYPE=asterisk` or `PBXSENSE_PBX_TYPE=freeswitch`; the aliases
-`freepbx`, `issabel`, `vitalpbx`, and `fusionpbx` are accepted too.
+`PBXSENSE_PBX_TYPE=asterisk`, `grandstream`, or `freeswitch`; the aliases
+`freepbx`, `issabel`, `vitalpbx`, `grandstream-ucm`, `ucm6300`, and `fusionpbx`
+are accepted too.
 
 The main thing that can differ between GUI distributions is filesystem layout:
 CDR CSV location, voicemail spool location, and whether the GUI has already
@@ -350,6 +359,35 @@ friendly names, or if you want to rename them for the app.
 
 If your Asterisk writes CDR to another location, change
 `ASTERISK_CDR_CSV_PATH` in `/etc/pbxsense-agent.env`.
+
+### Grandstream UCM
+
+Grandstream UCM and SoftwareUCM run Asterisk and expose a restricted AMI
+integration. Use the dedicated UCM connector, which defaults to UCM's AMI port
+`7777` instead of generic Asterisk's `5038`:
+
+```text
+PBXSENSE_PBX_TYPE=grandstream-ucm
+GRANDSTREAM_UCM_AMI_HOST=<ucm-lan-address>
+GRANDSTREAM_UCM_AMI_PORT=7777
+GRANDSTREAM_UCM_AMI_USERNAME=<ucm-ami-user>
+GRANDSTREAM_UCM_AMI_PASSWORD=<ucm-ami-password>
+```
+
+In the UCM web UI, create a dedicated AMI user under **Value-added Features >
+AMI**, restrict its permitted IPs to the Agent host (or a trusted private
+subnet), and grant only the read privileges needed by PBXSense:
+
+```text
+system,call,reporting,command,agent
+```
+
+The `agent` privilege allows read-only queue visibility, including how many
+callers are waiting. For UCM TLS, set `GRANDSTREAM_UCM_AMI_TLS=true`; its
+documented default TLS port is `5039`. Keep certificate verification on unless
+the local UCM certificate is known to be self-signed. UCM recording and CDR
+paths vary by model and firmware, so configure history/recordings only after
+confirming the files are locally visible to the Agent.
 
 ## Docker Compose Option
 
@@ -683,7 +721,7 @@ log in and read channel/endpoint status. A starting point looks like:
 ```ini
 [pbxsense]
 secret = your-secret
-read = system,call,reporting,command
+read = system,call,reporting,command,agent
 write =
 permit = 127.0.0.1/255.255.255.255
 ```

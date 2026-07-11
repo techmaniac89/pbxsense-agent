@@ -12,17 +12,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .connectors import connector_for_settings
-from .history import history_diagnostics, read_recent_cdr_calls, read_recent_voicemails
+from .history import (
+    history_diagnostics,
+    read_recent_cdr_calls,
+    read_recent_security_events,
+    read_recent_voicemails,
+    security_diagnostics,
+)
 from .live import home_live_events
 from .mock import mock_snapshot
 from .network import is_private_or_loopback_host
-from .pulse import build_home_payload
+from .pulse import MomentTracker, _now, build_home_payload
 from .recordings import find_recording
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
 settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
+moment_tracker = MomentTracker()
 app = FastAPI(title="PBXSense Agent", version=AGENT_VERSION)
 LOCAL_WEB_COOKIE = "pbxsense_agent_local_web"
 LIVE_INTERVAL_SECONDS = 1
@@ -94,8 +101,9 @@ def _page(*, title: str, body: str) -> str:
     return f"""<!doctype html>
     <html lang="en">
       <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <link rel="icon" href="/favicon.svg" type="image/svg+xml">
         <title>{escape(title)}</title>
         <style>
           :root {{
@@ -148,9 +156,9 @@ def _page(*, title: str, body: str) -> str:
             display: grid;
             place-items: center;
             border-radius: 18px;
-            background: #30281f;
-            color: var(--coral);
-            box-shadow: inset 0 0 0 1px rgba(216, 174, 98, 0.22);
+            background: #152d26;
+            color: #75d49b;
+            box-shadow: inset 0 0 0 1px rgba(117, 212, 155, 0.24);
           }}
           .mark svg {{ width: 30px; height: 30px; }}
           h1 {{ margin: 0; font-size: clamp(30px, 6vw, 44px); letter-spacing: 0; }}
@@ -295,6 +303,11 @@ def health(request: Request) -> dict[str, object]:
     }
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon() -> Response:
+    return Response(_beacon_svg(), media_type="image/svg+xml")
+
+
 @app.get("/home")
 def home(request: Request):
     if redirect := _localhost_cookie_redirect(request):
@@ -360,11 +373,7 @@ def recording(recording_id: str, request: Request):
             headers={"Content-Disposition": f'inline; filename="{filename}"'},
         )
 
-    root = (
-        settings.freeswitch_recordings_path
-        if settings.pbx_type == "freeswitch"
-        else settings.asterisk_recordings_path
-    )
+    root = _recordings_path()
     path = find_recording(root, recording_id)
     if path is None:
         raise HTTPException(status_code=404, detail="Recording was not found in the configured root")
@@ -373,11 +382,13 @@ def recording(recording_id: str, request: Request):
 
 def _diagnostics_response(request: Request):
     payload = connector.diagnostics()
-    if settings.pbx_type == "asterisk":
+    if settings.pbx_type in {"asterisk", "grandstream"}:
+        cdr_path, voicemail_path = _history_paths()
         payload["history"] = history_diagnostics(
-            settings.cdr_csv_path,
-            settings.voicemail_path,
+            cdr_path,
+            voicemail_path,
         )
+        payload["security"] = security_diagnostics(_security_log_path())
     if _wants_html(request):
         return HTMLResponse(_json_page(request, "PBXSense diagnostics", payload))
     return JSONResponse(payload)
@@ -412,25 +423,32 @@ async def live(websocket: WebSocket) -> None:
 
 def _home_payload(*, moment_hours: int = 24) -> dict:
     snapshot = connector.snapshot()
-    if settings.pbx_type == "asterisk" and snapshot.reachable:
+    if settings.pbx_type in {"asterisk", "grandstream"} and snapshot.reachable:
+        cdr_path, voicemail_path = _history_paths()
         snapshot = snapshot.__class__(
             reachable=snapshot.reachable,
             agent_version=snapshot.agent_version,
             channels=snapshot.channels,
             endpoints=snapshot.endpoints,
-            recent_calls=read_recent_cdr_calls(settings.cdr_csv_path, limit=1000),
-            voicemails=read_recent_voicemails(settings.voicemail_path),
+            queues=snapshot.queues,
+            recent_calls=read_recent_cdr_calls(cdr_path, limit=1000),
+            voicemails=read_recent_voicemails(voicemail_path),
+            security_events=read_recent_security_events(_security_log_path()),
             error=snapshot.error,
         )
+    observed_at = _now(settings.timezone)
+    moment_events = moment_tracker.observe(snapshot, observed_at)
     return build_home_payload(
         snapshot,
         display_name=settings.display_name,
         extension_names=settings.extension_names,
+        now=observed_at,
         timezone_name=settings.timezone,
         pbx_type=settings.pbx_type,
         pbx_host=_pbx_host(),
         pbx_port=_pbx_port(),
         moment_hours=moment_hours,
+        moment_events=moment_events,
     )
 
 
@@ -455,6 +473,8 @@ def _pbx_host() -> str:
         return settings.freeswitch_host
     if settings.pbx_type == "yeastar":
         return settings.yeastar_base_url
+    if settings.pbx_type == "grandstream":
+        return settings.grandstream_ami_host
     return settings.host
 
 
@@ -463,23 +483,55 @@ def _pbx_port() -> int | str:
         return settings.freeswitch_port
     if settings.pbx_type == "yeastar":
         return "https"
+    if settings.pbx_type == "grandstream":
+        return settings.grandstream_ami_port
     return settings.port
+
+
+def _history_paths() -> tuple[str, str]:
+    if settings.pbx_type == "grandstream":
+        return settings.grandstream_cdr_csv_path, settings.grandstream_voicemail_path
+    return settings.cdr_csv_path, settings.voicemail_path
+
+
+def _recordings_path() -> str:
+    if settings.pbx_type == "freeswitch":
+        return settings.freeswitch_recordings_path
+    if settings.pbx_type == "grandstream":
+        return settings.grandstream_recordings_path
+    return settings.asterisk_recordings_path
+
+
+def _security_log_path() -> str:
+    if settings.pbx_type == "grandstream":
+        return settings.grandstream_security_log_path
+    return settings.asterisk_security_log_path
 
 
 def _brand_html() -> str:
     return f"""
       <div class="brand">
         <div class="mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" fill="none" role="img">
-            <path d="M16 26C9.8 20.7 6 16.9 6 12.1C6 8.4 8.8 6 12 6C14.1 6 15.4 7.1 16 8.7C16.6 7.1 17.9 6 20 6C23.2 6 26 8.4 26 12.1C26 16.9 22.2 20.7 16 26Z" fill="currentColor"/>
-            <path d="M7 16H12L14 12L17 21L20 16H25" stroke="#5f7f59" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          {_beacon_svg()}
         </div>
         <div>
           <h1>PBXSense Agent</h1>
           <p class="subtitle">{escape(settings.display_name)}</p>
         </div>
       </div>
+    """
+
+
+def _beacon_svg() -> str:
+    """Match the PBXBeaconIcon used by the companion Flutter app."""
+    return """
+      <svg viewBox="0 0 32 32" fill="none" role="img" aria-label="PBXSense beacon" color="#75d49b">
+        <circle cx="16" cy="16" r="8.8" stroke="currentColor" stroke-width="2.4"
+          stroke-linecap="round" stroke-dasharray="44.6 10.7" transform="rotate(17 16 16)" opacity="0.68"/>
+        <circle cx="16" cy="16" r="13.9" stroke="currentColor" stroke-width="2.4"
+          stroke-linecap="round" stroke-dasharray="54.9 32.4" transform="rotate(123 16 16)" opacity="0.45"/>
+        <circle cx="16" cy="16" r="3.7" fill="currentColor"/>
+      </svg>
     """
 
 

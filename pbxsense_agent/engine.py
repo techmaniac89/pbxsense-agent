@@ -5,7 +5,7 @@ from datetime import datetime
 import re
 from typing import Any
 
-from .history import CdrCall, VoicemailMessage, interpreted_call_kind
+from .history import CdrCall, SecurityEvent, VoicemailMessage, interpreted_call_kind
 
 
 def build_engine_signals(
@@ -13,6 +13,7 @@ def build_engine_signals(
     endpoints: list[Any],
     recent_calls: list[CdrCall],
     voicemails: list[VoicemailMessage],
+    security_events: list[SecurityEvent],
     extension_names: dict[str, str],
     now: datetime,
 ) -> list[dict]:
@@ -24,7 +25,7 @@ def build_engine_signals(
     signals.extend(_rhythm_insights(recent_calls, now))
     signals.extend(_missed_rate_recommendations(recent_calls, now))
     signals.extend(_endpoint_recommendations(endpoints, extension_names))
-    signals.extend(_security_signals(endpoints, recent_calls, extension_names, now))
+    signals.extend(_security_signals(recent_calls, security_events, now))
     return signals
 
 
@@ -373,9 +374,8 @@ def _endpoint_from_channel(value: str) -> str:
 
 
 def _security_signals(
-    endpoints: list[Any],
     recent_calls: list[CdrCall],
-    extension_names: dict[str, str],
+    security_events: list[SecurityEvent],
     now: datetime,
 ) -> list[dict]:
     signals: list[dict] = []
@@ -408,32 +408,86 @@ def _security_signals(
             }
         )
 
-    unavailable_trunks = [
-        endpoint
-        for endpoint in endpoints
-        if endpoint.role == "trunk" and _endpoint_unavailable(endpoint)
+    authentication_events = [
+        event
+        for event in security_events
+        if event.kind in {"InvalidAccountID", "InvalidPassword", "ChallengeResponseFailed"}
     ]
-    for endpoint in unavailable_trunks[:2]:
-        name = _extension_name(endpoint.extension, extension_names, endpoint.label)
+    if len(authentication_events) >= 3:
+        services = ", ".join(sorted({event.service for event in authentication_events})[:3])
         signals.append(
             {
-                "id": f"sig_security_trunk_exposure_{_safe_id(endpoint.extension)}",
-                "kind": "trunk_security_watch",
+                "id": "sig_security_authentication_failures",
+                "kind": "authentication_failure_cluster",
                 "category": "security",
                 "importance": "attention",
                 "state": "active",
-                "title": f"{name} should be checked before routing calls.",
-                "body": "A trunk that is unavailable can affect call routing and deserves a quiet security-minded check.",
-                "timeLabel": "Just now",
+                "title": "Several PBX login attempts were rejected.",
+                "body": "PBXSense grouped recent failed authentication events for review.",
+                "timeLabel": "Recent",
                 "actionLabel": None,
                 "why": [
-                    "AMI reported a trunk endpoint as unavailable.",
-                    "PBXSense treats trunk availability as both service health and routing risk.",
+                    f"PBXSense found {len(authentication_events)} recent rejected authentication events.",
+                    "The Agent keeps only aggregate security evidence, not account names or addresses.",
                 ],
                 "technical": {
-                    "endpoint": endpoint.extension,
-                    "device_state": endpoint.device_state,
-                    "role": "trunk",
+                    "attempts": str(len(authentication_events)),
+                    "services": services or "PBX",
+                    "window": "15 minutes",
+                },
+            }
+        )
+
+    acl_events = [event for event in security_events if event.kind == "FailedACL"]
+    if len(acl_events) >= 2:
+        services = ", ".join(sorted({event.service for event in acl_events})[:3])
+        signals.append(
+            {
+                "id": "sig_security_acl_failures",
+                "kind": "acl_failure_cluster",
+                "category": "security",
+                "importance": "attention",
+                "state": "active",
+                "title": "Repeated PBX access attempts were blocked.",
+                "body": "PBXSense grouped recent access-control failures for review.",
+                "timeLabel": "Recent",
+                "actionLabel": None,
+                "why": [
+                    f"PBXSense found {len(acl_events)} recent ACL failures.",
+                    "The Agent keeps only aggregate security evidence, not account names or addresses.",
+                ],
+                "technical": {
+                    "attempts": str(len(acl_events)),
+                    "services": services or "PBX",
+                    "window": "15 minutes",
+                },
+            }
+        )
+
+    malformed_events = [
+        event for event in security_events if event.kind == "RequestBadFormat"
+    ]
+    if len(malformed_events) >= 3:
+        services = ", ".join(sorted({event.service for event in malformed_events})[:3])
+        signals.append(
+            {
+                "id": "sig_security_malformed_requests",
+                "kind": "malformed_request_cluster",
+                "category": "security",
+                "importance": "attention",
+                "state": "active",
+                "title": "Several malformed PBX requests were rejected.",
+                "body": "PBXSense grouped recent invalid request-format events for review.",
+                "timeLabel": "Recent",
+                "actionLabel": None,
+                "why": [
+                    f"PBXSense found {len(malformed_events)} recent malformed requests.",
+                    "The Agent keeps only aggregate security evidence, not account names or addresses.",
+                ],
+                "technical": {
+                    "attempts": str(len(malformed_events)),
+                    "services": services or "PBX",
+                    "window": "15 minutes",
                 },
             }
         )
