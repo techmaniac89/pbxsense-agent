@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from datetime import timedelta
 from html import escape
 from urllib.parse import urlencode
 
@@ -25,6 +26,7 @@ from .network import is_private_or_loopback_host
 from .pulse import (
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
+    EndpointAggregateTipTracker,
     _now,
     build_home_payload,
 )
@@ -37,9 +39,11 @@ settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
 activity_tracker = ActivityTracker()
 endpoint_availability_tracker = EndpointAvailabilitySignalTracker()
+endpoint_aggregate_tip_tracker = EndpointAggregateTipTracker(
+    timedelta(seconds=max(0, settings.quality_frequency_seconds))
+)
 push_relay = AgentRelay(
     url=settings.relay_url,
-    claim_code=settings.relay_claim_code,
     identity_path=settings.relay_identity_path,
     display_name=settings.display_name,
     timeout_seconds=settings.relay_timeout_seconds,
@@ -79,6 +83,7 @@ async def _relay_publish_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(_home_payload)
+            await asyncio.to_thread(push_relay.heartbeat)
         except Exception:
             # A connector failure is already represented by the normal health
             # signal; it must not permanently stop remote push processing.
@@ -135,7 +140,10 @@ def index(request: Request):
               <a class="button" href="/diagnostics{_link_token_suffix(request)}">Diagnostics</a>
             </div>
             {diagnostic_html}
-            <p class="footer">PBX: {escape(settings.pbx_type)} - Version {AGENT_VERSION}</p>
+            <p class="footer">
+              <span>PBX: {escape(settings.pbx_type)}</span>
+              <small>Version {AGENT_VERSION}</small>
+            </p>
           </section>
         """,
     )
@@ -306,10 +314,13 @@ def _page(*, title: str, body: str) -> str:
           dt {{ color: var(--muted); }}
           dd {{ margin: 0; font-weight: 650; overflow-wrap: anywhere; }}
           .footer {{
+            display: grid;
+            gap: 3px;
             margin-top: 18px;
             color: var(--muted);
             font-size: 13px;
           }}
+          .footer small {{ font-size: inherit; }}
           pre {{
             margin: 18px 0 0;
             padding: 18px;
@@ -492,6 +503,7 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         snapshot,
         observed_at,
     )
+    show_aggregate_tip = endpoint_aggregate_tip_tracker.observe(snapshot, observed_at)
 
 
     payload = build_home_payload(
@@ -507,6 +519,11 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         moment_events=moment_events,
         endpoint_unavailability_signals=endpoint_unavailability_signals,
     )
+    if not show_aggregate_tip:
+        payload["signals"] = [
+            signal for signal in payload["signals"]
+            if signal.get("id") != "sig_tip_multiple_endpoints_unavailable"
+        ]
     push_relay.observe(payload.get("signals", []))
     return payload
 

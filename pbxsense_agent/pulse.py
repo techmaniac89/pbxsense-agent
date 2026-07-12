@@ -213,7 +213,7 @@ class EndpointAvailabilitySignalTracker:
     def __init__(
         self,
         *,
-        outage_confirmation: timedelta = timedelta(minutes=1),
+        outage_confirmation: timedelta = timedelta(0),
         recovery_confirmation: timedelta = timedelta(minutes=2),
     ) -> None:
         self._outage_confirmation = outage_confirmation
@@ -249,6 +249,11 @@ class EndpointAvailabilitySignalTracker:
                     if state.recovery_started_at is not None:
                         state.recovery_started_at = None
                         state.outage_started_at = now
+                        # A fresh outage is a new Health incident even when
+                        # the prior recovery had not yet completed its calm
+                        # confirmation window. Never suppress it.
+                        state.episode_notified = False
+                        state.signal_visible = False
                     elif state.outage_started_at is None:
                         state.outage_started_at = now
 
@@ -273,6 +278,27 @@ class EndpointAvailabilitySignalTracker:
                     self._states.pop(extension, None)
 
         return visible
+
+
+class EndpointAggregateTipTracker:
+    """Delays a multi-phone recommendation while keeping Health immediate."""
+
+    def __init__(self, delay: timedelta) -> None:
+        self._delay = delay
+        self._started_at: datetime | None = None
+        self._lock = Lock()
+
+    def observe(self, snapshot: AmiSnapshot, now: datetime) -> bool:
+        unavailable = sum(
+            endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
+            for endpoint in snapshot.endpoints
+        )
+        with self._lock:
+            if unavailable < 2:
+                self._started_at = None
+                return False
+            self._started_at = self._started_at or now
+            return now - self._started_at >= self._delay
 
 
 def _moment_state(snapshot: AmiSnapshot) -> _MomentState:

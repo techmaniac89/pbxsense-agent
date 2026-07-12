@@ -28,72 +28,12 @@ app = FastAPI(title="PBXSense Push Relay", version="0.1.0")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
+AGENT_LOSS_TIMEOUT_SECONDS = 60
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "pbxsense-push-relay"}
-
-
-@app.post("/v1/admin/claims")
-async def create_claim(request: Request) -> dict[str, str]:
-    _require_admin(request)
-    body = await _json_body(request)
-    tenant_id = _clean_id(body.get("tenantId"), "tenantId")
-    site_id = _clean_id(body.get("siteId"), "siteId")
-    site_name = _clean_text(body.get("siteName"), "siteName")
-    claim_code = secrets.token_urlsafe(24)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-    db.collection("claims").document(claim_code).create(
-        {
-            "tenantId": tenant_id,
-            "siteId": site_id,
-            "siteName": site_name,
-            "expiresAt": expires_at,
-            "claimedAt": None,
-        }
-    )
-    return {"claimCode": claim_code, "expiresAt": expires_at.isoformat()}
-
-
-@app.post("/v1/agents/enroll")
-async def enroll_agent(request: Request) -> dict[str, str]:
-    body = await _json_body(request)
-    claim_code = _clean_text(body.get("claimCode"), "claimCode")
-    public_key = _clean_text(body.get("publicKey"), "publicKey")
-    display_name = _clean_text(body.get("displayName"), "displayName")
-    _decode_public_key(public_key)
-
-    claim_ref = db.collection("claims").document(claim_code)
-    claim = claim_ref.get()
-    if not claim.exists:
-        raise HTTPException(status_code=401, detail="Unknown enrollment claim")
-    claim_data = claim.to_dict() or {}
-    expires_at = claim_data.get("expiresAt")
-    if claim_data.get("claimedAt") or not isinstance(expires_at, datetime) or expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Expired or used enrollment claim")
-
-    agent_id = f"agent_{secrets.token_urlsafe(12)}"
-    agent = {
-        "tenantId": claim_data["tenantId"],
-        "siteId": claim_data["siteId"],
-        "siteName": claim_data["siteName"],
-        "displayName": display_name,
-        "publicKey": public_key,
-        "enrolledAt": firestore.SERVER_TIMESTAMP,
-        "lastSeenAt": firestore.SERVER_TIMESTAMP,
-        "revoked": False,
-    }
-    batch = db.batch()
-    batch.create(db.collection("agents").document(agent_id), agent)
-    batch.update(claim_ref, {"claimedAt": firestore.SERVER_TIMESTAMP, "agentId": agent_id})
-    batch.commit()
-    return {
-        "agentId": agent_id,
-        "tenantId": agent["tenantId"],
-        "siteId": agent["siteId"],
-        "siteName": agent["siteName"],
-    }
 
 
 @app.post("/v1/activations")
@@ -194,6 +134,37 @@ async def revoke_device(agent_id: str, request: Request) -> dict[str, str]:
     device_id = hashlib.sha256(token.encode("utf-8")).hexdigest()
     db.collection("agents").document(agent_id).collection("devices").document(device_id).delete()
     return {"status": "revoked"}
+
+
+@app.post("/v1/agents/{agent_id}/heartbeat")
+async def heartbeat(agent_id: str, request: Request) -> dict[str, str]:
+    _, agent = await _authenticate_agent(agent_id, request)
+    agent_ref = db.collection("agents").document(agent_id)
+    was_lost = bool(agent.get("lostAt"))
+    agent_ref.update({"lastSeenAt": firestore.SERVER_TIMESTAMP, "lostAt": None})
+    if was_lost:
+        _send_agent_status(agent_id, "PBXSense Agent is reachable again.", "Live PBX updates have resumed.")
+    return {"status": "ok"}
+
+
+@app.post("/v1/internal/sweep-agent-heartbeats")
+async def sweep_agent_heartbeats(request: Request) -> dict[str, int]:
+    """Invoke every minute from Cloud Scheduler with the admin secret."""
+    _require_admin(request)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=AGENT_LOSS_TIMEOUT_SECONDS)
+    lost = 0
+    for snapshot in db.collection("agents").where("lastSeenAt", "<", cutoff).stream():
+        agent = snapshot.to_dict() or {}
+        if agent.get("revoked") or agent.get("lostAt"):
+            continue
+        snapshot.reference.update({"lostAt": firestore.SERVER_TIMESTAMP})
+        _send_agent_status(
+            snapshot.id,
+            "PBXSense lost the Agent.",
+            "Live PBX updates are paused until the Agent is reachable again.",
+        )
+        lost += 1
+    return {"lost": lost}
 
 
 @app.delete("/v1/agents/{agent_id}/devices")
@@ -310,6 +281,29 @@ def _device_wants_event(device: dict[str, Any], category: str, importance: str) 
     return importance in {"attention", "important"}
 
 
+def _send_agent_status(agent_id: str, title: str, body: str) -> None:
+    now = datetime.now(timezone.utc)
+    devices = [
+        document.to_dict() or {}
+        for document in db.collection("agents").document(agent_id).collection("devices").stream()
+    ]
+    tokens = [
+        str(device.get("fcmToken", ""))
+        for device in devices
+        if device.get("meaningfulEnabled", True) and device.get("expiresAt", now) >= now
+    ]
+    if not tokens:
+        return
+    messaging.send_each_for_multicast(
+        messaging.MulticastMessage(
+            tokens=tokens,
+            notification=messaging.Notification(title=title, body=body),
+            data={"kind": "agent_connection", "agentId": agent_id},
+            android=messaging.AndroidConfig(priority="high"),
+        )
+    )
+
+
 async def _json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -342,11 +336,4 @@ def _clean_text(value: object, name: str) -> str:
     text = str(value or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail=f"{name} is required")
-    return text
-
-
-def _clean_id(value: object, name: str) -> str:
-    text = _clean_text(value, name)
-    if not text.replace("-", "").replace("_", "").isalnum():
-        raise HTTPException(status_code=400, detail=f"{name} contains unsupported characters")
     return text

@@ -17,6 +17,11 @@ except ImportError:  # Existing Agents remain usable before the optional relay i
     Ed25519PrivateKey = None  # type: ignore[assignment,misc]
 
 
+# A 15-second cadence paired with the relay's 60-second loss timeout tolerates
+# one missed request without turning a brief network hiccup into a false alarm.
+PRESENCE_HEARTBEAT_INTERVAL_SECONDS = 15
+
+
 class AgentRelay:
     """Signs Agent requests and maintains a small durable relay outbox."""
 
@@ -24,18 +29,17 @@ class AgentRelay:
         self,
         *,
         url: str,
-        claim_code: str,
         identity_path: str,
         display_name: str,
         timeout_seconds: float = 5,
     ) -> None:
         self._url = url.rstrip("/")
-        self._claim_code = claim_code  # Legacy compatibility; QR activation is preferred.
         self._path = Path(identity_path)
         self._display_name = display_name
         self._timeout_seconds = timeout_seconds
         self._lock = threading.Lock()
         self._state = self._load()
+        self._last_heartbeat_at = 0.0
 
     @property
     def configured(self) -> bool:
@@ -143,6 +147,23 @@ class AgentRelay:
             self._save()
             self._flush()
 
+    def heartbeat(self) -> None:
+        with self._lock:
+            if (
+                not self._ensure_enrolled()
+                or time.monotonic() - self._last_heartbeat_at < PRESENCE_HEARTBEAT_INTERVAL_SECONDS
+            ):
+                return
+            try:
+                self._request(
+                    f"/v1/agents/{self._state['agent_id']}/heartbeat",
+                    {},
+                    signed=True,
+                )
+                self._last_heartbeat_at = time.monotonic()
+            except OSError:
+                pass
+
     def _ensure_enrolled(self) -> bool:
         if not self._url:
             return False
@@ -164,28 +185,7 @@ class AgentRelay:
                 self._save()
                 return True
             return False
-        if not self._claim_code:
-            return False
-        private = self._private_key()
-        public_key = _encode(private.public_key().public_bytes(
-            serialization.Encoding.Raw,
-            serialization.PublicFormat.Raw,
-        ))
-        try:
-            response = self._request(
-                "/v1/agents/enroll",
-                {
-                    "claimCode": self._claim_code,
-                    "publicKey": public_key,
-                    "displayName": self._display_name,
-                },
-                signed=False,
-            )
-        except OSError:
-            return False
-        self._state["agent_id"] = str(response["agentId"])
-        self._save()
-        return True
+        return False
 
     def _queue(self, kind: str, payload: dict[str, object]) -> None:
         outbox = self._state.setdefault("outbox", [])

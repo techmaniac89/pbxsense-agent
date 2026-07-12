@@ -25,9 +25,9 @@ class AgentSettings:
     timezone: str
     token: str
     relay_url: str = ""
-    relay_claim_code: str = ""
     relay_identity_path: str = "/var/lib/pbxsense-agent/relay_identity.json"
     relay_timeout_seconds: float = 5
+    quality_frequency_seconds: int = 180
     asterisk_recordings_path: str = "/var/spool/asterisk/monitor"
     asterisk_security_log_path: str = "/var/log/asterisk/security"
     freeswitch_recordings_path: str = ""
@@ -99,12 +99,12 @@ class AgentSettings:
             timezone=os.getenv("PBXSENSE_TIMEZONE", os.getenv("TZ", "")).strip(),
             token=os.getenv("PBXSENSE_AGENT_TOKEN", "").strip(),
             relay_url=os.getenv("PBXSENSE_RELAY_URL", "").strip().rstrip("/"),
-            relay_claim_code=os.getenv("PBXSENSE_RELAY_CLAIM_CODE", "").strip(),
             relay_identity_path=os.getenv(
                 "PBXSENSE_RELAY_IDENTITY_PATH",
                 "/var/lib/pbxsense-agent/relay_identity.json",
             ).strip(),
             relay_timeout_seconds=_env_float("PBXSENSE_RELAY_TIMEOUT", 5),
+            quality_frequency_seconds=_env_int("PBXSENSE_QUALITY_FREQUENCY_SECONDS", 180),
             asterisk_recordings_path=os.getenv(
                 "ASTERISK_RECORDINGS_PATH",
                 "/var/spool/asterisk/monitor",

@@ -664,7 +664,9 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(payload["signals"][0]["importance"], "attention")
 
     def test_endpoint_unavailability_requires_stable_outage_and_recovery(self) -> None:
-        tracker = EndpointAvailabilitySignalTracker()
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(minutes=1),
+        )
         now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
         unavailable = AmiSnapshot(
             reachable=True,
@@ -686,7 +688,7 @@ class PulseMappingTest(unittest.TestCase):
 
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=1, seconds=1)), set())
         self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=1, seconds=2)), set())
-        self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=3)), set())
+        self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=3)), {"200"})
 
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=3, seconds=1)), set())
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=5, seconds=1)), set())
@@ -695,6 +697,24 @@ class PulseMappingTest(unittest.TestCase):
             tracker.observe(unavailable, now + timedelta(minutes=6, seconds=2)),
             {"200"},
         )
+
+    def test_new_outage_is_not_suppressed_during_recovery_window(self) -> None:
+        tracker = EndpointAvailabilitySignalTracker()
+        now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
+        unavailable = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="200", device_state="Unavailable")],
+        )
+        reachable = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="200", device_state="Reachable")],
+        )
+
+        self.assertEqual(tracker.observe(unavailable, now), {"200"})
+        self.assertEqual(tracker.observe(reachable, now + timedelta(seconds=1)), set())
+        self.assertEqual(tracker.observe(unavailable, now + timedelta(seconds=2)), {"200"})
 
     def test_endpoint_label_is_used_before_manual_extension_name(self) -> None:
         payload = build_home_payload(
