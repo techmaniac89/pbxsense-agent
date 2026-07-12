@@ -199,6 +199,82 @@ class ActivityTracker:
         )
 
 
+@dataclass
+class _EndpointSignalState:
+    outage_started_at: datetime | None = None
+    recovery_started_at: datetime | None = None
+    episode_notified: bool = False
+    signal_visible: bool = False
+
+
+class EndpointAvailabilitySignalTracker:
+    """Turns unstable endpoint status into one calm health Signal per incident."""
+
+    def __init__(
+        self,
+        *,
+        outage_confirmation: timedelta = timedelta(minutes=1),
+        recovery_confirmation: timedelta = timedelta(minutes=2),
+    ) -> None:
+        self._outage_confirmation = outage_confirmation
+        self._recovery_confirmation = recovery_confirmation
+        self._states: dict[str, _EndpointSignalState] = {}
+        self._lock = Lock()
+
+    def observe(self, snapshot: AmiSnapshot, now: datetime) -> set[str]:
+        """Return endpoints whose unavailable Signal is ready to be shown.
+
+        A phone has to remain unavailable for the outage confirmation period.
+        Once it has alerted, a short recovery does not arm another alert; the
+        phone must remain reachable for the recovery confirmation period first.
+        """
+        if not snapshot.reachable:
+            return set()
+
+        endpoints = {
+            endpoint.extension: endpoint
+            for endpoint in snapshot.endpoints
+            if endpoint.role != "trunk"
+        }
+        visible: set[str] = set()
+        with self._lock:
+            self._states = {
+                extension: state
+                for extension, state in self._states.items()
+                if extension in endpoints
+            }
+            for extension, endpoint in endpoints.items():
+                state = self._states.setdefault(extension, _EndpointSignalState())
+                if _endpoint_unavailable(endpoint):
+                    if state.recovery_started_at is not None:
+                        state.recovery_started_at = None
+                        state.outage_started_at = now
+                    elif state.outage_started_at is None:
+                        state.outage_started_at = now
+
+                    if (
+                        not state.episode_notified
+                        and now - state.outage_started_at >= self._outage_confirmation
+                    ):
+                        state.episode_notified = True
+                        state.signal_visible = True
+                    if state.signal_visible:
+                        visible.add(extension)
+                    continue
+
+                state.outage_started_at = None
+                state.signal_visible = False
+                if not state.episode_notified:
+                    self._states.pop(extension, None)
+                    continue
+                if state.recovery_started_at is None:
+                    state.recovery_started_at = now
+                elif now - state.recovery_started_at >= self._recovery_confirmation:
+                    self._states.pop(extension, None)
+
+        return visible
+
+
 def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
     queue_waiting = tuple(
         sorted((queue.name, max(0, queue.waiting_callers)) for queue in snapshot.queues)
@@ -251,6 +327,7 @@ def build_home_payload(
     pbx_port: int | str = "",
     moment_hours: int = 24,
     moment_events: list[dict] | None = None,
+    endpoint_unavailability_signals: set[str] | None = None,
 ) -> dict:
     now = now or _now(timezone_name)
     moment_hours = _valid_moment_hours(moment_hours)
@@ -303,6 +380,7 @@ def build_home_payload(
         now,
         moment_hours,
         moment_events or [],
+        endpoint_unavailability_signals,
     )
     signals.extend(
         build_engine_signals(
@@ -548,6 +626,7 @@ def _build_signals(
     now: datetime,
     moment_hours: int,
     moment_events: list[dict],
+    endpoint_unavailability_signals: set[str] | None,
 ) -> list[dict]:
     signals: list[dict] = []
 
@@ -658,7 +737,10 @@ def _build_signals(
             signals.extend(_trunk_signals(endpoint, extension_names))
             continue
 
-        if _endpoint_unavailable(endpoint):
+        if _endpoint_unavailable(endpoint) and (
+            endpoint_unavailability_signals is None
+            or endpoint.extension in endpoint_unavailability_signals
+        ):
             name = _extension_name(endpoint.extension, extension_names, endpoint.label)
             signals.append(
                 {
