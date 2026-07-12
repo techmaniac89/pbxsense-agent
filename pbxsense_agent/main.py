@@ -29,6 +29,7 @@ from .pulse import (
     build_home_payload,
 )
 from .recordings import find_recording
+from .relay import AgentRelay
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -36,9 +37,18 @@ settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
 activity_tracker = ActivityTracker()
 endpoint_availability_tracker = EndpointAvailabilitySignalTracker()
+push_relay = AgentRelay(
+    url=settings.relay_url,
+    claim_code=settings.relay_claim_code,
+    identity_path=settings.relay_identity_path,
+    display_name=settings.display_name,
+    timeout_seconds=settings.relay_timeout_seconds,
+)
 app = FastAPI(title="PBXSense Agent", version=AGENT_VERSION)
 LOCAL_WEB_COOKIE = "pbxsense_agent_local_web"
 LIVE_INTERVAL_SECONDS = 1
+RELAY_PUBLISH_INTERVAL_SECONDS = 5
+_relay_publish_task: asyncio.Task[None] | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +56,34 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["authorization", "x-pbxsense-token"],
 )
+
+
+@app.on_event("startup")
+async def start_relay_publisher() -> None:
+    global _relay_publish_task
+    if settings.relay_url:
+        _relay_publish_task = asyncio.create_task(_relay_publish_loop())
+
+
+@app.on_event("shutdown")
+async def stop_relay_publisher() -> None:
+    if _relay_publish_task is not None:
+        _relay_publish_task.cancel()
+        try:
+            await _relay_publish_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _relay_publish_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_home_payload)
+        except Exception:
+            # A connector failure is already represented by the normal health
+            # signal; it must not permanently stop remote push processing.
+            pass
+        await asyncio.sleep(RELAY_PUBLISH_INTERVAL_SECONDS)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -306,6 +344,7 @@ def health(request: Request) -> dict[str, object]:
         "mode": settings.mode,
         "pbxType": settings.pbx_type,
         "authRequired": bool(settings.token),
+        "pushRelay": push_relay.status(),
     }
 
 
@@ -453,7 +492,9 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         snapshot,
         observed_at,
     )
-    return build_home_payload(
+
+
+    payload = build_home_payload(
         snapshot,
         display_name=settings.display_name,
         extension_names=settings.extension_names,
@@ -466,6 +507,36 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         moment_events=moment_events,
         endpoint_unavailability_signals=endpoint_unavailability_signals,
     )
+    push_relay.observe(payload.get("signals", []))
+    return payload
+
+
+@app.post("/push/devices")
+async def register_push_device(request: Request) -> dict[str, object]:
+    """Forward this paired phone's FCM token to the enrolled relay Agent."""
+    _require_token(request)
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="JSON body required") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    fcm_token = str(payload.get("fcmToken", "")).strip()
+    if not fcm_token:
+        raise HTTPException(status_code=400, detail="fcmToken is required")
+    return push_relay.register_device(
+        fcm_token=fcm_token,
+        meaningful=bool(payload.get("meaningfulEnabled", True)),
+        activity=bool(payload.get("activityEnabled", True)),
+    )
+
+
+@app.post("/push/devices/revoke")
+async def revoke_push_device(request: Request) -> dict[str, bool]:
+    _require_token(request)
+    payload = await request.json()
+    token = str(payload.get("fcmToken", "")).strip() if isinstance(payload, dict) else ""
+    return {"revoked": push_relay.remove_device(fcm_token=token)}
 
 
 def _moment_hours(request: Request) -> int:
@@ -683,6 +754,11 @@ def _pairing_payload(request: Request) -> str:
     query = {"agent": agent_url}
     if settings.token:
         query["token"] = settings.token
+    activation = push_relay.activation()
+    if activation:
+        query["relay"] = settings.relay_url
+        query["activation"] = activation["id"]
+        query["activationSecret"] = activation["secret"]
     return "pbxsense://pair?" + urlencode(query)
 
 
