@@ -21,6 +21,14 @@ def home_live_events(previous: dict, current: dict) -> list[dict]:
             updated_type="signal_updated",
         )
     )
+    events.extend(
+        _removed_collection_events(
+            previous.get("signals", []),
+            current.get("signals", []),
+            key="id",
+            removed_type="signal_removed",
+        )
+    )
 
     if previous.get("calls") != current.get("calls"):
         events.append({"type": "calls_updated", "data": current.get("calls", [])})
@@ -89,3 +97,29 @@ def _collection_events(
             events.append({"type": updated_type, "data": item})
 
     return events
+
+
+def _removed_collection_events(
+    previous_items: object,
+    current_items: object,
+    *,
+    key: str,
+    removed_type: str,
+) -> list[dict]:
+    if not isinstance(previous_items, list) or not isinstance(current_items, list):
+        return []
+
+    current_keys = {
+        str(item.get(key, ""))
+        for item in current_items
+        if isinstance(item, dict) and item.get(key)
+    }
+    return [
+        {"type": removed_type, "data": {key: item_key}}
+        for item_key in (
+            str(item.get(key, ""))
+            for item in previous_items
+            if isinstance(item, dict) and item.get(key)
+        )
+        if item_key not in current_keys
+    ]

@@ -70,35 +70,40 @@ class _MomentState:
     voicemail_keys: frozenset[str]
 
 
-class MomentTracker:
-    """Keeps short-lived, event-based Moments between PBX snapshots."""
+class ActivityTracker:
+    """Keeps short-lived, event-based Activity between PBX snapshots."""
 
     def __init__(self, *, keep_for: timedelta = timedelta(hours=24)) -> None:
         self._keep_for = keep_for
         self._previous: _MomentState | None = None
         self._events: list[dict] = []
+        self._reported_phone_recoveries: dict[str, datetime] = {}
         self._lock = Lock()
 
     def observe(self, snapshot: AmiSnapshot, now: datetime) -> list[dict]:
         current = _moment_state(snapshot)
         with self._lock:
-            if (
-                self._previous is not None
-                and self._previous.reachable
-                and current.reachable
-            ):
-                self._record_transitions(self._previous, current, now)
             if current.reachable:
+                if self._previous is not None:
+                    self._record_transitions(self._previous, current, now)
                 self._events = [
                     event
                     for event in self._events
-                    if _moment_event_is_still_current(event, current)
+                    if _activity_event_is_still_current(event, current)
                 ]
-            self._previous = current
+                # Keep the last healthy state through a transient AMI failure.
+                # The next healthy snapshot can then show a real recovery instead
+                # of losing the transition entirely.
+                self._previous = current
             cutoff = now - self._keep_for
             self._events = [
                 event for event in self._events if event["observed_at"] >= cutoff
             ]
+            self._reported_phone_recoveries = {
+                extension: observed_at
+                for extension, observed_at in self._reported_phone_recoveries.items()
+                if observed_at >= cutoff
+            }
             return list(reversed(self._events))
 
     def _record_transitions(
@@ -114,7 +119,7 @@ class MomentTracker:
                 continue
             self._add_event(
                 now,
-                kind="pbx_queue_cleared_moment",
+                kind="pbx_queue_cleared_activity",
                 title=f"{queue} has cleared its waiting callers.",
                 body=f"The queue moved from {previous_waiting} waiting caller(s) to none.",
                 why="The PBX queue snapshot no longer reports callers waiting.",
@@ -126,8 +131,16 @@ class MomentTracker:
             )
 
         recovered = previous.unavailable_extensions - current.unavailable_extensions
-        if recovered:
-            count = len(recovered)
+        new_recoveries = {
+            extension
+            for extension in recovered
+            if extension not in self._reported_phone_recoveries
+        }
+        if new_recoveries:
+            self._reported_phone_recoveries.update(
+                {extension: now for extension in new_recoveries}
+            )
+            count = len(new_recoveries)
             if not current.unavailable_extensions:
                 title = "All monitored phones are reachable again."
                 body = "The previously unavailable phone(s) recovered."
@@ -136,11 +149,13 @@ class MomentTracker:
                 body = "PBXSense saw the phone availability recover."
             self._add_event(
                 now,
-                kind="pbx_phone_recovered_moment",
+                kind="pbx_phone_recovered_activity",
                 title=title,
                 body=body,
                 why="An endpoint changed from unavailable to reachable.",
-                technical={"recovered_extensions": ",".join(sorted(recovered))},
+                technical={
+                    "recovered_extensions": ",".join(sorted(new_recoveries))
+                },
             )
 
         new_voicemail = current.voicemail_keys - previous.voicemail_keys
@@ -148,7 +163,7 @@ class MomentTracker:
             count = len(new_voicemail)
             self._add_event(
                 now,
-                kind="pbx_voicemail_received_moment",
+                kind="pbx_voicemail_received_activity",
                 title=(
                     "A new voicemail arrived."
                     if count == 1
@@ -206,13 +221,13 @@ def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
     )
 
 
-def _moment_event_is_still_current(event: dict, current: _MomentState) -> bool:
-    """Remove event Moments when the PBX state they describe has reversed."""
+def _activity_event_is_still_current(event: dict, current: _MomentState) -> bool:
+    """Remove Activity events when the PBX state they describe has reversed."""
     kind = event["kind"]
-    if kind == "pbx_queue_cleared_moment":
+    if kind == "pbx_queue_cleared_activity":
         queue = event["technical"]["queue"]
         return dict(current.queue_waiting).get(queue, 0) == 0
-    if kind == "pbx_phone_recovered_moment":
+    if kind == "pbx_phone_recovered_activity":
         recovered = frozenset(
             extension
             for extension in event["technical"]["recovered_extensions"].split(",")
@@ -402,7 +417,7 @@ def _normalized_presence(raw: str) -> tuple[str, str] | None:
     if not value:
         return None
     normalized = value.lower().replace("_", " ").replace("-", " ")
-    if any(marker in normalized for marker in ("unavailable", "unreachable", "offline", "removed")):
+    if _device_state_is_unavailable(normalized):
         return "offline", "Offline"
     if "do not disturb" in normalized or normalized == "dnd":
         return "do_not_disturb", "Do not disturb"
@@ -668,13 +683,13 @@ def _build_signals(
             )
 
     signals.extend(
-        _moment_signals(snapshot, active_channels, now, moment_hours, moment_events)
+        _activity_signals(snapshot, active_channels, now, moment_hours, moment_events)
     )
 
     return signals
 
 
-def _moment_signals(
+def _activity_signals(
     snapshot: AmiSnapshot,
     active_channels: list[AmiChannel],
     now: datetime,
@@ -686,9 +701,9 @@ def _moment_signals(
         active_count = len(_dedupe_call_channels(active_channels))
         signals.append(
             {
-                "id": "sig_moment_live_calls",
-                "kind": "pbx_live_calls_moment",
-                "category": "moment",
+                "id": "sig_activity_live_calls",
+                "kind": "pbx_live_calls_activity",
+                "category": "activity",
                 "importance": "feed",
                 "state": "active",
                 "title": "Live calls are under way.",
@@ -711,12 +726,12 @@ def _moment_signals(
             {
                 "id": event["id"],
                 "kind": event["kind"],
-                "category": "moment",
+                "category": "activity",
                 "importance": "feed",
                 "state": "active",
                 "title": event["title"],
                 "body": event["body"],
-                "timeLabel": _moment_event_time_label(event["observed_at"], now),
+                "timeLabel": _activity_event_time_label(event["observed_at"], now),
                 "actionLabel": None,
                 "why": [
                     "PBXSense observed a change between PBX snapshots.",
@@ -728,7 +743,7 @@ def _moment_signals(
     return signals[:5]
 
 
-def _moment_event_time_label(observed_at: datetime, now: datetime) -> str:
+def _activity_event_time_label(observed_at: datetime, now: datetime) -> str:
     elapsed_seconds = max(0, int((now - observed_at).total_seconds()))
     if elapsed_seconds < 60:
         return "Just now"
@@ -1101,8 +1116,31 @@ def _is_active_channel(channel: AmiChannel) -> bool:
 
 
 def _endpoint_unavailable(endpoint: AmiEndpoint) -> bool:
-    state = endpoint.device_state.lower()
-    return "unavailable" in state or "unreachable" in state
+    return _device_state_is_unavailable(endpoint.device_state)
+
+
+def _device_state_is_unavailable(raw: str) -> bool:
+    """Recognize the unavailable states emitted by supported PBX connectors.
+
+    Asterisk commonly reports ``Unreachable`` while vendor connectors and
+    older AMI peers can use ``Unregistered``, ``Unknown``, or ``Rejected``.
+    Treating all of those states consistently is essential: the health signal,
+    People status, and recovery Activity must all use the same baseline.
+    """
+    state = raw.strip().lower().replace("_", " ").replace("-", " ")
+    return any(
+        marker in state
+        for marker in (
+            "unavailable",
+            "unreachable",
+            "offline",
+            "removed",
+            "unregistered",
+            "not registered",
+            "unknown",
+            "rejected",
+        )
+    )
 
 
 def _registered_trunk_detail(device_state: str) -> str:

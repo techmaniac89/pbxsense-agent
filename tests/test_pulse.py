@@ -39,7 +39,7 @@ from pbxsense_agent.pulse import (
     AmiEndpoint,
     AmiQueue,
     AmiSnapshot,
-    MomentTracker,
+    ActivityTracker,
     build_home_payload,
 )
 from pbxsense_agent.settings import AgentSettings, _normalize_pbx_type
@@ -512,6 +512,17 @@ class PulseMappingTest(unittest.TestCase):
                 "trunk_updated",
                 "queue_updated",
             ],
+        )
+
+    def test_live_events_include_removed_signal(self) -> None:
+        events = home_live_events(
+            {"signals": [{"id": "sig_phone_recovered"}]},
+            {"signals": []},
+        )
+
+        self.assertEqual(
+            events,
+            [{"type": "signal_removed", "data": {"id": "sig_phone_recovered"}}],
         )
 
     def test_home_payload_maps_active_call_to_signal(self) -> None:
@@ -1152,9 +1163,9 @@ class PulseMappingTest(unittest.TestCase):
         ]
         self.assertEqual(moments, [])
 
-    def test_moment_tracker_emits_real_pbx_transitions(self) -> None:
+    def test_activity_tracker_emits_real_pbx_transitions(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
-        tracker = MomentTracker()
+        tracker = ActivityTracker()
         active = AmiChannel(
             channel="PJSIP/101-00000042",
             extension="101",
@@ -1185,8 +1196,8 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(
             {event["kind"] for event in events},
             {
-                "pbx_queue_cleared_moment",
-                "pbx_phone_recovered_moment",
+                "pbx_queue_cleared_activity",
+                "pbx_phone_recovered_activity",
             },
         )
         payload = build_home_payload(
@@ -1197,13 +1208,13 @@ class PulseMappingTest(unittest.TestCase):
             moment_events=events,
         )
         self.assertEqual(
-            {signal["kind"] for signal in payload["signals"] if signal["category"] == "moment"},
+            {signal["kind"] for signal in payload["signals"] if signal["category"] == "activity"},
             {event["kind"] for event in events},
         )
 
-    def test_moment_tracker_removes_reversed_recovery_and_clear_moments(self) -> None:
+    def test_activity_tracker_removes_reversed_recovery_and_clear_activity(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
-        tracker = MomentTracker()
+        tracker = ActivityTracker()
         active = AmiChannel(
             channel="PJSIP/101-00000042",
             extension="101",
@@ -1242,10 +1253,23 @@ class PulseMappingTest(unittest.TestCase):
         )
 
         self.assertEqual(events, [])
+        events = tracker.observe(
+            AmiSnapshot(
+                reachable=True,
+                agent_version="test",
+                queues=[AmiQueue(name="support", waiting_callers=1)],
+                endpoints=[AmiEndpoint(extension="101", device_state="Reachable")],
+            ),
+            now + timedelta(minutes=3),
+        )
 
-    def test_moment_tracker_ignores_state_changes_while_pbx_is_unreachable(self) -> None:
+        self.assertFalse(
+            any(event["kind"] == "pbx_phone_recovered_activity" for event in events)
+        )
+
+    def test_activity_tracker_keeps_last_healthy_state_through_pbx_outage(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
-        tracker = MomentTracker()
+        tracker = ActivityTracker()
         tracker.observe(
             AmiSnapshot(
                 reachable=True,
@@ -1267,7 +1291,45 @@ class PulseMappingTest(unittest.TestCase):
             now + timedelta(minutes=2),
         )
 
-        self.assertEqual(events, [])
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["pbx_phone_recovered_activity"],
+        )
+
+    def test_activity_tracker_recognizes_unregistered_phone_recovery(self) -> None:
+        now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
+        tracker = ActivityTracker()
+        offline_snapshot = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="101", device_state="Unregistered")],
+        )
+        tracker.observe(offline_snapshot, now)
+
+        recovered_snapshot = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="101", device_state="Registered")],
+        )
+        events = tracker.observe(recovered_snapshot, now + timedelta(minutes=1))
+        payload = build_home_payload(
+            recovered_snapshot,
+            display_name="Office PBX",
+            extension_names={},
+            now=now + timedelta(minutes=1),
+            moment_events=events,
+        )
+
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["pbx_phone_recovered_activity"],
+        )
+        self.assertTrue(
+            any(
+                signal["kind"] == "pbx_phone_recovered_activity"
+                for signal in payload["signals"]
+            )
+        )
 
     def test_cdr_history_replaces_placeholder_destination_with_trunk_number(self) -> None:
         record = CdrCall(
@@ -1733,7 +1795,7 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(trunk["category"], "health")
         self.assertFalse(any(signal["kind"] == "trunk_security_watch" for signal in payload["signals"]))
 
-    def test_home_payload_can_carry_every_signal_category(self) -> None:
+    def test_home_payload_can_carry_every_current_signal_category(self) -> None:
         calls = [
             CdrCall(
                 source="101",
@@ -1812,7 +1874,6 @@ class PulseMappingTest(unittest.TestCase):
                 "security",
                 "insight",
                 "recommendation",
-                "moment",
             },
         )
 

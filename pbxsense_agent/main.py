@@ -22,14 +22,14 @@ from .history import (
 from .live import home_live_events
 from .mock import mock_snapshot
 from .network import is_private_or_loopback_host
-from .pulse import MomentTracker, _now, build_home_payload
+from .pulse import ActivityTracker, _now, build_home_payload
 from .recordings import find_recording
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
 settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
-moment_tracker = MomentTracker()
+activity_tracker = ActivityTracker()
 app = FastAPI(title="PBXSense Agent", version=AGENT_VERSION)
 LOCAL_WEB_COOKIE = "pbxsense_agent_local_web"
 LIVE_INTERVAL_SECONDS = 1
@@ -413,7 +413,12 @@ async def live(websocket: WebSocket) -> None:
             moment_hours=moment_hours,
         )
         if current_payload != previous_payload:
-            await websocket.send_json({"type": "home_snapshot", "data": current_payload})
+            events = home_live_events(previous_payload, current_payload)
+            if events:
+                for event in events:
+                    await websocket.send_json(event)
+            else:
+                await websocket.send_json({"type": "home_snapshot", "data": current_payload})
             previous_payload = current_payload
             continue
         for event in home_live_events(previous_payload, current_payload):
@@ -423,7 +428,7 @@ async def live(websocket: WebSocket) -> None:
 
 def _home_payload(*, moment_hours: int = 24) -> dict:
     snapshot = connector.snapshot()
-    if settings.pbx_type in {"asterisk", "grandstream"} and snapshot.reachable:
+    if settings.pbx_type in {"asterisk", "grandstream"}:
         cdr_path, voicemail_path = _history_paths()
         snapshot = snapshot.__class__(
             reachable=snapshot.reachable,
@@ -437,7 +442,7 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
             error=snapshot.error,
         )
     observed_at = _now(settings.timezone)
-    moment_events = moment_tracker.observe(snapshot, observed_at)
+    moment_events = activity_tracker.observe(snapshot, observed_at)
     return build_home_payload(
         snapshot,
         display_name=settings.display_name,
