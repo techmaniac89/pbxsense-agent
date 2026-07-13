@@ -152,6 +152,30 @@ class RelayTest(unittest.TestCase):
             )
             self.assertEqual(len(relay.requests), 1)
 
+    def test_live_call_activity_stays_in_feed_without_push_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay.observe(
+                [
+                    {
+                        "id": f"sig_{kind}",
+                        "kind": kind,
+                        "state": "active",
+                        "category": "activity",
+                        "importance": "feed",
+                        "title": "Live call activity",
+                    }
+                    for kind in (
+                        "call_active",
+                        "pbx_live_calls_activity",
+                        "trunk_active",
+                        "trunk_call_active",
+                    )
+                ]
+            )
+
+            self.assertEqual(relay.requests, [])
+
     def test_registers_paired_device_with_notification_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _RecordingRelay(str(Path(directory) / "identity.json"))

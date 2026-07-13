@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.2.43-beta",
+    [string]$Version = "0.3.0-beta",
     [string]$OutputDir = ""
 )
 
@@ -163,6 +163,7 @@ registers the systemd service.
     Write-Utf8NoBom (Join-Path $StageRoot "RELEASE-MANIFEST.txt") @"
 name=PBXSense Agent
 version=$Version
+channel=breeze
 target=linux-source-installer
 format=source-installer
 installer=scripts/install_linux.sh

@@ -34,7 +34,7 @@ from .recordings import find_recording
 from .relay import AgentRelay
 from .relay import PRESENCE_HEARTBEAT_INTERVAL_SECONDS
 from .settings import AgentSettings
-from .version import AGENT_VERSION
+from .version import AGENT_RELEASE_CHANNEL, AGENT_VERSION
 
 settings = AgentSettings.from_env()
 connector = connector_for_settings(settings)
@@ -162,7 +162,7 @@ def index(request: Request):
             {diagnostic_html}
             <p class="footer">
               <span>PBX: {escape(settings.pbx_type)}</span>
-              <small>Version {AGENT_VERSION}</small>
+              <small>Version {AGENT_VERSION} · {AGENT_RELEASE_CHANNEL.title()}</small>
             </p>
           </section>
         """,
@@ -585,6 +585,7 @@ def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
             signal for signal in payload["signals"]
             if signal.get("id") != "sig_tip_multiple_endpoints_unavailable"
         ]
+    payload["connection"]["releaseChannel"] = AGENT_RELEASE_CHANNEL
     return payload
 
 

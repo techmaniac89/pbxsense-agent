@@ -21,6 +21,12 @@ except ImportError:  # Existing Agents remain usable before the optional relay i
 # A 15-second cadence paired with the relay's 60-second loss timeout tolerates
 # one missed request without turning a brief network hiccup into a false alarm.
 PRESENCE_HEARTBEAT_INTERVAL_SECONDS = 15
+_FEED_ONLY_LIVE_CALL_KINDS = {
+    "call_active",
+    "pbx_live_calls_activity",
+    "trunk_active",
+    "trunk_call_active",
+}
 
 
 class AgentRelay:
@@ -327,6 +333,8 @@ class AgentRelay:
 
 def _should_relay(signal: dict[str, object]) -> bool:
     if signal.get("state") != "active" or signal.get("category") == "recommendation":
+        return False
+    if signal.get("kind") in _FEED_ONLY_LIVE_CALL_KINDS:
         return False
     if signal.get("category") == "activity":
         return True
