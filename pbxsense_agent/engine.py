@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from typing import Any
 
@@ -379,10 +379,13 @@ def _security_signals(
     now: datetime,
 ) -> list[dict]:
     signals: list[dict] = []
+    cutoff = now.replace(tzinfo=None) - timedelta(minutes=15)
     failed_calls = [
         call
         for call in recent_calls
         if call.disposition.upper() in {"FAILED", "CONGESTION"}
+        and call.started_at is not None
+        and call.started_at >= cutoff
     ]
     if len(failed_calls) >= 3:
         signals.append(
@@ -402,15 +405,20 @@ def _security_signals(
                 ],
                 "technical": {
                     "attempts": str(len(failed_calls)),
-                    "window": _history_window(recent_calls, now),
+                    "window": "15 minutes",
                     "sources": ", ".join(sorted({call.source for call in failed_calls if call.source})[:5]),
                 },
             }
         )
 
-    authentication_events = [
+    recent_security_events = [
         event
         for event in security_events
+        if event.occurred_at is not None and event.occurred_at >= cutoff
+    ]
+    authentication_events = [
+        event
+        for event in recent_security_events
         if event.kind in {"InvalidAccountID", "InvalidPassword", "ChallengeResponseFailed"}
     ]
     if len(authentication_events) >= 3:
@@ -438,7 +446,7 @@ def _security_signals(
             }
         )
 
-    acl_events = [event for event in security_events if event.kind == "FailedACL"]
+    acl_events = [event for event in recent_security_events if event.kind == "FailedACL"]
     if len(acl_events) >= 2:
         services = ", ".join(sorted({event.service for event in acl_events})[:3])
         signals.append(
@@ -465,7 +473,7 @@ def _security_signals(
         )
 
     malformed_events = [
-        event for event in security_events if event.kind == "RequestBadFormat"
+        event for event in recent_security_events if event.kind == "RequestBadFormat"
     ]
     if len(malformed_events) >= 3:
         services = ", ".join(sorted({event.service for event in malformed_events})[:3])

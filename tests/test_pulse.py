@@ -19,6 +19,8 @@ from pbxsense_agent.connectors import connector_for_settings
 from pbxsense_agent.freeswitch import (
     FreeSwitchClient,
     _channel_from_row,
+    _first_integer,
+    _pipe_first_column,
     _read_json_cdr_calls,
     _read_voicemails as _read_freeswitch_voicemails,
 )
@@ -204,6 +206,32 @@ class PulseMappingTest(unittest.TestCase):
 
         self.assertEqual(calls[0].recording_id, "20260709-1000-2105550100.wav")
 
+    def test_yeastar_queue_status_maps_waiting_callers_and_longest_wait(self) -> None:
+        settings = AgentSettings(
+            mode="yeastar", pbx_type="yeastar", host="", port=0,
+            username="", password="", freeswitch_host="", freeswitch_port=0,
+            freeswitch_password="", freeswitch_cdr_json_path="",
+            freeswitch_voicemail_path="", display_name="Yeastar",
+            timeout_seconds=3, extension_names={}, cdr_csv_path="",
+            voicemail_path="", timezone="UTC", token="",
+        )
+        client = YeastarClient(settings)
+
+        def queue_api(endpoint: str, params: dict | None = None) -> dict:
+            if endpoint == "queue/search":
+                return {"data": [{"id": 3, "number": "6400", "name": "Support"}]}
+            return {
+                "waiting_calls": 2,
+                "waiting_list": [{"duration": 18}, {"duration": 42}],
+            }
+
+        with patch.object(client, "_api", side_effect=queue_api):
+            queues = client._queues()
+
+        self.assertEqual(queues[0].name, "6400")
+        self.assertEqual(queues[0].waiting_callers, 2)
+        self.assertEqual(queues[0].longest_wait_seconds, 42)
+
     def test_recording_locator_never_returns_files_outside_the_configured_root(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -213,6 +241,25 @@ class PulseMappingTest(unittest.TestCase):
             found = find_recording(str(root), "171943-1000")
 
         self.assertEqual(found, recording)
+
+    def test_recording_locator_does_not_match_overlapping_call_ids(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "20260626-171943-10001-1001.wav").write_bytes(b"wrong")
+
+            found = find_recording(str(root), "171943-1000")
+
+        self.assertIsNone(found)
+
+    def test_recording_locator_rejects_ambiguous_matches(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a-171943-1000.wav").write_bytes(b"one")
+            (root / "b-171943-1000.wav").write_bytes(b"two")
+
+            found = find_recording(str(root), "171943-1000")
+
+        self.assertIsNone(found)
 
     def test_freeswitch_json_cdr_and_voicemail_paths_are_optional_history_sources(self) -> None:
         with TemporaryDirectory() as directory:
@@ -269,6 +316,11 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(channel.caller, "Reception")
         self.assertEqual(channel.caller_number, "101")
         self.assertEqual(channel.linked_id, "bridge-1")
+
+    def test_freeswitch_callcenter_queue_output_maps_waiting_count(self) -> None:
+        raw = "name|strategy|moh_sound\nsupport@default|longest-idle-agent|moh\n"
+        self.assertEqual(_pipe_first_column(raw), ["support@default"])
+        self.assertEqual(_first_integer("2"), 2)
 
     def test_ami_contact_status_refreshes_endpoint_reachability(self) -> None:
         endpoints = _endpoints_from_events(
@@ -1744,7 +1796,7 @@ class PulseMappingTest(unittest.TestCase):
                 source=str(index),
                 destination="900",
                 disposition="FAILED",
-                started_at=datetime(2026, 6, 26, 19, 30 + index),
+                started_at=datetime(2026, 6, 26, 19, 50 + index),
                 duration_seconds=0,
             )
             for index in range(3)
@@ -1764,6 +1816,27 @@ class PulseMappingTest(unittest.TestCase):
         security = [signal for signal in payload["signals"] if signal["category"] == "security"]
         self.assertEqual(security[0]["kind"], "failed_call_cluster")
         self.assertEqual(security[0]["technical"]["attempts"], "3")
+
+    def test_old_failed_calls_do_not_create_a_security_cluster(self) -> None:
+        calls = [
+            CdrCall(
+                source=str(index),
+                destination="900",
+                disposition="FAILED",
+                started_at=datetime(2026, 6, 26, 19, index),
+                duration_seconds=0,
+            )
+            for index in range(3)
+        ]
+        payload = build_home_payload(
+            AmiSnapshot(reachable=True, agent_version="test", recent_calls=calls),
+            display_name="Office PBX",
+            extension_names={},
+            now=datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens")),
+        )
+
+        kinds = {signal["kind"] for signal in payload["signals"]}
+        self.assertNotIn("failed_call_cluster", kinds)
 
     def test_security_log_events_create_authentication_signal_without_sensitive_data(self) -> None:
         payload = build_home_payload(

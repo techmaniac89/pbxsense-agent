@@ -93,14 +93,19 @@ enable API access under `Integrations > API`; if IP restriction is enabled, add
 the Agent host. Keep `YEASTAR_VERIFY_TLS=true` unless the local PBX deliberately
 uses a trusted self-signed certificate.
 
+If extensions work but Yeastar queues are empty, grant the API client access to
+`queue/search` and `queue/call_status`. If FreeSWITCH extensions work but queues
+are empty, confirm `mod_callcenter` is loaded and that
+`callcenter_config queue list` works through `fs_cli`.
+
 ## Pairing Problems
 
 If `/pair` opens locally but not from another device:
 
 - Confirm the other device can reach `http://<agent-host>:8765/`.
 - Confirm host firewall rules allow TCP port `8765`.
-- Private LAN/VPN client IPs should not need the token in the URL for Agent
-  HTTP or `/live` access. The pairing payload still includes the token:
+- Private LAN/VPN addresses do not bypass Agent authentication. Open the
+  pairing page with the configured token or scan the protected QR:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
@@ -145,6 +150,8 @@ typos: Asterisk commonly uses `cdr-custom`, not `csv-custom`.
 For recorded calls, a standard Asterisk CSV only advertises a recording when its
 CDR `userfield` contains the recording filename. The Agent never exposes host
 paths: it serves matching audio only through `GET /recordings/{recording-id}`.
+If more than one file matches a shortened recording ID, the Agent returns no
+recording; configure the CDR source to provide the complete filename.
 
 ## Docker Network Problems
 

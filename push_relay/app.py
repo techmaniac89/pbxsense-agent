@@ -25,7 +25,7 @@ from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 
 
-app = FastAPI(title="PBXSense Push Relay", version="0.1.1")
+app = FastAPI(title="PBXSense Push Relay", version="0.1.2")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
@@ -136,7 +136,13 @@ async def activation_status(activation_id: str, request: Request) -> dict[str, o
         str(activation.get("secretHash", "")), hashlib.sha256(secret.encode("utf-8")).hexdigest()
     ):
         raise HTTPException(status_code=401, detail="Unknown activation")
-    return {"claimed": bool(activation.get("claimedAt")), "agentId": activation.get("agentId", "")}
+    expires_at = activation.get("expiresAt")
+    expired = isinstance(expires_at, datetime) and expires_at < datetime.now(timezone.utc)
+    return {
+        "claimed": bool(activation.get("claimedAt")),
+        "agentId": activation.get("agentId", ""),
+        "expired": expired,
+    }
 
 
 @app.post("/v1/agents/{agent_id}/devices")
@@ -173,9 +179,10 @@ async def heartbeat(agent_id: str, request: Request) -> dict[str, str]:
     _, agent = await _authenticate_agent(agent_id, request)
     agent_ref = db.collection("agents").document(agent_id)
     was_lost = bool(agent.get("lostAt"))
-    agent_ref.update({"lastSeenAt": firestore.SERVER_TIMESTAMP, "lostAt": None})
+    agent_ref.update({"lastSeenAt": firestore.SERVER_TIMESTAMP})
     if was_lost:
         _send_agent_status(agent_id, "PBXSense Agent is reachable again.", "Live PBX updates have resumed.")
+    agent_ref.update({"lostAt": None})
     return {"status": "ok"}
 
 
@@ -189,12 +196,12 @@ async def sweep_agent_heartbeats(request: Request) -> dict[str, int]:
         agent = snapshot.to_dict() or {}
         if agent.get("revoked") or agent.get("lostAt"):
             continue
-        snapshot.reference.update({"lostAt": firestore.SERVER_TIMESTAMP})
         _send_agent_status(
             snapshot.id,
             "PBXSense lost the Agent.",
             "Live PBX updates are paused until the Agent is reachable again.",
         )
+        snapshot.reference.update({"lostAt": firestore.SERVER_TIMESTAMP})
         lost += 1
     return {"lost": lost}
 

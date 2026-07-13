@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -40,6 +40,7 @@ class YeastarClient:
                 agent_version=AGENT_VERSION,
                 channels=self._channels(),
                 endpoints=endpoints,
+                queues=self._queues(),
                 recent_calls=self._cdr_calls(),
                 voicemails=self._voicemails(endpoints),
             )
@@ -122,6 +123,36 @@ class YeastarClient:
             response = self._api("call/query", {"type": call_type})
             channels.extend(_channels_from_call_response(response))
         return channels
+
+    def _queues(self) -> list[AmiQueue]:
+        try:
+            response = self._api("queue/search", {"page": 1, "page_size": 1000})
+        except OSError:
+            return []
+        queues: list[AmiQueue] = []
+        for row in _rows(response):
+            queue_id = _integer(row.get("id"))
+            if queue_id <= 0:
+                continue
+            try:
+                status = self._api("queue/call_status", {"id": queue_id})
+            except OSError:
+                continue
+            waiting_list = _list(status.get("waiting_list"))
+            queues.append(
+                AmiQueue(
+                    name=_string(row, "number", "name") or str(queue_id),
+                    waiting_callers=max(
+                        _integer(status.get("waiting_calls")),
+                        len(waiting_list),
+                    ),
+                    longest_wait_seconds=max(
+                        (_integer(item.get("duration")) for item in waiting_list),
+                        default=0,
+                    ),
+                )
+            )
+        return queues
 
     def _cdr_calls(self) -> list[CdrCall]:
         response = self._api(

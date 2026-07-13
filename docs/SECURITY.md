@@ -18,9 +18,11 @@ internet.
 
 Set `PBXSENSE_AGENT_TOKEN` for production and LAN deployments.
 
-When a token is set, requests from localhost, private LAN, or VPN client IPs are
-trusted for Agent HTTP pages, JSON endpoints, and `/live`; browser HTML pages
-also get an HTTP-only cookie. Non-private clients still need the token.
+When a token is set, every protected HTTP and `/live` request must authenticate,
+including requests from localhost, a private LAN, or a VPN. A valid token on an
+HTML request creates an HTTP-only, same-site cookie for later Agent-page links.
+The Agent does not enable cross-origin browser access. `GET /health` is the only
+unauthenticated route and returns only a basic service status.
 
 Generate a token:
 
@@ -40,6 +42,10 @@ Keep this file readable only by root:
 sudo chmod 600 /etc/pbxsense-agent.env
 sudo chown root:root /etc/pbxsense-agent.env
 ```
+
+The relay identity under `/var/lib/pbxsense-agent` contains the installation's
+private signing key and queued device registrations. The Agent enforces `0700`
+on its directory and `0600` on the identity file on Linux.
 
 Rotate the token if it is shared accidentally. After rotation, reconnect the
 PBXSense app with the new pairing URL or QR payload.

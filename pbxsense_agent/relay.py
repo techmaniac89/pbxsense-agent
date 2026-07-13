@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -39,6 +40,7 @@ class AgentRelay:
         self._timeout_seconds = timeout_seconds
         self._lock = threading.Lock()
         self._state = self._load()
+        self._protect_storage()
         self._last_heartbeat_at = 0.0
 
     @property
@@ -60,7 +62,10 @@ class AgentRelay:
                 return {}
             activation = self._state.get("activation")
             if isinstance(activation, dict) and activation.get("id") and activation.get("secret"):
-                return {"id": str(activation["id"]), "secret": str(activation["secret"])}
+                if float(activation.get("expires_at", 0)) > time.time() + 30:
+                    return {"id": str(activation["id"]), "secret": str(activation["secret"])}
+                self._state.pop("activation", None)
+                self._save()
             private = self._private_key()
             public_key = _encode(private.public_key().public_bytes(
                 serialization.Encoding.Raw, serialization.PublicFormat.Raw,
@@ -73,12 +78,16 @@ class AgentRelay:
                 )
             except OSError:
                 return {}
-            activation = {"id": str(response.get("activationId", "")), "secret": str(response.get("activationSecret", ""))}
+            activation = {
+                "id": str(response.get("activationId", "")),
+                "secret": str(response.get("activationSecret", "")),
+                "expires_at": _iso_timestamp(str(response.get("expiresAt", ""))),
+            }
             if not activation["id"] or not activation["secret"]:
                 return {}
             self._state["activation"] = activation
             self._save()
-            return activation
+            return {"id": str(activation["id"]), "secret": str(activation["secret"])}
 
     def register_device(self, *, fcm_token: str, meaningful: bool, activity: bool) -> dict[str, object]:
         if not fcm_token.strip():
@@ -187,13 +196,22 @@ class AgentRelay:
                 self._state.pop("activation", None)
                 self._save()
                 return True
+            if response.get("expired"):
+                self._state.pop("activation", None)
+                self._save()
             return False
         return False
 
     def _queue(self, kind: str, payload: dict[str, object]) -> None:
         outbox = self._state.setdefault("outbox", [])
         if kind == "devices":
-            outbox[:] = [item for item in outbox if item.get("kind") != "devices"]
+            token = str(payload.get("fcmToken", ""))
+            outbox[:] = [
+                item
+                for item in outbox
+                if item.get("kind") != "devices"
+                or str(item.get("payload", {}).get("fcmToken", "")) != token
+            ]
         outbox.append({"kind": kind, "payload": payload})
         self._save()
 
@@ -254,9 +272,27 @@ class AgentRelay:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            self._path.parent.chmod(0o700)
         temporary = self._path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self._state, sort_keys=True), encoding="utf-8")
+        if os.name != "nt":
+            temporary.chmod(0o600)
         temporary.replace(self._path)
+        if os.name != "nt":
+            self._path.chmod(0o600)
+
+    def _protect_storage(self) -> None:
+        if os.name == "nt":
+            return
+        try:
+            if self._path.parent.exists():
+                self._path.parent.chmod(0o700)
+            if self._path.exists():
+                self._path.chmod(0o600)
+        except OSError:
+            # A later save will retry; read-only installations still start.
+            pass
 
 
 def _should_relay(signal: dict[str, object]) -> bool:
@@ -277,3 +313,12 @@ def _encode(value: bytes) -> str:
 
 def _decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _iso_timestamp(value: str) -> float:
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0

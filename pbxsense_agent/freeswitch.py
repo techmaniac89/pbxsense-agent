@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -33,12 +33,13 @@ class FreeSwitchClient:
     def snapshot(self) -> AmiSnapshot:
         try:
             channels = self._channels()
-            endpoints = self._endpoints_from_channels(channels)
+            endpoints = self._endpoints(channels)
             return AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=channels,
                 endpoints=endpoints,
+                queues=self._queues(),
                 recent_calls=_read_json_cdr_calls(
                     self._settings.freeswitch_cdr_json_path,
                 ),
@@ -88,6 +89,47 @@ class FreeSwitchClient:
         data = _json_object(raw)
         rows = _rows(data)
         return [_channel_from_row(row) for row in rows]
+
+    def _endpoints(self, channels: list[AmiChannel]) -> list[AmiEndpoint]:
+        active = {item.extension: item for item in self._endpoints_from_channels(channels)}
+        try:
+            with self._connect() as sock:
+                self._authenticate(sock)
+                rows = _rows(_json_object(self._api(sock, "show registrations as json")))
+        except OSError:
+            return list(active.values())
+
+        endpoints: dict[str, AmiEndpoint] = dict(active)
+        for row in rows:
+            extension = _string(row, "reg_user", "user", "username")
+            if not extension:
+                continue
+            current = active.get(extension)
+            endpoints[extension] = AmiEndpoint(
+                extension=extension,
+                device_state="Reachable",
+                active_channels=current.active_channels if current else 0,
+                label=_string(row, "display_name", "name"),
+            )
+        return list(endpoints.values())
+
+    def _queues(self) -> list[AmiQueue]:
+        try:
+            with self._connect() as sock:
+                self._authenticate(sock)
+                names = _pipe_first_column(self._api(sock, "callcenter_config queue list"))
+                return [
+                    AmiQueue(
+                        name=name,
+                        waiting_callers=_first_integer(
+                            self._api(sock, f"callcenter_config queue count members {name}")
+                        ),
+                    )
+                    for name in names
+                ]
+        except OSError:
+            # mod_callcenter is optional; live calls and presence still work.
+            return []
 
     def _connect(self) -> socket.socket:
         try:
@@ -208,6 +250,25 @@ def _rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
     return []
+
+
+def _pipe_first_column(raw: str) -> list[str]:
+    names: list[str] = []
+    for line in raw.splitlines():
+        value = line.split("|", 1)[0].strip()
+        if not value or value.lower() in {"name", "queue", "+ok"} or value.startswith("-"):
+            continue
+        names.append(value)
+    return names
+
+
+def _first_integer(raw: str) -> int:
+    for value in raw.replace("+OK", "").split():
+        try:
+            return max(0, int(value))
+        except ValueError:
+            continue
+    return 0
 
 
 def _channel_from_row(row: dict[str, Any]) -> AmiChannel:

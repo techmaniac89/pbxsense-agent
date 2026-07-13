@@ -27,9 +27,9 @@ PBX connector
 | Asterisk | `ami.py` | Active calls, endpoints, trunks, queue wait/member state, CDR history, voicemail |
 | FreePBX, Issabel, VitalPBX | `ami.py` | Supported as Asterisk-based systems |
 | Grandstream UCM / SoftwareUCM | `grandstream.py` | Restricted AMI with UCM port/TLS defaults, live calls, endpoints, trunks, queues; optional local history paths |
-| FreeSWITCH | `freeswitch.py` | Event Socket connection, active channels, optional JSON CDR/voicemail paths |
+| FreeSWITCH | `freeswitch.py` | Event Socket connection, registered extensions, active channels, optional mod_callcenter queue counts and JSON CDR/voicemail paths |
 | FusionPBX | `freeswitch.py` | Supported as a FreeSWITCH-based system |
-| Yeastar P-Series | `yeastar.py` | OAuth API, extension status, live calls, CDR, voicemail, recordings |
+| Yeastar P-Series | `yeastar.py` | OAuth API, extension status, live calls, queue waiting status, CDR, voicemail, recordings |
 | Mock | `mock.py` | Development/test fixture |
 
 GUI PBX distributions are handled through the PBX engine underneath them.
@@ -193,8 +193,12 @@ The installer tries to read the password from:
 /etc/freeswitch/autoload_configs/event_socket.conf.xml
 ```
 
-If the connector can authenticate, it reads `show channels as json` and maps
-live calls into the same app model used by Asterisk.
+If the connector can authenticate, it reads `show channels as json` for live
+calls and `show registrations as json` for registered Sofia users. This keeps
+idle registered extensions visible in People. When `mod_callcenter` is loaded,
+the connector uses `callcenter_config queue list` and `queue count members` for
+read-only waiting counts. These supplemental commands are optional and do not
+make the core connector unreachable when unavailable.
 
 Optional history inputs:
 
@@ -221,6 +225,15 @@ YEASTAR_CLIENT_SECRET=<client-secret>
 ```
 
 The connector uses the documented `extension/search`, `call/query`, `cdr/list`,
-`vm/query`, and recording endpoints. It refreshes cloud state internally at a
-small fixed cadence because the Agent's web socket updates every second; this is
-not a user-configurable refresh control.
+`vm/query`, `queue/search`, `queue/call_status`, and recording endpoints. It
+caches its cloud snapshot briefly while the Agent's central polling pipeline
+serves all app and relay consumers. Queue endpoints are optional: permission or
+firmware failures omit queue data without hiding extensions and live calls.
+
+## Snapshot Ownership
+
+Connectors are polled only by the Agent's central snapshot task. HTTP `/home`,
+WebSocket `/live`, and push processing render or diff that cached observation;
+they must never call a connector independently. This preserves transition order
+inside the Activity and availability trackers and prevents PBX load from growing
+with the number of connected apps.

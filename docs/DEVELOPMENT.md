@@ -83,6 +83,19 @@ GET /diagnostics
 
 The app should not talk directly to AMI, ESL, ARI, SIP, SSH, or raw PBX logs.
 
+## Runtime Data Flow
+
+`main.py` owns one central snapshot task. It polls the selected connector once,
+enriches Asterisk-family snapshots with local history, advances signal/activity
+trackers once, and stores an immutable observation. `/home`, every `/live`
+client, and the relay publisher consume that cached state. Do not introduce PBX
+polling inside request or WebSocket handlers; doing so can reorder transitions
+and makes connector load proportional to connected clients.
+
+The relay presence heartbeat is a separate task. It must remain independent of
+PBX snapshot, history, and signal failures so a slow connector cannot create a
+false Agent-lost notification.
+
 ## Adding Connectors
 
 Read `docs/CONNECTORS.md` before adding a connector. The short version:

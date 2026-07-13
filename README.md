@@ -17,12 +17,12 @@ out of the user-facing PBXSense experience.
   technical details.
 - Reports extension presence in People, including available, on-call, busy,
   ringing, away, DND, and offline states when the connector can observe them.
-- Shows Asterisk queue pressure, including callers waiting, longest wait, and
-  available, busy, or paused queue members.
+- Shows queue pressure when supported: Asterisk/Grandstream wait and member
+  state, plus FreeSWITCH `mod_callcenter` and Yeastar waiting counts.
 - Groups recent PBX authentication failures and blocked ACL attempts into
   privacy-preserving Security Signals when the local security log is visible.
-- Streams live Home snapshots so the app can refresh without polling the PBX
-  directly.
+- Polls the PBX once through a central snapshot pipeline, then streams the same
+  consistent state to every connected app and the push relay.
 - Serves pairing pages and QR payloads for connecting PBXSense to the local
   Agent.
 - Provides diagnostics for connector setup, especially Asterisk AMI.
@@ -94,9 +94,9 @@ For pairing, open:
 http://127.0.0.1:8765/pair
 ```
 
-If `PBXSENSE_AGENT_TOKEN` is configured, LAN browser visits can open the Agent
-page directly. The pairing page still embeds the token in the `pbxsense://`
-payload for the app:
+If `PBXSENSE_AGENT_TOKEN` is configured, every protected HTTP and WebSocket
+request must present it. An authenticated HTML visit creates an HTTP-only local
+web cookie, so subsequent page links do not expose the token:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
@@ -552,10 +552,10 @@ To pair the app, open the Agent pairing page:
 http://127.0.0.1:8765/pair
 ```
 
-If `PBXSENSE_AGENT_TOKEN` is set, requests from localhost, private LAN, or VPN
-client IPs are treated as trusted for Agent HTTP pages, JSON endpoints, and
-`/live`. Browser HTML pages also receive an HTTP-only cookie, and the real Agent
-token is not added to normal page links.
+If `PBXSENSE_AGENT_TOKEN` is set, localhost and private LAN/VPN addresses do
+not bypass authentication. Supply the token explicitly on the first HTML visit
+or through the app pairing QR. A valid HTML visit receives an HTTP-only cookie,
+and the real token is then removed from normal page links.
 
 The pairing page still embeds the token in the QR payload so the app can store
 it for non-LAN or stricter future access:
@@ -576,7 +576,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.2.9-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.2.41-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -587,7 +587,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.2.9-beta`, attach the matching files from
+For a release tag such as `agent-v0.2.41-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 

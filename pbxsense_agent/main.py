@@ -4,12 +4,12 @@ import asyncio
 import hashlib
 import hmac
 import json
+import threading
 from datetime import timedelta
 from html import escape
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .connectors import connector_for_settings
@@ -32,6 +32,7 @@ from .pulse import (
 )
 from .recordings import find_recording
 from .relay import AgentRelay
+from .relay import PRESENCE_HEARTBEAT_INTERVAL_SECONDS
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -51,44 +52,70 @@ push_relay = AgentRelay(
 app = FastAPI(title="PBXSense Agent", version=AGENT_VERSION)
 LOCAL_WEB_COOKIE = "pbxsense_agent_local_web"
 LIVE_INTERVAL_SECONDS = 1
+SNAPSHOT_POLL_INTERVAL_SECONDS = 1
 RELAY_PUBLISH_INTERVAL_SECONDS = 5
+_snapshot_task: asyncio.Task[None] | None = None
 _relay_publish_task: asyncio.Task[None] | None = None
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["authorization", "x-pbxsense-token"],
-)
+_relay_heartbeat_task: asyncio.Task[None] | None = None
+_snapshot_lock = threading.Lock()
+_cached_home_state: tuple[object, object, list[dict], list[dict], bool] | None = None
 
 
 @app.on_event("startup")
 async def start_relay_publisher() -> None:
-    global _relay_publish_task
+    global _relay_heartbeat_task, _relay_publish_task, _snapshot_task
+    _snapshot_task = asyncio.create_task(_snapshot_loop())
     if settings.relay_url:
         _relay_publish_task = asyncio.create_task(_relay_publish_loop())
+        _relay_heartbeat_task = asyncio.create_task(_relay_heartbeat_loop())
 
 
 @app.on_event("shutdown")
 async def stop_relay_publisher() -> None:
-    if _relay_publish_task is not None:
-        _relay_publish_task.cancel()
+    tasks = [
+        task
+        for task in (_snapshot_task, _relay_publish_task, _relay_heartbeat_task)
+        if task is not None
+    ]
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
         try:
-            await _relay_publish_task
+            await task
         except asyncio.CancelledError:
             pass
+
+
+async def _snapshot_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_refresh_home_state)
+        except Exception:
+            # Connector failures normally produce an unreachable snapshot. An
+            # unexpected parser/filesystem failure must not stop later polls.
+            pass
+        await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_SECONDS)
 
 
 async def _relay_publish_loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(_home_payload)
-            await asyncio.to_thread(push_relay.heartbeat)
+            payload = await asyncio.to_thread(_home_payload)
+            await asyncio.to_thread(push_relay.observe, payload.get("signals", []))
         except Exception:
-            # A connector failure is already represented by the normal health
-            # signal; it must not permanently stop remote push processing.
             pass
         await asyncio.sleep(RELAY_PUBLISH_INTERVAL_SECONDS)
+
+
+async def _relay_heartbeat_loop() -> None:
+    """Keep presence independent from PBX polling and signal generation."""
+    while True:
+        try:
+            await asyncio.to_thread(push_relay.heartbeat)
+        except Exception:
+            # Network and enrollment failures are retried on the next cadence.
+            pass
+        await asyncio.sleep(PRESENCE_HEARTBEAT_INTERVAL_SECONDS)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -114,14 +141,7 @@ def index(request: Request):
             <span>Connection check</span>
             <small>{escape(connector.diagnostics_label)}</small>
           </div>
-          <dl class="diagnostics">
-            <div><dt>Host</dt><dd>{escape(str(diagnostics.get("host", "")))}</dd></div>
-            <div><dt>Port</dt><dd>{escape(str(diagnostics.get("port", "")))}</dd></div>
-            <div><dt>TCP</dt><dd>{_yes_no(diagnostics.get("tcpConnected"))}</dd></div>
-            <div><dt>Banner</dt><dd>{_yes_no(diagnostics.get("bannerReceived"))}</dd></div>
-            <div><dt>Login</dt><dd>{_yes_no(diagnostics.get("loginAccepted"))}</dd></div>
-            <div><dt>Message</dt><dd>{escape(str(diagnostic_message))}</dd></div>
-          </dl>
+          <dl class="diagnostics">{_diagnostic_rows(diagnostics, diagnostic_message)}</dl>
         </section>
         """
 
@@ -348,14 +368,11 @@ def _page(*, title: str, body: str) -> str:
 
 
 @app.get("/health")
-def health(request: Request) -> dict[str, object]:
-    _require_token(request)
+def health() -> dict[str, str]:
+    """Minimal unauthenticated probe; operational details remain protected."""
     return {
         "status": "ok",
-        "mode": settings.mode,
-        "pbxType": settings.pbx_type,
-        "authRequired": bool(settings.token),
-        "pushRelay": push_relay.status(),
+        "service": "pbxsense-agent",
     }
 
 
@@ -483,6 +500,21 @@ async def live(websocket: WebSocket) -> None:
 
 
 def _home_payload(*, moment_hours: int = 24) -> dict:
+    global _cached_home_state
+    with _snapshot_lock:
+        if _cached_home_state is None:
+            _refresh_home_state_locked()
+        state = _cached_home_state
+    return _home_payload_from_state(state, moment_hours=moment_hours)
+
+
+def _refresh_home_state() -> None:
+    with _snapshot_lock:
+        _refresh_home_state_locked()
+
+
+def _refresh_home_state_locked() -> tuple:
+    global _cached_home_state
     snapshot = connector.snapshot()
     if settings.pbx_type in {"asterisk", "grandstream"}:
         cdr_path, voicemail_path = _history_paths()
@@ -504,8 +536,18 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         observed_at,
     )
     show_aggregate_tip = endpoint_aggregate_tip_tracker.observe(snapshot, observed_at)
+    _cached_home_state = (
+        snapshot,
+        observed_at,
+        moment_events,
+        endpoint_unavailability_signals,
+        show_aggregate_tip,
+    )
+    return _cached_home_state
 
 
+def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
+    snapshot, observed_at, moment_events, endpoint_signals, show_aggregate_tip = state
     payload = build_home_payload(
         snapshot,
         display_name=settings.display_name,
@@ -517,14 +559,13 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         pbx_port=_pbx_port(),
         moment_hours=moment_hours,
         moment_events=moment_events,
-        endpoint_unavailability_signals=endpoint_unavailability_signals,
+        endpoint_unavailability_signals=endpoint_signals,
     )
     if not show_aggregate_tip:
         payload["signals"] = [
             signal for signal in payload["signals"]
             if signal.get("id") != "sig_tip_multiple_endpoints_unavailable"
         ]
-    push_relay.observe(payload.get("signals", []))
     return payload
 
 
@@ -682,6 +723,30 @@ def _yes_no(value: object) -> str:
     return "Yes" if value is True else "No"
 
 
+def _diagnostic_rows(diagnostics: dict, message: object) -> str:
+    fields = (
+        ("host", "Host", False),
+        ("port", "Port", False),
+        ("baseUrl", "API URL", False),
+        ("apiVersion", "API version", False),
+        ("tcpConnected", "TCP", True),
+        ("bannerReceived", "Banner", True),
+        ("loginAccepted", "Login", True),
+        ("tokenAccepted", "API token", True),
+        ("apiReachable", "API", True),
+        ("commandAccepted", "Command", True),
+        ("tlsVerification", "TLS verification", True),
+    )
+    rows: list[str] = []
+    for key, label, boolean in fields:
+        if key not in diagnostics:
+            continue
+        value = _yes_no(diagnostics[key]) if boolean else escape(str(diagnostics[key]))
+        rows.append(f"<div><dt>{label}</dt><dd>{value}</dd></div>")
+    rows.append(f"<div><dt>Message</dt><dd>{escape(str(message))}</dd></div>")
+    return "".join(rows)
+
+
 def _require_token(request: Request) -> None:
     if not settings.token:
         return
@@ -691,21 +756,24 @@ def _require_token(request: Request) -> None:
 
 
 def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
-    if not settings.token or request.query_params.get("token"):
+    if not settings.token or not _wants_html(request) or not _is_trusted_request(request):
         return None
+    query_token = request.query_params.get("token", "").strip()
+    if query_token and hmac.compare_digest(query_token, settings.token):
+        query = [(key, value) for key, value in request.query_params.multi_items() if key != "token"]
+        target = str(request.url.replace(query=urlencode(query)))
+        response = RedirectResponse(target)
+        response.set_cookie(
+            LOCAL_WEB_COOKIE,
+            _local_web_cookie_value(),
+            max_age=60 * 60 * 8,
+            httponly=True,
+            samesite="strict",
+        )
+        return response
     if _has_valid_local_web_cookie(request):
         return None
-    if not _wants_html(request) or not _is_trusted_request(request):
-        return None
-    response = RedirectResponse(str(request.url))
-    response.set_cookie(
-        LOCAL_WEB_COOKIE,
-        _local_web_cookie_value(),
-        max_age=60 * 60 * 8,
-        httponly=True,
-        samesite="lax",
-    )
-    return response
+    return None
 
 
 def _is_trusted_request(request: Request) -> bool:
@@ -735,10 +803,6 @@ def _request_token(request: Request) -> str:
     query_token = request.query_params.get("token", "").strip()
     if query_token:
         return query_token
-    # The Agent is intended to live on a trusted LAN/VPN beside the PBX.
-    # Private clients can inspect local Agent endpoints without token URLs.
-    if _is_trusted_request(request):
-        return settings.token
     if _has_valid_local_web_cookie(request):
         return settings.token
     return request.headers.get("x-pbxsense-token", "").strip()
@@ -747,15 +811,15 @@ def _request_token(request: Request) -> str:
 def _websocket_authorized(websocket: WebSocket) -> bool:
     if not settings.token:
         return True
-    client_host = websocket.client.host if websocket.client else ""
-    # Match HTTP behavior for local app clients that do not put tokens on /live.
-    if is_private_or_loopback_host(client_host):
-        return True
     authorization = websocket.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
     else:
         token = websocket.query_params.get("token", "").strip()
+        if not token:
+            cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
+            if hmac.compare_digest(cookie, _local_web_cookie_value()):
+                token = settings.token
     return hmac.compare_digest(token, settings.token)
 
 

@@ -253,7 +253,6 @@ configure_asterisk_env() {
   [ -n "$detected_user" ] || detected_user="${ASTERISK_AMI_USERNAME:-pbxsense}"
   prompt_value ASTERISK_AMI_USERNAME "Asterisk AMI username" "$detected_user"
   prompt_secret ASTERISK_AMI_PASSWORD "Asterisk AMI password" "${ASTERISK_AMI_PASSWORD:-$detected_secret}"
-  prompt_value ASTERISK_AMI_TIMEOUT "Asterisk AMI timeout seconds" "${ASTERISK_AMI_TIMEOUT:-3}"
 
   cdr_path="$(first_existing_path \
     /var/log/asterisk/cdr-csv/Master.csv \
@@ -296,7 +295,6 @@ configure_grandstream_env() {
   prompt_value GRANDSTREAM_UCM_AMI_USERNAME "Grandstream UCM AMI username" "${GRANDSTREAM_UCM_AMI_USERNAME:-pbxsense}"
   prompt_secret GRANDSTREAM_UCM_AMI_PASSWORD "Grandstream UCM AMI password" "${GRANDSTREAM_UCM_AMI_PASSWORD:-}"
   prompt_value GRANDSTREAM_UCM_AMI_VERIFY_TLS "Verify Grandstream UCM TLS certificate (true/false)" "${GRANDSTREAM_UCM_AMI_VERIFY_TLS:-true}"
-  prompt_value GRANDSTREAM_UCM_AMI_TIMEOUT "Grandstream UCM AMI timeout seconds" "${GRANDSTREAM_UCM_AMI_TIMEOUT:-3}"
   prompt_value GRANDSTREAM_UCM_CDR_CSV_PATH "Grandstream UCM CDR CSV path (optional)" "${GRANDSTREAM_UCM_CDR_CSV_PATH:-}"
   prompt_value GRANDSTREAM_UCM_VOICEMAIL_PATH "Grandstream UCM voicemail path (optional)" "${GRANDSTREAM_UCM_VOICEMAIL_PATH:-}"
   prompt_value GRANDSTREAM_UCM_RECORDINGS_PATH "Grandstream UCM recordings path (optional)" "${GRANDSTREAM_UCM_RECORDINGS_PATH:-}"
@@ -367,6 +365,40 @@ if [ ! -f "$ENV_FILE" ]; then
   chown root:root "$ENV_FILE"
   ENV_CREATED=1
 fi
+
+# Add newly introduced non-secret defaults during upgrades while preserving
+# every existing administrator value. Credentials are always configured by the
+# prompts or by the administrator and are never copied into an existing file.
+python3 - "$INSTALL_DIR/.env.example" "$ENV_FILE" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+example = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+target = Path(sys.argv[2])
+lines = target.read_text(encoding="utf-8").splitlines()
+existing = {
+    line.split("=", 1)[0]
+    for line in lines
+    if line and not line.lstrip().startswith("#") and "=" in line
+}
+sensitive = re.compile(r"(?:TOKEN|PASSWORD|SECRET|USERNAME|CLIENT_ID)$")
+missing = []
+for line in example:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        continue
+    key = line.split("=", 1)[0]
+    if key not in existing and not sensitive.search(key):
+        missing.append(line)
+if missing:
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.append("# Defaults added by a PBXSense Agent upgrade.")
+    lines.extend(missing)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
 
 python3 "$INSTALL_DIR/scripts/ensure_token.py" "$ENV_FILE"
 configure_agent_env

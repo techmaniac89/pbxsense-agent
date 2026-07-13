@@ -33,6 +33,8 @@ The installer:
 - Creates `/opt/pbxsense-agent`.
 - Creates a private `pbxsense` service user.
 - Creates `/etc/pbxsense-agent.env` from `.env.example` when missing.
+- On upgrades, adds missing non-secret defaults without replacing existing
+  administrator values or credentials.
 - Generates `PBXSENSE_AGENT_TOKEN` when missing.
 - Creates and starts `pbxsense-agent.service`.
 - Runs Uvicorn on `0.0.0.0:8765` by default.
@@ -176,6 +178,12 @@ Set `FREESWITCH_CDR_JSON_PATH` only when `mod_json_cdr` writes local JSON CDR
 files visible to the Agent. Set `FREESWITCH_VOICEMAIL_PATH` only when
 FreeSWITCH voicemail metadata files are visible to the Agent.
 
+The connector reads registered Sofia users with `show registrations as json`,
+so idle registered phones remain visible in People. If `mod_callcenter` is
+loaded, it also reads queue names and waiting counts through
+`callcenter_config`. Missing `mod_callcenter` support does not make the
+connector unhealthy; queue data is simply omitted.
+
 ## Yeastar P-Series Install Notes
 
 Set `PBXSENSE_PBX_TYPE=yeastar` in the installer and provide the PBX base URL,
@@ -197,6 +205,11 @@ YEASTAR_VERIFY_TLS=true
 Use `YEASTAR_VERIFY_TLS=false` only for a trusted self-signed local PBX
 certificate. Yeastar recordings are retrieved through the Agent; no recording
 filesystem path or Yeastar access token is exposed to the app.
+
+Queue waiting counts require API access to `queue/search` and
+`queue/call_status`. If those endpoints are unavailable on the installed
+firmware or denied to the API client, other Yeastar data remains available and
+queues are omitted.
 
 ## Docker Compose Install
 

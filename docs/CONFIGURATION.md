@@ -42,7 +42,7 @@ Use `.env.example` as the starting point.
 | `ASTERISK_AMI_PORT` | `5038` | AMI TCP port. |
 | `ASTERISK_AMI_USERNAME` | empty | AMI manager username. |
 | `ASTERISK_AMI_PASSWORD` | empty | AMI manager password. |
-| `ASTERISK_AMI_TIMEOUT` | `3` | Legacy timeout fallback used when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
+| `ASTERISK_AMI_TIMEOUT` | `3` | Deprecated compatibility fallback used only when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
 | `ASTERISK_CDR_CSV_PATH` | `/var/log/asterisk/cdr-csv/Master.csv` | CDR CSV path inside the Agent runtime. |
 | `ASTERISK_CDR_CUSTOM_PATH` | unset | Legacy fallback for `ASTERISK_CDR_CSV_PATH`. |
 | `ASTERISK_VOICEMAIL_PATH` | `/var/spool/asterisk/voicemail` | Voicemail spool path inside the Agent runtime. |
@@ -67,7 +67,7 @@ ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
 | `GRANDSTREAM_UCM_AMI_PASSWORD` | empty | Dedicated UCM AMI password. |
 | `GRANDSTREAM_UCM_AMI_TLS` | `false` | Set `true` for UCM's TLS AMI listener. |
 | `GRANDSTREAM_UCM_AMI_VERIFY_TLS` | `true` | Set `false` only for a trusted local UCM with a self-signed certificate. |
-| `GRANDSTREAM_UCM_AMI_TIMEOUT` | `3` | Connector timeout fallback when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
+| `GRANDSTREAM_UCM_AMI_TIMEOUT` | `3` | Deprecated compatibility fallback used only when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
 | `GRANDSTREAM_UCM_CDR_CSV_PATH` | empty | Optional UCM CDR CSV file visible to the Agent. |
 | `GRANDSTREAM_UCM_VOICEMAIL_PATH` | empty | Optional UCM voicemail folder visible to the Agent. |
 | `GRANDSTREAM_UCM_RECORDINGS_PATH` | empty | Optional UCM recording root visible to the Agent. |
@@ -81,6 +81,10 @@ metrics.
 Security logs are optional. When configured, PBXSense reads only recent
 security-event types and returns aggregate counts/service names; raw log lines,
 account names, and source addresses never leave the Agent.
+
+Failed-call, rejected-login, ACL, and malformed-request clusters use a rolling
+15-minute window. Events outside that window cannot keep a Security Signal
+active.
 
 ## FreeSWITCH ESL Settings
 
@@ -103,10 +107,12 @@ account names, and source addresses never leave the Agent.
 | `YEASTAR_API_VERSION` | `v1.0` | Yeastar OpenAPI version used by the connector. |
 | `YEASTAR_VERIFY_TLS` | `true` | Set `false` only for a trusted local PBX with a self-signed certificate. |
 
-The Yeastar connector reads extension availability, active calls, CDRs,
-voicemail metadata, and recorded-call metadata through the P-Series API. The
-Agent keeps the short-lived Yeastar access token in memory and proxies a
-recording download, so the token is never returned to the app.
+The Yeastar connector reads extension availability, active calls, queue waiting
+status, CDRs, voicemail metadata, and recorded-call metadata through the
+P-Series API. Queue visibility requires permission for `queue/search` and
+`queue/call_status`. The Agent keeps the short-lived Yeastar access token in
+memory and proxies a recording download, so the token is never returned to the
+app.
 
 ## Recorded Calls
 
@@ -114,7 +120,9 @@ When an eligible history record includes a recording filename, `/home` adds a
 `recording` object with an Agent-relative URL. Use the Agent URL and the same
 pairing authentication to play or download it. Asterisk CSV history needs the
 recording filename in CDR `userfield`; FreeSWITCH JSON CDR needs one of
-`recording_file`, `record_file`, or `record_path`.
+`recording_file`, `record_file`, or `record_path`. Files are matched by an exact
+filename/stem or a delimiter-bounded call ID. Ambiguous matches are rejected
+instead of returning an unrelated recording.
 
 ## Token Handling
 
@@ -139,14 +147,24 @@ If `PBXSENSE_AGENT_TOKEN` is empty, local testing is simpler but remote access i
 not protected by the Agent token. Production and LAN deployments should set a
 long random token.
 
-Requests from localhost, private LAN, or VPN client IPs are treated as trusted
-for Agent HTTP pages, JSON endpoints, and `/live`. Browser HTML pages also get
-an HTTP-only cookie. The pairing page still embeds the token in the QR payload
-so the app can store it for non-LAN or stricter future access:
+Localhost, private LAN, and VPN clients must authenticate just like other
+clients. A valid token on an HTML request creates an HTTP-only, same-site cookie.
+The pairing page embeds the token in its QR payload so the app can authenticate
+`/home`, `/live`, diagnostics, recordings, and push-device registration:
 
 ```text
 http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
 ```
+
+`GET /health` is intentionally unauthenticated for container/service probes and
+returns no connector, PBX, or relay details.
+
+## Upgrade Behavior
+
+The Linux installer preserves every existing value in
+`/etc/pbxsense-agent.env`. On upgrade it also copies newly introduced
+non-secret defaults from `.env.example`. Credentials, usernames, client IDs,
+passwords, secrets, and tokens are never populated into an existing file.
 
 ## Configuration Changes
 
