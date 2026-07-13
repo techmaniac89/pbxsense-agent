@@ -156,7 +156,7 @@ def index(request: Request):
             </div>
             <div class="actions">
               <a class="button primary" href="/pair{_link_token_suffix(request)}">Pair app</a>
-              <a class="button" href="/home{_link_token_suffix(request)}">Home snapshot</a>
+              <a class="button" href="/apps{_link_token_suffix(request)}">Paired apps</a>
               <a class="button" href="/diagnostics{_link_token_suffix(request)}">Diagnostics</a>
             </div>
             {diagnostic_html}
@@ -291,7 +291,6 @@ def _page(*, title: str, body: str) -> str:
             background: var(--panel-soft);
           }}
           .pairing-code {{
-            margin-top: 18px;
             padding: 14px;
             border-radius: 16px;
             background: #191612;
@@ -301,6 +300,25 @@ def _page(*, title: str, body: str) -> str:
             font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
             font-size: 12px;
           }}
+          .pairing-text-row {{
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 44px;
+            gap: 10px;
+            align-items: stretch;
+            margin-top: 18px;
+          }}
+          .copy-button {{
+            display: grid;
+            place-items: center;
+            padding: 0;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #30281f;
+            color: var(--ink);
+            cursor: pointer;
+          }}
+          .copy-button:hover {{ background: #3a3026; }}
+          .copy-button svg {{ width: 19px; height: 19px; }}
           .qr {{
             width: min(280px, 100%);
             margin-top: 18px;
@@ -331,6 +349,16 @@ def _page(*, title: str, body: str) -> str:
             border-bottom: 1px solid #3d3228;
           }}
           .diagnostics div:last-child {{ border-bottom: 0; }}
+          .device-list {{ display: grid; gap: 12px; margin-top: 16px; }}
+          .device-card {{
+            padding: 16px;
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: #191612;
+          }}
+          .device-card h2 {{ margin: 0 0 4px; font-size: 18px; }}
+          .device-card p {{ margin: 0 0 12px; color: var(--muted); }}
+          .device-card .diagnostics div {{ grid-template-columns: minmax(100px, 0.4fr) 1fr; }}
           dt {{ color: var(--muted); }}
           dd {{ margin: 0; font-weight: 650; overflow-wrap: anywhere; }}
           .footer {{
@@ -400,6 +428,14 @@ def pair(request: Request):
     payload = _pairing_payload(request)
     qr_svg = _qr_svg(payload)
     relay_status = push_relay.status()
+    registration_attempt_revision = int(
+        relay_status.get("deviceRegistrationAttemptRevision", 0)
+    )
+    registration_revision = int(relay_status.get("deviceRegistrationRevision", 0))
+    apps_query = {"waitForDevice": "1"}
+    if request.query_params.get("token", "").strip():
+        apps_query["token"] = request.query_params["token"].strip()
+    paired_apps_url = "/apps?" + urlencode(apps_query)
     relay_degraded = (
         relay_status.get("configured") is True
         and relay_status.get("enrolled") is not True
@@ -423,18 +459,170 @@ def pair(request: Request):
         body=f"""
           <section class="hero-card">
             {_brand_html()}
-            <div class="status {'attention' if relay_degraded else 'ok'}">
+            <div id="pairing-status" class="status {'attention' if relay_degraded else 'ok'}">
               <span class="dot"></span>
               <span>{pairing_status}<small>{pairing_detail}</small></span>
             </div>
             <div class="qr">{qr_svg}</div>
-            <div class="pairing-code">{escape(payload)}</div>
+            <div class="pairing-text-row">
+              <div id="pairing-text" class="pairing-code">{escape(payload)}</div>
+              <button id="copy-pairing-text" class="copy-button" type="button" title="Copy pairing text" aria-label="Copy pairing text">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
             <div class="actions">
+              <a class="button" href="/{_link_token_suffix(request)}">Agent status</a>
+            </div>
+            <script>
+              (() => {{
+                const copyButton = document.getElementById('copy-pairing-text');
+                copyButton.addEventListener('click', async () => {{
+                  const value = document.getElementById('pairing-text').textContent;
+                  try {{
+                    await navigator.clipboard.writeText(value);
+                  }} catch (_) {{
+                    const field = document.createElement('textarea');
+                    field.value = value;
+                    field.style.position = 'fixed';
+                    field.style.opacity = '0';
+                    document.body.appendChild(field);
+                    field.select();
+                    document.execCommand('copy');
+                    field.remove();
+                  }}
+                  copyButton.title = 'Copied';
+                  copyButton.setAttribute('aria-label', 'Pairing text copied');
+                  window.setTimeout(() => {{
+                    copyButton.title = 'Copy pairing text';
+                    copyButton.setAttribute('aria-label', 'Copy pairing text');
+                  }}, 1600);
+                }});
+                const initialRevision = {registration_revision};
+                const initialAttemptRevision = {registration_attempt_revision};
+                const statusUrl = {json.dumps('/push/devices/status' + _link_token_suffix(request))};
+                const appsUrl = {json.dumps(paired_apps_url)};
+                const poll = async () => {{
+                  try {{
+                    const response = await fetch(statusUrl, {{ cache: 'no-store' }});
+                    if (response.ok) {{
+                      const status = await response.json();
+                      if (Number(status.attemptRevision) > initialAttemptRevision) {{
+                        const card = document.getElementById('pairing-status');
+                        card.className = 'status ok';
+                        card.innerHTML = '<span class="dot"></span><span>Finishing pairing...<small>Waiting for the registered app details.</small></span>';
+                      }}
+                      if (Number(status.registrationRevision) > initialRevision) {{
+                        window.location.replace(appsUrl);
+                        return;
+                      }}
+                    }}
+                  }} catch (_) {{
+                    // Pairing remains usable while the browser or Agent reconnects.
+                  }}
+                  window.setTimeout(poll, 1500);
+                }};
+                window.setTimeout(poll, 1500);
+              }})();
+            </script>
+          </section>
+        """,
+    )
+
+
+@app.get("/apps", response_class=HTMLResponse)
+def paired_apps(request: Request):
+    if redirect := _localhost_cookie_redirect(request):
+        return redirect
+    _require_token(request)
+    result = push_relay.devices()
+    devices = result.get("devices", [])
+    wait_for_device = request.query_params.get("waitForDevice") == "1"
+    if result.get("state") == "notEnrolled" and wait_for_device:
+        content = _waiting_for_registered_app()
+    elif result.get("state") == "notEnrolled":
+        content = """
+          <div class="status ok">
+            <span class="dot"></span>
+            <span>No registered apps<small>Pair your first app. If this Agent was rebuilt and apps are missing, restore its previous relay identity or pair them again.</small></span>
+          </div>
+        """
+    elif result.get("available") is not True:
+        content = f"""
+          <div class="status attention">
+            <span class="dot"></span>
+            <span>Apps unavailable<small>{escape(str(result.get('error', 'The push relay is unavailable.')))}</small></span>
+          </div>
+        """
+    elif (not isinstance(devices, list) or not devices) and wait_for_device:
+        content = _waiting_for_registered_app()
+    elif not isinstance(devices, list) or not devices:
+        content = """
+          <div class="status ok">
+            <span class="dot"></span>
+            <span>No registered apps<small>Pair an app to register it for push notifications.</small></span>
+          </div>
+        """
+    else:
+        content = f"""
+          <div class="status ok">
+            <span class="dot"></span>
+            <span>{len(devices)} registered {'app' if len(devices) == 1 else 'apps'}<small>Push registration details for this Agent only.</small></span>
+          </div>
+          <div class="device-list">{''.join(_device_card(device) for device in devices if isinstance(device, dict))}</div>
+        """
+    return _page(
+        title="Paired PBXSense apps",
+        body=f"""
+          <section class="hero-card">
+            {_brand_html()}
+            <div class="section-heading"><span>Paired apps</span><small>Push relay</small></div>
+            {content}
+            <div class="actions">
+              <a class="button primary" href="/pair{_link_token_suffix(request)}">Add another app</a>
               <a class="button" href="/{_link_token_suffix(request)}">Agent status</a>
             </div>
           </section>
         """,
     )
+
+
+def _waiting_for_registered_app() -> str:
+    return """
+      <div class="status ok">
+        <span class="dot"></span>
+        <span>Finishing pairing...<small>Waiting for the registered app details.</small></span>
+      </div>
+      <script>window.setTimeout(() => window.location.reload(), 1500);</script>
+    """
+
+
+def _device_card(device: dict[str, object]) -> str:
+    name = str(device.get("deviceName") or device.get("deviceModel") or "PBXSense app")
+    platform = str(device.get("platform") or "Unknown platform")
+    os_version = str(device.get("osVersion") or "")
+    subtitle = f"{platform.title()}{f' {os_version}' if os_version else ''}"
+    notifications = []
+    if device.get("meaningfulEnabled", True):
+        notifications.append("Meaningful signals")
+    if device.get("activityEnabled", True):
+        notifications.append("PBX activity")
+    rows = {
+        "Model": str(device.get("deviceModel") or "Not reported"),
+        "App version": str(device.get("appVersion") or "Not reported"),
+        "Notifications": ", ".join(notifications) if notifications else "Disabled",
+        "Last registered": str(device.get("updatedAt") or "Not reported"),
+        "Registration ID": str(device.get("id") or "Unknown"),
+    }
+    return f"""
+      <article class="device-card">
+        <h2>{escape(name)}</h2>
+        <p>{escape(subtitle)}</p>
+        <dl class="diagnostics">{''.join(f'<div><dt>{escape(label)}</dt><dd>{escape(value)}</dd></div>' for label, value in rows.items())}</dl>
+      </article>
+    """
 
 
 @app.get("/diagnostics/ami")
@@ -606,7 +794,23 @@ async def register_push_device(request: Request) -> dict[str, object]:
         fcm_token=fcm_token,
         meaningful=bool(payload.get("meaningfulEnabled", True)),
         activity=bool(payload.get("activityEnabled", True)),
+        platform=str(payload.get("platform", "android")),
+        app_version=str(payload.get("appVersion", "")),
+        device_model=str(payload.get("deviceModel", "")),
+        device_name=str(payload.get("deviceName", "")),
+        os_version=str(payload.get("osVersion", "")),
     )
+
+
+@app.get("/push/devices/status")
+def push_device_registration_status(request: Request) -> dict[str, int]:
+    """Let the protected Pair page detect a completed app registration."""
+    _require_token(request)
+    status = push_relay.status()
+    return {
+        "attemptRevision": int(status.get("deviceRegistrationAttemptRevision", 0)),
+        "registrationRevision": int(status.get("deviceRegistrationRevision", 0)),
+    }
 
 
 @app.post("/push/devices/revoke")
@@ -700,7 +904,11 @@ def _beacon_svg() -> str:
     """
 
 
-def _json_page(request: Request, title: str, payload: dict) -> str:
+def _json_page(
+    request: Request,
+    title: str,
+    payload: dict,
+) -> str:
     formatted = escape(json.dumps(payload, indent=2, ensure_ascii=False))
     token_suffix = _link_token_suffix(request)
     raw_json_query = {"format": "json"}

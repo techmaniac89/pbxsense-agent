@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import threading
@@ -59,6 +60,12 @@ class AgentRelay:
             "enrolled": bool(self._state.get("agent_id")),
             "agentId": self._state.get("agent_id", ""),
             "queued": len(self._state.get("outbox", [])),
+            "deviceRegistrationAttemptRevision": int(
+                self._state.get("device_registration_attempt_revision", 0)
+            ),
+            "deviceRegistrationRevision": int(
+                self._state.get("device_registration_revision", 0)
+            ),
         }
 
     def activation(self) -> dict[str, str]:
@@ -120,26 +127,101 @@ class AgentRelay:
         self._save()
         return {"id": str(activation["id"]), "secret": str(activation["secret"])}
 
-    def register_device(self, *, fcm_token: str, meaningful: bool, activity: bool) -> dict[str, object]:
+    def register_device(
+        self,
+        *,
+        fcm_token: str,
+        meaningful: bool,
+        activity: bool,
+        platform: str = "android",
+        app_version: str = "",
+        device_model: str = "",
+        device_name: str = "",
+        os_version: str = "",
+    ) -> dict[str, object]:
         if not fcm_token.strip():
-            return {"configured": self.configured, "queued": False}
+            return {"configured": self.configured, "queued": False, "delivered": False}
         with self._lock:
+            token = fcm_token.strip()
+            self._state["device_registration_attempt_revision"] = int(
+                self._state.get("device_registration_attempt_revision", 0)
+            ) + 1
             self._queue(
                 "devices",
                 {
-                    "fcmToken": fcm_token.strip(),
+                    "fcmToken": token,
                     "meaningfulEnabled": meaningful,
                     "activityEnabled": activity,
-                    "platform": "android",
+                    "platform": platform.strip() or "android",
+                    "appVersion": app_version.strip(),
+                    "deviceModel": device_model.strip(),
+                    "deviceName": device_name.strip(),
+                    "osVersion": os_version.strip(),
                 },
             )
             enrolled = self._ensure_enrolled()
             if enrolled:
                 self._flush()
+            accepted = enrolled and not any(
+                item.get("kind") == "devices"
+                and str(item.get("payload", {}).get("fcmToken", "")) == token
+                for item in self._state.get("outbox", [])
+            )
+            delivered = accepted and self._device_is_listed(token)
             # Pairing claims the relay activation just before the app sends its
             # FCM token. Keep that token durably until enrollment completes
             # instead of losing the registration in this short race window.
-            return {"configured": enrolled, "queued": True}
+            return {
+                "configured": enrolled,
+                "queued": not delivered,
+                "delivered": delivered,
+            }
+
+    def _device_is_listed(self, fcm_token: str) -> bool:
+        """Confirm the relay can read back the registration it accepted."""
+        expected_id = hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()[:12]
+        try:
+            response = self._request(
+                f"/v1/agents/{self._state['agent_id']}/devices/list",
+                {},
+                signed=True,
+            )
+        except (KeyError, OSError):
+            return False
+        devices = response.get("devices", [])
+        return isinstance(devices, list) and any(
+            isinstance(device, dict) and str(device.get("id", "")) == expected_id
+            for device in devices
+        )
+
+    def devices(self) -> dict[str, object]:
+        """Return relay-sanitized summaries for apps paired with this Agent."""
+        with self._lock:
+            if not self._ensure_enrolled():
+                return {
+                    "available": False,
+                    "devices": [],
+                    "state": "notEnrolled",
+                    "error": "Relay enrollment is not ready.",
+                }
+            try:
+                response = self._request(
+                    f"/v1/agents/{self._state['agent_id']}/devices/list",
+                    {},
+                    signed=True,
+                )
+            except OSError:
+                return {
+                    "available": False,
+                    "devices": [],
+                    "state": "unavailable",
+                    "error": "The push relay is unavailable.",
+                }
+            devices = response.get("devices", [])
+            return {
+                "available": True,
+                "devices": devices if isinstance(devices, list) else [],
+            }
 
     def remove_device(self, *, fcm_token: str) -> bool:
         with self._lock:
@@ -264,6 +346,10 @@ class AgentRelay:
             except OSError:
                 break
             outbox.pop(0)
+            if item.get("kind") == "devices":
+                self._state["device_registration_revision"] = int(
+                    self._state.get("device_registration_revision", 0)
+                ) + 1
             self._save()
 
     def _request(self, path: str, payload: dict[str, object], *, signed: bool) -> dict[str, Any]:

@@ -1,3 +1,5 @@
+name: pbxsense-agent
+
 services:
   pbxsense-agent:
     build:

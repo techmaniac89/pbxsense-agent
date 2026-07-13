@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,22 @@ class _RecordingRelay(AgentRelay):
 
     def _request(self, path: str, payload: dict, *, signed: bool) -> dict:
         self.requests.append((path, payload, signed))
+        if path.endswith("/devices/list"):
+            registrations = [
+                request_payload
+                for request_path, request_payload, _ in self.requests
+                if request_path.endswith("/devices")
+            ]
+            return {
+                "devices": [
+                    {
+                        "id": hashlib.sha256(
+                            str(registration["fcmToken"]).encode("utf-8")
+                        ).hexdigest()[:12]
+                    }
+                    for registration in registrations
+                ]
+            }
         return {"status": "accepted"}
 
 
@@ -185,17 +202,148 @@ class RelayTest(unittest.TestCase):
                 activity=False,
             )
 
-            self.assertEqual(result, {"configured": True, "queued": True})
-            self.assertEqual(relay.requests[-1][0], "/v1/agents/agent_test/devices")
             self.assertEqual(
-                relay.requests[-1][1],
+                result,
+                {"configured": True, "queued": False, "delivered": True},
+            )
+            registration_request = next(
+                request
+                for request in relay.requests
+                if request[0] == "/v1/agents/agent_test/devices"
+            )
+            self.assertEqual(registration_request[0], "/v1/agents/agent_test/devices")
+            self.assertEqual(
+                registration_request[1],
                 {
                     "fcmToken": "token-123",
                     "meaningfulEnabled": False,
                     "activityEnabled": False,
                     "platform": "android",
+                    "appVersion": "",
+                    "deviceModel": "",
+                    "deviceName": "",
+                    "osVersion": "",
                 },
             )
+
+    def test_registration_is_not_ready_until_device_is_visible_in_relay_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            original_request = relay._request
+
+            def missing_from_list(path: str, payload: dict, *, signed: bool) -> dict:
+                if path.endswith("/devices/list"):
+                    relay.requests.append((path, payload, signed))
+                    return {"devices": []}
+                return original_request(path, payload, signed=signed)
+
+            relay._request = missing_from_list  # type: ignore[method-assign]
+
+            result = relay.register_device(
+                fcm_token="token-123",
+                meaningful=True,
+                activity=True,
+            )
+
+            self.assertEqual(
+                result,
+                {"configured": True, "queued": True, "delivered": False},
+            )
+
+    def test_registers_optional_app_and_device_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+
+            relay.register_device(
+                fcm_token="token-123",
+                meaningful=True,
+                activity=False,
+                platform="android",
+                app_version="0.2.86-beta+208",
+                device_model="Pixel 8",
+                device_name="Work phone",
+                os_version="16",
+            )
+
+            registration = next(
+                payload for path, payload, _ in relay.requests if path.endswith("/devices")
+            )
+            self.assertEqual(registration["appVersion"], "0.2.86-beta+208")
+            self.assertEqual(registration["deviceModel"], "Pixel 8")
+            self.assertEqual(registration["deviceName"], "Work phone")
+            self.assertEqual(registration["osVersion"], "16")
+
+    def test_device_registration_advances_pair_page_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            initial_revision = relay.status()["deviceRegistrationRevision"]
+
+            relay.register_device(
+                fcm_token="token-123",
+                meaningful=True,
+                activity=True,
+            )
+
+            self.assertEqual(
+                relay.status()["deviceRegistrationRevision"],
+                int(initial_revision) + 1,
+            )
+
+    def test_queued_registration_does_not_redirect_before_relay_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay._state.pop("agent_id")
+            initial_revision = relay.status()["deviceRegistrationRevision"]
+            initial_attempt_revision = relay.status()["deviceRegistrationAttemptRevision"]
+
+            relay.register_device(
+                fcm_token="token-123",
+                meaningful=True,
+                activity=True,
+            )
+
+            self.assertEqual(
+                relay.status()["deviceRegistrationRevision"],
+                initial_revision,
+            )
+            self.assertEqual(
+                relay.status()["deviceRegistrationAttemptRevision"],
+                int(initial_attempt_revision) + 1,
+            )
+
+            relay._state["agent_id"] = "agent_test"
+            relay._flush()
+
+            self.assertEqual(
+                relay.status()["deviceRegistrationRevision"],
+                int(initial_revision) + 1,
+            )
+
+    def test_lists_only_relay_sanitized_device_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+
+            def list_response(path: str, payload: dict, *, signed: bool) -> dict:
+                relay.requests.append((path, payload, signed))
+                return {"devices": [{"id": "abc123", "deviceModel": "Pixel 8"}]}
+
+            relay._request = list_response  # type: ignore[method-assign]
+            result = relay.devices()
+
+            self.assertTrue(result["available"])
+            self.assertEqual(result["devices"], [{"id": "abc123", "deviceModel": "Pixel 8"}])
+            self.assertEqual(relay.requests[-1], ("/v1/agents/agent_test/devices/list", {}, True))
+
+    def test_device_list_treats_first_pairing_as_an_empty_setup_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay._state.pop("agent_id")
+
+            result = relay.devices()
+
+            self.assertFalse(result["available"])
+            self.assertEqual(result["state"], "notEnrolled")
+            self.assertEqual(result["devices"], [])
 
     def test_queues_device_registration_until_qr_enrollment_completes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -208,7 +356,10 @@ class RelayTest(unittest.TestCase):
                 activity=True,
             )
 
-            self.assertEqual(result, {"configured": False, "queued": True})
+            self.assertEqual(
+                result,
+                {"configured": False, "queued": True, "delivered": False},
+            )
             self.assertEqual(relay.status()["queued"], 1)
             self.assertEqual(relay.requests, [])
 

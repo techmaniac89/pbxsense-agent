@@ -74,6 +74,12 @@ page changes to **Add another app**. Scan its QR on each additional phone. The
 Agent installation and relay identity remain shared, while every app registers
 its own FCM device and notification preferences.
 
+The protected Agent status page also includes **Paired apps**. It shows the
+apps registered with this Agent, including app version, platform, device model,
+OS version, notification preferences, and last registration time. Push tokens
+are never displayed. Older app registrations show unavailable metadata as
+**Not reported** until that app registers again.
+
 The token lives in:
 
 ```text
@@ -230,8 +236,26 @@ Edit `.env` and set the connector credentials.
 Start the Agent:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
+
+Rebuilding or upgrading with this command preserves the named data volume and
+`/var/lib/pbxsense-agent/relay_identity.json`, so registered apps remain linked
+to the Agent. The Compose project name is fixed to `pbxsense-agent`, making the
+volume stable even if the source folder is renamed. Never use `docker compose
+down -v` during an upgrade; `-v` deletes the relay identity.
+
+To back up the identity before moving hosts:
+
+```bash
+docker compose exec -T pbxsense-agent \
+  sh -c 'cat /var/lib/pbxsense-agent/relay_identity.json' \
+  > relay_identity.json.backup
+chmod 600 relay_identity.json.backup
+```
+
+Treat this backup as a secret. Restoring it to the same path and ownership on a
+replacement Agent reconnects that installation to its existing relay apps.
 
 Open:
 

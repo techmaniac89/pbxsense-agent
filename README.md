@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.3.0-beta` on the **Breeze** channel.
+The current Agent release is `0.3.8-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, or a development mock connector.
@@ -578,7 +578,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.3.0-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.3.8-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -589,7 +589,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.3.0-beta`, attach the matching files from
+For a release tag such as `agent-v0.3.8-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 
@@ -670,16 +670,21 @@ A real AMI socket should start with something like `Asterisk Call Manager`.
 
 ### Volumes
 
-The compose file defines two named PBXSense volumes:
+The compose file uses the fixed Compose project name `pbxsense-agent` and
+defines two named PBXSense volumes:
 
 ```yaml
 pbxsense-agent-data:/var/lib/pbxsense-agent
 pbxsense-agent-logs:/var/log/pbxsense-agent
 ```
 
-Agent v1 is mostly stateless, but these give the deployment stable
-places for future pairing tokens, local cache, snapshots, or file logs. Current
-runtime logs still go to Docker stdout, so use:
+The data volume stores `relay_identity.json`, which is the Agent's private relay
+identity and the link to its registered apps. Rebuilding with `docker compose
+up -d --build` preserves it. Moving or renaming the source folder also preserves
+the Compose project name. Do not use `docker compose down -v` unless you intend
+to erase the identity and pair every app again.
+
+Current runtime logs still go to Docker stdout, so use:
 
 ```bash
 docker compose logs -f

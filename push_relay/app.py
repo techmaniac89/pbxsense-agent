@@ -25,7 +25,7 @@ from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 
 
-app = FastAPI(title="PBXSense Push Relay", version="0.1.2")
+app = FastAPI(title="PBXSense Push Relay", version="0.2.0")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
@@ -156,6 +156,10 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
             "activityEnabled": bool(body.get("activityEnabled", True)),
             "platform": _clean_text(body.get("platform", "android"), "platform"),
+            "appVersion": _optional_text(body.get("appVersion")),
+            "deviceModel": _optional_text(body.get("deviceModel")),
+            "deviceName": _optional_text(body.get("deviceName")),
+            "osVersion": _optional_text(body.get("osVersion")),
             "siteId": agent["siteId"],
             "updatedAt": firestore.SERVER_TIMESTAMP,
             "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
@@ -163,6 +167,31 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
         merge=True,
     )
     return {"status": "registered", "deviceId": device_id}
+
+
+@app.post("/v1/agents/{agent_id}/devices/list")
+async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
+    """Return device metadata to its owning Agent without exposing FCM tokens."""
+    _, _ = await _authenticate_agent(agent_id, request)
+    devices: list[dict[str, object]] = []
+    for snapshot in db.collection("agents").document(agent_id).collection("devices").stream():
+        device = snapshot.to_dict() or {}
+        devices.append(
+            {
+                "id": snapshot.id[:12],
+                "platform": str(device.get("platform", "unknown")),
+                "appVersion": str(device.get("appVersion", "")),
+                "deviceModel": str(device.get("deviceModel", "")),
+                "deviceName": str(device.get("deviceName", "")),
+                "osVersion": str(device.get("osVersion", "")),
+                "meaningfulEnabled": bool(device.get("meaningfulEnabled", True)),
+                "activityEnabled": bool(device.get("activityEnabled", True)),
+                "updatedAt": _timestamp_text(device.get("updatedAt")),
+                "expiresAt": _timestamp_text(device.get("expiresAt")),
+            }
+        )
+    devices.sort(key=lambda item: str(item.get("updatedAt", "")), reverse=True)
+    return {"devices": devices}
 
 
 @app.post("/v1/agents/{agent_id}/devices/revoke")
@@ -405,3 +434,11 @@ def _clean_text(value: object, name: str) -> str:
     if not text:
         raise HTTPException(status_code=400, detail=f"{name} is required")
     return text
+
+
+def _optional_text(value: object, *, limit: int = 120) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _timestamp_text(value: object) -> str:
+    return value.isoformat() if isinstance(value, datetime) else ""

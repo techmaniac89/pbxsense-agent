@@ -47,6 +47,12 @@ The relay identity under `/var/lib/pbxsense-agent` contains the installation's
 private signing key and queued device registrations. The Agent enforces `0700`
 on its directory and `0600` on the identity file on Linux.
 
+Preserve `relay_identity.json` across rebuilds and host migrations. Anyone who
+obtains it can authenticate as that Agent, so store backups like credentials.
+Deleting the Docker data volume or identity file creates a new relay identity;
+the previous app registrations remain isolated under the old identity and must
+be recovered from backup or replaced by pairing the apps again.
+
 Rotate the token if it is shared accidentally. After rotation, reconnect the
 PBXSense app with the new pairing URL or QR payload.
 
