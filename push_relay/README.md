@@ -1,9 +1,34 @@
 # PBXSense push relay
 
-Deploy this directory to Cloud Run in the same Google Cloud project as Firebase.
-The Cloud Run runtime service account needs only the Firebase Cloud Messaging
-Admin permission and Firestore access. Do not create or download a service
-account key.
+## Customer Agent installations
+
+Customers do **not** deploy their own push relay. PBXSense operates one shared,
+multi-site relay for customer Agents and their paired phones. Use the hosted URL
+in every customer Agent environment:
+
+```env
+PBXSENSE_RELAY_URL=https://pbxsense-push-relay-299065188499.europe-west1.run.app
+```
+
+The protected Agent-page QR enrolls each Agent with the shared relay. Each Agent
+gets its own cryptographic identity, and each phone is registered only with the
+Agent it was paired to. Customers do not need Firebase credentials, a service
+account key, a manual claim code, Cloud Run, Firestore, or Cloud Scheduler.
+
+For a normal customer rollout, install the PBXSense Agent, keep the hosted relay
+URL above, then scan the pairing QR from the app. That is the complete relay
+setup on the customer side.
+
+## Optional self-hosted relay
+
+The rest of this document is for PBXSense infrastructure administrators or an
+enterprise customer that has explicitly chosen a private, self-hosted relay. It
+is not required for standard Agent installations.
+
+Deploy this directory to Cloud Run in the same Google Cloud project as the
+Firebase app used by that deployment. The Cloud Run runtime service account
+needs only Firebase Cloud Messaging Admin permission and Firestore access. Do
+not create or download a service account key.
 
 The protected Agent-page QR creates a short-lived activation for each Agent.
 An enrolled Agent owns an Ed25519 private key locally and signs every
@@ -21,7 +46,7 @@ Required runtime configuration:
 - a dedicated Cloud Run service account with Firebase Cloud Messaging Admin and
   Cloud Datastore User roles
 
-Example build and deploy (run by a project administrator):
+Example build and deploy (run only by the relay project administrator):
 
 ```sh
 gcloud run deploy pbxsense-push-relay \
@@ -32,9 +57,10 @@ gcloud run deploy pbxsense-push-relay \
   --set-secrets PBXSENSE_RELAY_ADMIN_TOKEN=pbxsense-relay-admin:latest
 ```
 
-The Agent needs only the resulting HTTPS URL in `PBXSENSE_RELAY_URL`. Pairing
-through its protected QR page completes enrollment; it never needs a Firebase
-service-account key or a manual claim code.
+A self-hosted Agent uses the resulting HTTPS URL instead of the PBXSense-hosted
+URL in `PBXSENSE_RELAY_URL`. Pairing through its protected QR page completes
+enrollment; it never needs a Firebase service-account key or a manual claim
+code.
 
 Create a Cloud Scheduler job that POSTs to
 `/v1/internal/sweep-agent-heartbeats` once per minute with the
