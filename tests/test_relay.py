@@ -87,6 +87,21 @@ class RelayTest(unittest.TestCase):
                 },
             )
 
+    def test_queues_device_registration_until_qr_enrollment_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay._state.pop("agent_id")
+
+            result = relay.register_device(
+                fcm_token="token-123",
+                meaningful=True,
+                activity=True,
+            )
+
+            self.assertEqual(result, {"configured": False, "queued": True})
+            self.assertEqual(relay.status()["queued"], 1)
+            self.assertEqual(relay.requests, [])
+
     def test_heartbeats_every_fifteen_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _RecordingRelay(str(Path(directory) / "identity.json"))

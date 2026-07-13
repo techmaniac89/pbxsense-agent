@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -24,11 +25,12 @@ from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 
 
-app = FastAPI(title="PBXSense Push Relay", version="0.1.0")
+app = FastAPI(title="PBXSense Push Relay", version="0.1.1")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
 AGENT_LOSS_TIMEOUT_SECONDS = 60
+logger = logging.getLogger(__name__)
 
 
 @app.get("/health")
@@ -74,6 +76,35 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
     expires_at = activation.get("expiresAt")
     if not valid_secret or activation.get("claimedAt") or not isinstance(expires_at, datetime) or expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Expired or used activation")
+
+    existing_agents = list(
+        db.collection("agents")
+        .where("publicKey", "==", activation["publicKey"])
+        .limit(1)
+        .stream()
+    )
+    if existing_agents:
+        existing = existing_agents[0]
+        agent = existing.to_dict() or {}
+        if agent.get("revoked"):
+            raise HTTPException(status_code=403, detail="This Agent identity has been revoked")
+        existing_site_id = str(agent.get("siteId", ""))
+        if not existing_site_id:
+            raise HTTPException(status_code=500, detail="Existing Agent has no site identity")
+        batch = db.batch()
+        batch.update(
+            activation_ref,
+            {
+                "claimedAt": firestore.SERVER_TIMESTAMP,
+                "agentId": existing.id,
+                "siteId": existing_site_id,
+                "reusedAgent": True,
+            },
+        )
+        batch.commit()
+        logger.info("activation_claimed agent_id=%s reused=true", existing.id)
+        return {"status": "claimed", "agentId": existing.id, "siteId": existing_site_id}
+
     site_name = _clean_text(body.get("siteName", activation.get("displayName")), "siteName")
     site_id = f"site_{secrets.token_urlsafe(10)}"
     agent_id = f"agent_{secrets.token_urlsafe(12)}"
@@ -91,6 +122,7 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
     })
     batch.update(activation_ref, {"claimedAt": firestore.SERVER_TIMESTAMP, "agentId": agent_id, "siteId": site_id})
     batch.commit()
+    logger.info("activation_claimed agent_id=%s reused=false", agent_id)
     return {"status": "claimed", "agentId": agent_id, "siteId": site_id}
 
 
@@ -206,7 +238,13 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         for document in db.collection("agents").document(agent_id).collection("devices").stream()
     ]
     now = datetime.now(timezone.utc)
-    tokens = [device["fcmToken"] for device in devices if _device_wants_event(device, category, importance) and device.get("expiresAt", now) >= now]
+    eligible_devices = [
+        device
+        for device in devices
+        if _device_wants_event(device, category, importance)
+        and device.get("expiresAt", now) >= now
+    ]
+    tokens = [str(device["fcmToken"]) for device in eligible_devices]
     if not tokens:
         return {"status": "accepted", "sent": 0}
 
@@ -228,7 +266,15 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         # permanently dropped event. The Agent's durable outbox will retry it.
         event_ref.delete()
         raise
-    _remove_invalid_tokens(agent_id, devices, response.responses)
+    invalid_tokens = _remove_invalid_tokens(agent_id, eligible_devices, response.responses)
+    logger.info(
+        "fcm_signal agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
+        agent_id,
+        len(eligible_devices),
+        response.success_count,
+        response.failure_count,
+        invalid_tokens,
+    )
     return {"status": "accepted", "sent": response.success_count, "failed": response.failure_count}
 
 
@@ -263,7 +309,8 @@ async def _authenticate_agent(agent_id: str, request: Request) -> tuple[dict[str
     return body, agent
 
 
-def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], responses: list[Any]) -> None:
+def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], responses: list[Any]) -> int:
+    removed = 0
     for device, response in zip(devices, responses, strict=True):
         if response.success or not isinstance(response.exception, messaging.UnregisteredError):
             continue
@@ -271,6 +318,8 @@ def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], respons
         if token:
             device_id = hashlib.sha256(token.encode("utf-8")).hexdigest()
             db.collection("agents").document(agent_id).collection("devices").document(device_id).delete()
+            removed += 1
+    return removed
 
 
 def _device_wants_event(device: dict[str, Any], category: str, importance: str) -> bool:
@@ -287,20 +336,32 @@ def _send_agent_status(agent_id: str, title: str, body: str) -> None:
         document.to_dict() or {}
         for document in db.collection("agents").document(agent_id).collection("devices").stream()
     ]
-    tokens = [
-        str(device.get("fcmToken", ""))
+    eligible_devices = [
+        device
         for device in devices
-        if device.get("meaningfulEnabled", True) and device.get("expiresAt", now) >= now
+        if device.get("meaningfulEnabled", True)
+        and device.get("expiresAt", now) >= now
     ]
+    tokens = [str(device.get("fcmToken", "")) for device in eligible_devices]
     if not tokens:
+        logger.info("fcm_agent_status agent_id=%s eligible=0 accepted=0 failed=0 invalid_removed=0", agent_id)
         return
-    messaging.send_each_for_multicast(
+    response = messaging.send_each_for_multicast(
         messaging.MulticastMessage(
             tokens=tokens,
             notification=messaging.Notification(title=title, body=body),
             data={"kind": "agent_connection", "agentId": agent_id},
             android=messaging.AndroidConfig(priority="high"),
         )
+    )
+    invalid_tokens = _remove_invalid_tokens(agent_id, eligible_devices, response.responses)
+    logger.info(
+        "fcm_agent_status agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
+        agent_id,
+        len(eligible_devices),
+        response.success_count,
+        response.failure_count,
+        invalid_tokens,
     )
 
 

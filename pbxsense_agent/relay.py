@@ -84,8 +84,6 @@ class AgentRelay:
         if not fcm_token.strip():
             return {"configured": self.configured, "queued": False}
         with self._lock:
-            if not self._ensure_enrolled():
-                return {"configured": False, "queued": False}
             self._queue(
                 "devices",
                 {
@@ -95,8 +93,13 @@ class AgentRelay:
                     "platform": "android",
                 },
             )
-            self._flush()
-            return {"configured": True, "queued": True}
+            enrolled = self._ensure_enrolled()
+            if enrolled:
+                self._flush()
+            # Pairing claims the relay activation just before the app sends its
+            # FCM token. Keep that token durably until enrollment completes
+            # instead of losing the registration in this short race window.
+            return {"configured": enrolled, "queued": True}
 
     def remove_device(self, *, fcm_token: str) -> bool:
         with self._lock:

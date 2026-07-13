@@ -47,3 +47,6 @@ The relay is publicly reachable only so Agents behind customer NAT can post to
 it. Every Agent request is Ed25519-signed and every administrative request
 requires the Secret Manager-backed administrator token; do not grant public
 access to Firestore itself.
+
+Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
+invalid registrations removed); it never logs FCM tokens.
