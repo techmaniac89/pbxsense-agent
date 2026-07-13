@@ -84,6 +84,11 @@ class ActivityTracker:
         current = _moment_state(snapshot)
         with self._lock:
             if current.reachable:
+                # A fresh outage starts a new recovery episode. Re-arm these
+                # extensions before comparing snapshots so their next return
+                # can produce Activity even when they recovered earlier today.
+                for extension in current.unavailable_extensions:
+                    self._reported_phone_recoveries.pop(extension, None)
                 if self._previous is not None:
                     self._record_transitions(self._previous, current, now)
                 self._events = [

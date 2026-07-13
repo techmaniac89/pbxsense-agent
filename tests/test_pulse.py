@@ -1318,7 +1318,7 @@ class PulseMappingTest(unittest.TestCase):
             {event["kind"] for event in events},
         )
 
-    def test_activity_tracker_removes_reversed_recovery_and_clear_activity(self) -> None:
+    def test_activity_tracker_rearms_recovery_after_a_new_outage(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
         tracker = ActivityTracker()
         active = AmiChannel(
@@ -1369,8 +1369,9 @@ class PulseMappingTest(unittest.TestCase):
             now + timedelta(minutes=3),
         )
 
-        self.assertFalse(
-            any(event["kind"] == "pbx_phone_recovered_activity" for event in events)
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["pbx_phone_recovered_activity"],
         )
 
     def test_activity_tracker_keeps_last_healthy_state_through_pbx_outage(self) -> None:
