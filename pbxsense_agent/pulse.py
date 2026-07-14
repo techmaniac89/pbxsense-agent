@@ -36,6 +36,7 @@ class AmiEndpoint:
     # A PBX-provided presence state, such as DND or Away. This is kept apart
     # from device_state: a phone can be registered while its owner is away.
     presence: str = ""
+    ip_address: str = ""
 
 
 @dataclass(frozen=True)
@@ -550,6 +551,7 @@ def _build_people(
                 "status": status,
                 "statusText": status_text,
                 "detail": detail,
+                "ipAddress": endpoint.ip_address,
                 "presence": {
                     "state": presence,
                     "label": presence_label,

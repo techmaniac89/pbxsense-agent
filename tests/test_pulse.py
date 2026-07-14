@@ -338,12 +338,14 @@ class PulseMappingTest(unittest.TestCase):
                     fields={
                         "EndpointName": "102",
                         "Status": "Reachable",
+                        "URI": "sip:102@192.168.1.102:5060",
                     },
                 ),
             ]
         )
 
         self.assertEqual(endpoints[0].device_state, "Reachable")
+        self.assertEqual(endpoints[0].ip_address, "192.168.1.102")
 
     def test_ami_unreachable_contact_stays_unreachable(self) -> None:
         endpoints = _endpoints_from_events(

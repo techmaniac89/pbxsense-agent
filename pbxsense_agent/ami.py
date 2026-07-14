@@ -287,6 +287,7 @@ def _channels_from_events(events: list[AmiEvent]) -> list[AmiChannel]:
 def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
     endpoints: list[AmiEndpoint] = []
     contact_states = _contact_states_from_events(events)
+    contact_addresses = _contact_addresses_from_events(events)
     for event in events:
         if event.name not in {"EndpointList", "PeerEntry"}:
             continue
@@ -328,6 +329,14 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
                     "PresenceState",
                     "Presence",
                     "CustomPresence",
+                ),
+                ip_address=(
+                    contact_addresses.get(extension, "")
+                    or _first_ip_address(
+                        fields.get("Address-IP", ""),
+                        fields.get("IPaddress", ""),
+                        fields.get("Address", ""),
+                    )
                 ),
             )
         )
@@ -419,6 +428,38 @@ def _contact_states_from_events(events: list[AmiEvent]) -> dict[str, list[str]]:
         if state:
             contacts.setdefault(endpoint, []).append(state)
     return contacts
+
+
+def _contact_addresses_from_events(events: list[AmiEvent]) -> dict[str, str]:
+    addresses: dict[str, str] = {}
+    for event in events:
+        if event.name != "ContactList":
+            continue
+        fields = event.fields
+        endpoint = (
+            fields.get("EndpointName", "")
+            or fields.get("Endpoint", "")
+            or fields.get("AOR", "")
+            or fields.get("ObjectName", "")
+        ).strip()
+        address = _first_ip_address(
+            fields.get("URI", ""),
+            fields.get("Contact", ""),
+            fields.get("Address", ""),
+            fields.get("ViaAddress", ""),
+            fields.get("RemoteAddress", ""),
+        )
+        if endpoint and address:
+            addresses.setdefault(endpoint, address)
+    return addresses
+
+
+def _first_ip_address(*values: str) -> str:
+    for value in values:
+        match = re.search(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", value)
+        if match and all(0 <= int(part) <= 255 for part in match.group().split(".")):
+            return match.group()
+    return ""
 
 
 def _contact_device_state(states: list[str]) -> str:

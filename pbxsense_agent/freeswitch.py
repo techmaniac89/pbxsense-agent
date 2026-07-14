@@ -110,6 +110,13 @@ class FreeSwitchClient:
                 device_state="Reachable",
                 active_channels=current.active_channels if current else 0,
                 label=_string(row, "display_name", "name"),
+                ip_address=_string(
+                    row,
+                    "network_ip",
+                    "network-ip",
+                    "ip_address",
+                    "ip",
+                ),
             )
         return list(endpoints.values())
 

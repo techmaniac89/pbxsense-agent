@@ -102,6 +102,8 @@ class YeastarClient:
                 _integer(item.get("status")) == 1
                 for item in _list(row.get("status_list"))
             ) or _integer(_object(row.get("online_status")).get("status")) == 1
+            status_items = _list(row.get("status_list"))
+            status_item = _object(status_items[0]) if status_items else {}
             endpoints.append(
                 AmiEndpoint(
                     extension=number,
@@ -112,6 +114,12 @@ class YeastarClient:
                         "presence_status",
                         "presence",
                         "presence_state",
+                    ),
+                    ip_address=_string(
+                        status_item,
+                        "ip_address",
+                        "ip",
+                        "host",
                     ),
                 )
             )
