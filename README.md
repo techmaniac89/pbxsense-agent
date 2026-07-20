@@ -33,7 +33,8 @@ out of the user-facing PBXSense experience.
 - Groups recent PBX authentication failures and blocked ACL attempts into
   privacy-preserving Security Signals when the local security log is visible.
 - Polls the PBX once through a central snapshot pipeline, then streams the same
-  consistent state to every connected app and the push relay.
+  consistent state to every connected app. Eligible Signal transitions and
+  Agent presence are published separately to the push relay.
 - Serves pairing pages and QR payloads for connecting PBXSense to the local
   Agent.
 - Provides diagnostics for connector setup, especially Asterisk AMI.
@@ -184,7 +185,8 @@ The installer:
 
 - Installs Python runtime packages when `apt-get` is available.
 - Auto-detects local Asterisk or FreeSWITCH files and commands when possible.
-- Lets you confirm `asterisk`, `freeswitch`, `yeastar`, or `mock` mode interactively.
+- Lets you confirm `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or
+  `mock` mode interactively.
 - Prompts for timezone, Agent port, and connector timeout.
 - Prompts for AMI, ESL, or Yeastar API credentials and preserves existing values on reinstall.
 - Suggests Asterisk CDR CSV, voicemail, and recording paths from common local locations.
@@ -249,7 +251,9 @@ Supported values today:
 
 ```text
 asterisk
+grandstream
 freeswitch
+yeastar
 mock
 ```
 

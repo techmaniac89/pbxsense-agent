@@ -1,5 +1,18 @@
 # PBXSense push relay
 
+## Scope
+
+This service is the production **notification relay**. It provides short-lived
+Agent activation, signed Agent enrollment, presence heartbeats, paired-device
+registration and revocation, and Firebase Cloud Messaging delivery for
+eligible Signals.
+
+It does not proxy the Agent's `/health`, `/home`, `/live`, diagnostics, or
+recording endpoints to the mobile app. It is therefore not the full Canopy
+Internet-access Relay described in the app roadmap. Until that separate data
+path is implemented, live app access away from the LAN requires a VPN or a
+directly reachable HTTPS Agent.
+
 ## Customer Agent installations
 
 Customers do **not** deploy their own push relay. PBXSense operates one shared,

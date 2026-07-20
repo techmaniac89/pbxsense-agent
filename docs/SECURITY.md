@@ -14,6 +14,12 @@ internet.
 - If remote access is needed, put it behind a VPN or another controlled private
   network.
 
+The hosted PBXSense push relay carries activation, Agent presence,
+paired-device registration, and eligible Signal notifications. It does not
+proxy `/home`, `/live`, diagnostics, or recordings and must not be treated as a
+replacement for VPN/private-network access. The full outbound-only Canopy data
+Relay remains a v1 target.
+
 ## Agent Token
 
 Set `PBXSENSE_AGENT_TOKEN` for production and LAN deployments.
