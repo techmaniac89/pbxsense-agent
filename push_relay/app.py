@@ -25,7 +25,7 @@ from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 
 
-app = FastAPI(title="PBXSense Push Relay", version="0.4.4")
+app = FastAPI(title="PBXSense Push Relay", version="0.4.6")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
@@ -211,13 +211,24 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
         },
         merge=True,
     )
-    # Migrate registrations created before scoped app credentials existed.
-    # Keeping one document per FCM token also prevents duplicate delivery.
-    for existing in db.collection_group("devices").where(
-        "fcmToken", "==", fcm_token
-    ).stream():
-        if existing.reference.path != devices_ref.document(device_id).path:
-            existing.reference.delete()
+    # Keep an O(1) ownership pointer for this secret FCM token. This migrates a
+    # previous registration even when an Agent rebuild changed its identity,
+    # without a collection-group query or an additional Firestore index.
+    token_ref = db.collection("deviceTokens").document(
+        hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
+    )
+    previous = token_ref.get()
+    previous_path = str((previous.to_dict() or {}).get("devicePath", "")) \
+        if previous.exists else ""
+    current_path = devices_ref.document(device_id).path
+    if previous_path and previous_path != current_path:
+        previous_ref = db.document(previous_path)
+        if previous_ref.get().exists:
+            previous_ref.delete()
+    token_ref.set({
+        "devicePath": current_path,
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    })
     return {"status": "registered", "deviceId": device_id}
 
 

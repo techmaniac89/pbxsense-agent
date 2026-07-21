@@ -95,7 +95,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.4.4` provides the encrypted Internet Relay data path. Updated apps
+Relay service `0.4.6` provides the encrypted Internet Relay data path. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
 separate AES-256-GCM envelope for each device. Firestore and the Cloud Run
@@ -113,7 +113,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.4.4 cost profile is local-first: Agents check for changed relay snapshots
+The 0.4.6 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps read snapshots every 15 seconds. Snapshot liveness comes from the
