@@ -187,7 +187,7 @@ passwords, secrets, and tokens are never populated into an existing file.
 After changing `.env` in Docker:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --force-recreate
 ```
 
 After changing `/etc/pbxsense-agent.env` on Linux:

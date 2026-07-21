@@ -16,15 +16,18 @@ internet.
 
 The hosted PBXSense relay carries activation, Agent presence, paired-device
 registration, eligible Signal notifications, and opaque encrypted Home
-snapshots when an installation explicitly enables Internet Relay. It never
+snapshots for apps that explicitly enable Internet Relay while pairing. The
+Agent capability is available by default but publishes no encrypted snapshot
+without an opted-in app encryption key. It never
 receives PBX credentials or plaintext PBX snapshots.
 
 Each app creates its own X25519 key during QR pairing and stores the private key
 in platform secure storage. The Agent receives only that app's public key and
 creates a separate AES-256-GCM envelope using an ephemeral X25519 key and
 HKDF-SHA256. Agent identity, device identity, sequence, and creation time are
-authenticated as associated data. Snapshots expire in the app after 60 seconds,
-and recordings are removed before encryption. Diagnostics, recordings, and
+authenticated as associated data. Relay data is rejected after 60 seconds on
+legacy envelope timing, or after 75 seconds when current Agent-heartbeat
+liveness is present. Recordings are removed before encryption. Diagnostics, recordings, and
 interactive PBX control remain local/VPN-only.
 
 The outbound control session uses the Agent's Ed25519 installation identity.

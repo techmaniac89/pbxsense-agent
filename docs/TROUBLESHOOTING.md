@@ -132,7 +132,8 @@ when closed-app push notifications are required.
 If push notifications work but the app cannot use encrypted Home snapshots
 away from the LAN:
 
-- Confirm the Agent uses relay service 0.4.1 and current Breeze app/Agent builds.
+- Confirm the hosted relay reports service `0.4.6` and use current Breeze
+  app/Agent builds.
 - Confirm `PBXSENSE_INTERNET_RELAY_ENABLED` is `true` (the default) and restart
   the Agent after changing an explicit override.
 - Open Agent diagnostics and confirm Internet relay is enabled and connected.
@@ -141,9 +142,10 @@ away from the LAN:
 - Keep `/var/lib/pbxsense-agent/relay_identity.json` persistent across Docker
   rebuilds. If the identity was recreated, pair the app again.
 
-The app rejects encrypted snapshots older than 60 seconds. If the Agent or its
-Internet connection is down, a brief secure connection may therefore change to
-reconnecting; this is intentional and prevents stale PBX state appearing live.
+The app allows 75 seconds from the current Agent heartbeat (or 60 seconds from
+the envelope timestamp for older relay responses). If the Agent or its Internet
+connection is down, a brief secure connection may therefore change to
+reconnecting; this prevents stale PBX state appearing live.
 
 ## Missing History Or Voicemail
 

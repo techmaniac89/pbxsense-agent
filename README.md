@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.4.2-beta` on the **Breeze** channel.
+The current Agent release is `0.4.3-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, or a development mock connector.
@@ -615,7 +615,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.4.2-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.4.3-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -626,7 +626,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.4.2-beta`, attach the matching files from
+For a release tag such as `agent-v0.4.3-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 

@@ -7,7 +7,7 @@ Agent activation, signed Agent enrollment, presence heartbeats, paired-device
 registration and revocation, and Firebase Cloud Messaging delivery for
 eligible Signals.
 
-It does not proxy the Agent's HTTP or WebSocket endpoints. Agent 0.4.0 instead
+It does not proxy the Agent's HTTP or WebSocket endpoints. Current Agents
 publishes sanitized, per-app encrypted Home snapshots that the relay cannot
 decrypt. Diagnostics, recordings, and PBX control remain local/VPN-only.
 
@@ -28,15 +28,16 @@ account key, a manual claim code, Cloud Run, Firestore, or Cloud Scheduler.
 
 For a normal customer rollout, install the PBXSense Agent, keep the hosted relay
 URL above, then scan the pairing QR from the app. That is the complete relay
-setup for enrollment and push notifications. Encrypted Home fallback is an
-explicit Agent opt-in:
+setup for enrollment and push notifications. The Agent capability is ready by
+default, while encrypted Home fallback remains an explicit per-app choice on
+the pairing screen. To prohibit Internet Relay data for the whole installation:
 
 ```env
-PBXSENSE_INTERNET_RELAY_ENABLED=true
+PBXSENSE_INTERNET_RELAY_ENABLED=false
 ```
 
-Restart the Agent after enabling it. This setting is not required for push
-notifications and does not make diagnostics, recordings, or PBX control remote.
+Restart the Agent after changing this override. It does not affect push
+notifications and never makes diagnostics, recordings, or PBX control remote.
 
 ## Optional self-hosted relay
 
@@ -103,7 +104,8 @@ service see only encrypted snapshot bytes and routing metadata.
 
 The snapshot API deliberately excludes recordings and does not expose
 diagnostics or PBX control. Envelopes carry authenticated sequence and creation
-metadata and updated apps reject data older than 60 seconds. Older apps can
+metadata. Current apps allow 75 seconds from Agent heartbeat liveness, while
+older envelope-only responses retain a 60-second limit. Older apps can
 still claim an activation for push delivery without requesting an encryption
 key, which permits staged rollout of the Agent, relay, and app. Every newly
 paired app receives a scoped device bearer credential. **Reset connection**
