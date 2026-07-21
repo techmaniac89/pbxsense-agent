@@ -25,7 +25,7 @@ from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 
 
-app = FastAPI(title="PBXSense Push Relay", version="0.4.1")
+app = FastAPI(title="PBXSense Push Relay", version="0.4.4")
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
@@ -81,8 +81,11 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
     )
     if encryption_public_key and len(_decode_bytes(encryption_public_key)) != 32:
         raise HTTPException(status_code=400, detail="Invalid encryptionPublicKey")
-    relay_device_id = f"device_{secrets.token_urlsafe(12)}" if encryption_public_key else ""
-    relay_access_token = secrets.token_urlsafe(32) if encryption_public_key else ""
+    # Every app receives a scoped device credential so it can revoke its own
+    # push registration even while the Agent is offline or being rebuilt.
+    # Encryption remains opt-in and is represented only by the optional key.
+    relay_device_id = f"device_{secrets.token_urlsafe(12)}"
+    relay_access_token = secrets.token_urlsafe(32)
 
     existing_agents = list(
         db.collection("agents")
@@ -110,17 +113,15 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
         )
         batch.commit()
         logger.info("activation_claimed agent_id=%s reused=true", existing.id)
-        if encryption_public_key:
-            _create_relay_device(
-                existing.id, existing_site_id, relay_device_id,
-                relay_access_token, encryption_public_key,
-            )
+        _create_relay_device(
+            existing.id, existing_site_id, relay_device_id,
+            relay_access_token, encryption_public_key,
+        )
         result = {
             "status": "claimed", "agentId": existing.id,
             "siteId": existing_site_id,
         }
-        if encryption_public_key:
-            result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
+        result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
         return result
 
     site_name = _clean_text(body.get("siteName", activation.get("displayName")), "siteName")
@@ -140,15 +141,13 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
     })
     batch.update(activation_ref, {"claimedAt": firestore.SERVER_TIMESTAMP, "agentId": agent_id, "siteId": site_id})
     batch.commit()
-    if encryption_public_key:
-        _create_relay_device(
-            agent_id, site_id, relay_device_id,
-            relay_access_token, encryption_public_key,
-        )
+    _create_relay_device(
+        agent_id, site_id, relay_device_id,
+        relay_access_token, encryption_public_key,
+    )
     logger.info("activation_claimed agent_id=%s reused=false", agent_id)
     result = {"status": "claimed", "agentId": agent_id, "siteId": site_id}
-    if encryption_public_key:
-        result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
+    result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
     return result
 
 
@@ -159,7 +158,7 @@ def _create_relay_device(
     db.collection("agents").document(agent_id).collection("devices").document(device_id).create({
         "siteId": site_id,
         "accessTokenHash": hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
-        "encryptionPublicKey": encryption_public_key,
+        **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
         "createdAt": firestore.SERVER_TIMESTAMP,
         "updatedAt": firestore.SERVER_TIMESTAMP,
         "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
@@ -194,7 +193,8 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
     requested_device_id = _optional_identifier(body.get("relayDeviceId"))
     device_id = requested_device_id or hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
     encryption_public_key = _optional_text(body.get("encryptionPublicKey"), limit=100)
-    db.collection("agents").document(agent_id).collection("devices").document(device_id).set(
+    devices_ref = db.collection("agents").document(agent_id).collection("devices")
+    devices_ref.document(device_id).set(
         {
             "fcmToken": fcm_token,
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
@@ -211,6 +211,13 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
         },
         merge=True,
     )
+    # Migrate registrations created before scoped app credentials existed.
+    # Keeping one document per FCM token also prevents duplicate delivery.
+    for existing in db.collection_group("devices").where(
+        "fcmToken", "==", fcm_token
+    ).stream():
+        if existing.reference.path != devices_ref.document(device_id).path:
+            existing.reference.delete()
     return {"status": "registered", "deviceId": device_id}
 
 
@@ -393,6 +400,31 @@ async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) 
         "agentLastSeenAt": last_seen_at.isoformat(),
         "envelope": envelope,
     }
+
+
+@app.delete("/v1/agents/{agent_id}/devices/{device_id}")
+async def revoke_own_device(
+    agent_id: str, device_id: str, request: Request
+) -> dict[str, str]:
+    """Allow an app to revoke only the relay device its bearer token owns."""
+    device_ref = (
+        db.collection("agents").document(agent_id)
+        .collection("devices").document(device_id)
+    )
+    snapshot = device_ref.get()
+    if not snapshot.exists:
+        # A repeated reset is already in the desired state.
+        return {"status": "removed"}
+    device = snapshot.to_dict() or {}
+    supplied = request.headers.get("authorization", "")
+    token = supplied[7:].strip() if supplied.lower().startswith("bearer ") else ""
+    expected = str(device.get("accessTokenHash", ""))
+    if not token or not expected or not hmac.compare_digest(
+        hashlib.sha256(token.encode("utf-8")).hexdigest(), expected
+    ):
+        raise HTTPException(status_code=401, detail="Invalid device credential")
+    device_ref.delete()
+    return {"status": "removed"}
 
 
 @app.post("/v1/internal/agents/{agent_id}/secure/ping")
