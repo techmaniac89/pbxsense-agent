@@ -90,9 +90,12 @@ sanitized Home fallback, not a public Agent endpoint.
 
 The protected Agent status page also includes **Paired apps**. It shows the
 apps registered with this Agent, including app version, platform, device model,
-OS version, notification preferences, and last registration time. Push tokens
-are never displayed. Older app registrations show unavailable metadata as
-**Not reported** until that app registers again.
+OS version, notification preferences, last registration time, and recent secure
+Internet Relay presence. **Connected now** means that app contacted the secure
+relay within the last 90 seconds; local-only traffic cannot be attributed to an
+individual registration. Push tokens are never displayed. Older app
+registrations show unavailable metadata as **Not reported** until that app
+registers again.
 
 Each card has **Remove app**. After browser confirmation, the Agent revokes
 only that app's push and Internet Relay device registration. The removed app

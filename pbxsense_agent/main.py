@@ -508,6 +508,7 @@ def pair(request: Request):
         relay_status.get("deviceRegistrationAttemptRevision", 0)
     )
     registration_revision = int(relay_status.get("deviceRegistrationRevision", 0))
+    initial_device_revision = _registered_device_revision(push_relay.devices())
     apps_query = {"waitForDevice": "1"}
     if request.query_params.get("token", "").strip():
         apps_query["token"] = request.query_params["token"].strip()
@@ -584,6 +585,7 @@ def pair(request: Request):
                 }});
                 const initialRevision = {registration_revision};
                 const initialAttemptRevision = {registration_attempt_revision};
+                const initialDeviceRevision = {json.dumps(initial_device_revision)};
                 const statusUrl = {json.dumps('/push/devices/status' + _link_token_suffix(request))};
                 const appsUrl = {json.dumps(paired_apps_url)};
                 const poll = async () => {{
@@ -597,6 +599,10 @@ def pair(request: Request):
                         card.innerHTML = '<span class="dot"></span><span>Finishing pairing...<small>Waiting for the registered app details.</small></span>';
                       }}
                       if (Number(status.registrationRevision) > initialRevision) {{
+                        window.location.replace(appsUrl);
+                        return;
+                      }}
+                      if (status.deviceRevision && status.deviceRevision !== initialDeviceRevision) {{
                         window.location.replace(appsUrl);
                         return;
                       }}
@@ -722,6 +728,7 @@ def _device_card(device: dict[str, object], request: Request) -> str:
     if device.get("activityEnabled", True):
         notifications.append("PBX activity")
     rows = {
+        "Connection": "Connected now" if device.get("connectedNow") is True else "Not connected recently",
         "Model": model or "Not reported",
         "App version": app_version or "Not reported",
         "Notifications": ", ".join(notifications) if notifications else "Disabled",
@@ -961,14 +968,30 @@ async def register_push_device(request: Request) -> dict[str, object]:
 
 
 @app.get("/push/devices/status")
-def push_device_registration_status(request: Request) -> dict[str, int]:
+def push_device_registration_status(request: Request) -> dict[str, int | str]:
     """Let the protected Pair page detect a completed app registration."""
     _require_token(request)
     status = push_relay.status()
     return {
         "attemptRevision": int(status.get("deviceRegistrationAttemptRevision", 0)),
         "registrationRevision": int(status.get("deviceRegistrationRevision", 0)),
+        "deviceRevision": _registered_device_revision(push_relay.devices()),
     }
+
+
+def _registered_device_revision(result: dict[str, object]) -> str:
+    """Fingerprint the relay list so Internet-only pairing refreshes /pair."""
+    if result.get("available") is not True:
+        return ""
+    devices = result.get("devices", [])
+    if not isinstance(devices, list):
+        return ""
+    values = sorted(
+        f"{device.get('id', '')}|{device.get('updatedAt', '')}"
+        for device in devices
+        if isinstance(device, dict)
+    )
+    return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()[:20]
 
 
 @app.post("/push/devices/revoke")

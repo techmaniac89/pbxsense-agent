@@ -86,6 +86,21 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertNotIn("model.casefold() != name.strip().casefold()", source)
         self.assertNotIn("Push registration details for this Agent only.", source)
 
+    def test_paired_apps_show_recent_secure_relay_presence(self) -> None:
+        agent_source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+        relay_source = Path("push_relay/app.py").read_text(encoding="utf-8")
+
+        self.assertIn('"Connection": "Connected now"', agent_source)
+        self.assertIn('"connectedNow": (', relay_source)
+        self.assertIn('"lastConnectedAt": firestore.SERVER_TIMESTAMP', relay_source)
+
+    def test_pair_page_detects_internet_only_registration(self) -> None:
+        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+
+        self.assertIn("const initialDeviceRevision", source)
+        self.assertIn("status.deviceRevision !== initialDeviceRevision", source)
+        self.assertIn('"deviceRevision": _registered_device_revision', source)
+
     def test_paired_apps_can_be_removed_individually(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
 

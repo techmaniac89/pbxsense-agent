@@ -163,6 +163,7 @@ def _create_relay_device(
         **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
         "createdAt": firestore.SERVER_TIMESTAMP,
         "updatedAt": firestore.SERVER_TIMESTAMP,
+        "lastConnectedAt": firestore.SERVER_TIMESTAMP,
         "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
         "meaningfulEnabled": True,
         "activityEnabled": True,
@@ -210,6 +211,7 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
             "osVersion": _optional_text(body.get("osVersion")),
             "siteId": agent["siteId"],
             "updatedAt": firestore.SERVER_TIMESTAMP,
+            "lastConnectedAt": firestore.SERVER_TIMESTAMP,
             "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
             **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
         },
@@ -241,8 +243,10 @@ async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
     """Return device metadata to its owning Agent without exposing FCM tokens."""
     _, _ = await _authenticate_agent(agent_id, request, touch_presence=False)
     devices: list[dict[str, object]] = []
+    connected_cutoff = datetime.now(timezone.utc) - timedelta(seconds=90)
     for snapshot in db.collection("agents").document(agent_id).collection("devices").stream():
         device = snapshot.to_dict() or {}
+        last_connected_at = device.get("lastConnectedAt")
         devices.append(
             {
                 "id": snapshot.id if device.get("accessTokenHash") else snapshot.id[:12],
@@ -255,6 +259,11 @@ async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
                 "meaningfulEnabled": bool(device.get("meaningfulEnabled", True)),
                 "activityEnabled": bool(device.get("activityEnabled", True)),
                 "updatedAt": _timestamp_text(device.get("updatedAt")),
+                "lastConnectedAt": _timestamp_text(last_connected_at),
+                "connectedNow": (
+                    isinstance(last_connected_at, datetime)
+                    and last_connected_at >= connected_cutoff
+                ),
                 "expiresAt": _timestamp_text(device.get("expiresAt")),
                 "encryptionPublicKey": str(device.get("encryptionPublicKey", "")),
             }
@@ -384,6 +393,7 @@ async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str,
 @app.post("/v1/agents/{agent_id}/devices/{device_id}/secure-snapshot")
 async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) -> dict[str, object]:
     device_ref, device = _authenticate_relay_device(agent_id, device_id, request)
+    device_ref.set({"lastConnectedAt": firestore.SERVER_TIMESTAMP}, merge=True)
     agent_snapshot = db.collection("agents").document(agent_id).get()
     agent = agent_snapshot.to_dict() if agent_snapshot.exists else None
     last_seen_at = agent.get("lastSeenAt") if agent else None
@@ -437,6 +447,7 @@ async def register_own_device(
             "deviceName": _optional_text(body.get("deviceName")),
             "osVersion": _optional_text(body.get("osVersion")),
             "updatedAt": firestore.SERVER_TIMESTAMP,
+            "lastConnectedAt": firestore.SERVER_TIMESTAMP,
             "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
         },
         merge=True,
