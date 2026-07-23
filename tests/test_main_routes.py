@@ -119,6 +119,21 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("_authenticate_relay_device(agent_id, device_id, request)", source)
         self.assertIn('return {"delivered": True, "deviceId": device_id}', source)
 
+    def test_push_relay_has_cost_and_enrollment_guardrails(self) -> None:
+        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+
+        self.assertIn("PBXSENSE_RELAY_ENROLLMENT_MODE", source)
+        self.assertIn('"/v1/internal/enrollment-tickets"', source)
+        self.assertIn("MAX_DEVICES_PER_AGENT", source)
+        self.assertIn("MAX_EVENTS_PER_AGENT_PER_HOUR", source)
+        self.assertIn("MAX_SECURE_SNAPSHOT_BYTES", source)
+        self.assertIn("Request rate limit exceeded", source)
+        self.assertIn("_verify_public_key_request(public_key, request)", source)
+        self.assertIn('@app.get("/v1/internal/usage")', source)
+        self.assertIn("def _usage_update", source)
+        self.assertIn("PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS", source)
+        self.assertIn('"privacy": "Agent identifiers are one-way hashes;', source)
+
     def test_push_relay_deduplicates_tokens_and_tags_notification_episodes(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
 

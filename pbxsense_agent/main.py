@@ -76,6 +76,7 @@ push_relay = AgentRelay(
     identity_path=settings.relay_identity_path,
     display_name=settings.display_name,
     timeout_seconds=settings.relay_timeout_seconds,
+    enrollment_ticket=settings.relay_enrollment_ticket,
 )
 internet_relay = SecureInternetRelay(
     enabled=settings.internet_relay_enabled,

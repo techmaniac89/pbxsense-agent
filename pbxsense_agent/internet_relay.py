@@ -37,6 +37,7 @@ class SecureInternetRelay:
         self._connected = False
         self._last_exchange_at = 0.0
         self._last_error = ""
+        self._control_exchange_seconds = CONTROL_EXCHANGE_INTERVAL_SECONDS
 
     def status(self) -> dict[str, object]:
         return {
@@ -47,6 +48,7 @@ class SecureInternetRelay:
             "lastExchangeAt": self._last_exchange_at,
             "lastError": self._last_error,
             "capabilities": ["ping", "encryptedSnapshotV1"],
+            "controlExchangeSeconds": self._control_exchange_seconds,
         }
 
     def poll(self) -> None:
@@ -56,7 +58,7 @@ class SecureInternetRelay:
             now = time.time()
             if (
                 not self._last_exchange_at
-                or now - self._last_exchange_at >= CONTROL_EXCHANGE_INTERVAL_SECONDS
+                or now - self._last_exchange_at >= self._control_exchange_seconds
                 or self._pending_responses
             ):
                 payload: dict[str, object] = {
@@ -69,6 +71,7 @@ class SecureInternetRelay:
                 result = self._exchange(payload)
                 self._pending_responses = []
                 self._accept_commands(result.get("commands", []))
+                self._accept_policy(result.get("policy"))
                 self._last_exchange_at = now
             if self._snapshot_provider is not None and self._snapshot_publisher is not None:
                 self._snapshot_publisher(self._snapshot_provider())
@@ -77,6 +80,13 @@ class SecureInternetRelay:
         except (OSError, TypeError, ValueError) as exc:
             self._connected = False
             self._last_error = str(exc)[:240]
+
+    def _accept_policy(self, raw_policy: object) -> None:
+        if not isinstance(raw_policy, dict):
+            return
+        seconds = _integer(raw_policy.get("controlExchangeSeconds"))
+        if 60 <= seconds <= 900:
+            self._control_exchange_seconds = seconds
 
     def _accept_commands(self, raw_commands: object) -> None:
         if not isinstance(raw_commands, list):

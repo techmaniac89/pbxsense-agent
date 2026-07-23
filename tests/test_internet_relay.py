@@ -63,3 +63,20 @@ class SecureInternetRelayTest(unittest.TestCase):
         relay.poll()
         self.assertEqual(calls, 0)
         self.assertFalse(relay.status()["enabled"])
+
+    def test_accepts_bounded_server_control_exchange_policy(self) -> None:
+        relay = SecureInternetRelay(
+            enabled=True,
+            exchange=lambda _: {
+                "commands": [],
+                "policy": {"controlExchangeSeconds": 600},
+            },
+            agent_version="test",
+        )
+
+        relay.poll()
+
+        self.assertEqual(relay.status()["controlExchangeSeconds"], 600)
+
+        relay._accept_policy({"controlExchangeSeconds": 30})
+        self.assertEqual(relay.status()["controlExchangeSeconds"], 600)

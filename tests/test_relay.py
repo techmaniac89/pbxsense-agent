@@ -64,11 +64,12 @@ class _RecordingRelay(AgentRelay):
 
 
 class _ActivationRelay(AgentRelay):
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, enrollment_ticket: str = "") -> None:
         super().__init__(
             url="https://relay.example",
             identity_path=path,
             display_name="Test PBX",
+            enrollment_ticket=enrollment_ticket,
         )
         self.requests: list[tuple[str, dict, bool]] = []
 
@@ -105,6 +106,20 @@ class _SecureExchangeRelay(_RecordingRelay):
 
 
 class RelayTest(unittest.TestCase):
+    def test_new_relay_activation_is_signed_and_carries_provisioned_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _ActivationRelay(
+                str(Path(directory) / "identity.json"),
+                enrollment_ticket="ticket_provisioned",
+            )
+
+            relay.activation()
+
+            path, payload, signed = relay.requests[-1]
+            self.assertEqual(path, "/v1/activations")
+            self.assertEqual(payload["enrollmentTicket"], "ticket_provisioned")
+            self.assertTrue(signed)
+
     def test_secure_projection_exposes_only_customer_facing_relay_status(self) -> None:
         projected = _secure_snapshot_projection({
             "connection": {"pbxHost": "10.0.0.1", "pbxPort": 5038},

@@ -27,6 +27,7 @@ class AgentSettings:
     relay_url: str = ""
     relay_identity_path: str = "/var/lib/pbxsense-agent/relay_identity.json"
     relay_timeout_seconds: float = 5
+    relay_enrollment_ticket: str = ""
     quality_frequency_seconds: int = 180
     endpoint_outage_confirmation_seconds: float = 5
     trunk_outage_confirmation_seconds: float = 5
@@ -127,6 +128,9 @@ class AgentSettings:
                 "/var/lib/pbxsense-agent/relay_identity.json",
             ).strip(),
             relay_timeout_seconds=_env_float("PBXSENSE_RELAY_TIMEOUT", 5),
+            relay_enrollment_ticket=os.getenv(
+                "PBXSENSE_RELAY_ENROLLMENT_TICKET", ""
+            ).strip(),
             quality_frequency_seconds=_env_int("PBXSENSE_QUALITY_FREQUENCY_SECONDS", 180),
             endpoint_outage_confirmation_seconds=max(
                 0, _env_float("PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS", 5)

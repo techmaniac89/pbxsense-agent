@@ -69,13 +69,88 @@ Required runtime configuration:
 Example build and deploy (run only by the relay project administrator):
 
 ```sh
-gcloud run deploy pbxsense-push-relay \
-  --source . \
-  --region europe-west1 \
-  --allow-unauthenticated \
-  --service-account pbxsense-push-relay@PROJECT_ID.iam.gserviceaccount.com \
-  --set-secrets PBXSENSE_RELAY_ADMIN_TOKEN=pbxsense-relay-admin:latest
+GOOGLE_CLOUD_PROJECT=your-project-id sh ./deploy_cloud_run.sh
 ```
+
+The deployment profile deliberately uses request-based scale-to-zero with
+`min-instances=0`, `max-instances=3`, concurrency 80, a 15-second timeout,
+one CPU, and 512 MiB memory. The maximum-instance setting is a strong cost
+guardrail, not an absolute monetary cap: Cloud Run can briefly exceed it during
+a traffic spike.
+
+Create two independent Secret Manager secrets:
+
+- `pbxsense-relay-admin` authenticates administrative sweep/ticket operations.
+- `pbxsense-relay-ticket` signs enrollment capabilities and must not be placed
+  in the open-source Agent, app, repository, image, or customer environment.
+
+### Enrollment rollout
+
+`PBXSENSE_RELAY_ENROLLMENT_MODE` supports three modes:
+
+- `open` keeps compatibility while upgraded Agents roll out. New identities
+  can enroll, so this is not the final paid-service setting.
+- `ticket` requires a short-lived, single-use server-signed ticket for a new
+  Agent identity. Already enrolled Agents create later pairing activations
+  using their durable Ed25519 signature.
+- `closed` pauses all new Agent identities while existing signed identities
+  continue to pair apps.
+
+The deployment script defaults to `open` for a safe staged upgrade. After
+Agents have upgraded and the billing/licensing service can provision tickets,
+deploy with:
+
+```sh
+GOOGLE_CLOUD_PROJECT=your-project-id \
+PBXSENSE_RELAY_ENROLLMENT_MODE=ticket \
+sh ./deploy_cloud_run.sh
+```
+
+Trusted billing/admin code obtains a 30-minute ticket with:
+
+```http
+POST /v1/internal/enrollment-tickets
+X-PBXSense-Admin-Token: <Secret Manager admin token>
+Content-Type: application/json
+
+{"accountId":"customer_123","lifetimeMinutes":30}
+```
+
+Provision the returned opaque value once as
+`PBXSENSE_RELAY_ENROLLMENT_TICKET` on the new Agent. It is consumed only when
+the first app claims the activation. It is not a Firebase credential and cannot
+be used to sign another ticket.
+
+The relay additionally enforces:
+
+- six activation requests per source address per minute per instance;
+- 120 total requests per source address per minute per instance;
+- ten paired apps per Agent by default;
+- 60 notification events per Agent per hour per instance;
+- a 2 MiB encrypted-snapshot request limit;
+- bounded identifiers before Agent/device Firestore lookups;
+- signed activation refreshes for existing identities in `ticket`/`closed`
+  mode.
+
+These application limits complement Cloud Run scaling; they do not replace an
+edge DDoS service for a high-volume public deployment.
+
+### Billing guardrail
+
+Keep the relay in its own Google Cloud project. Create a project-scoped monthly
+budget after choosing an amount:
+
+```sh
+GOOGLE_CLOUD_PROJECT=your-project-id \
+GOOGLE_CLOUD_BILLING_ACCOUNT=000000-000000-000000 \
+PBXSENSE_RELAY_MONTHLY_BUDGET=25EUR \
+sh ./create_budget.sh
+```
+
+This creates actual-spend alerts at 20%, 40%, 80%, and 100%, plus a forecast
+alert at 60%. A Google Cloud budget sends alerts but does not stop billing.
+Connect it to Pub/Sub before implementing an automated emergency shutdown, and
+keep that shutdown project-scoped so it cannot affect unrelated services.
 
 A self-hosted Agent uses the resulting HTTPS URL instead of the PBXSense-hosted
 URL in `PBXSENSE_RELAY_URL`. Pairing through its protected QR page completes
@@ -96,7 +171,8 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.4.8` provides the encrypted Internet Relay data path. Updated apps
+Relay service `0.5.1` provides the encrypted Internet Relay data path and
+cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
 separate AES-256-GCM envelope for each device. Firestore and the Cloud Run
@@ -115,12 +191,44 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.4.8 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.1 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
-Remote apps read snapshots every 15 seconds. Snapshot liveness comes from the
-existing Agent heartbeat, so unchanged PBX state no longer needs periodic
-ciphertext rewrites.
+Remote apps default to a server-controlled 60-second fallback interval when the
+LAN Agent is unavailable. The relay returns this policy with encrypted snapshot
+responses, so operators can tune it between 15 and 300 seconds without shipping
+another app build. Snapshot liveness comes from the existing 30-second Agent
+heartbeat, so cost tuning never weakens Agent-down detection.
+
+### Privacy-safe usage monitoring
+
+The authenticated `GET /v1/internal/usage` endpoint reports current UTC-day
+totals for heartbeats, control exchanges, encrypted snapshot publication,
+remote snapshot reads, and encrypted bytes. It also reports active Agents,
+registered apps, and recently connected apps. Agent identifiers are one-way
+SHA-256 prefixes; PBX state, calls, extensions, FCM tokens, and encrypted
+payloads are never returned.
+
+Heartbeat and remote-read counters reuse Firestore writes already required for
+presence and snapshot delivery. Snapshot publication adds one small metadata
+write only when the Agent publishes changed encrypted state; no extra write is
+added for each heartbeat or app poll. Query the report from an administrator
+workstation:
+
+```sh
+TOKEN="$(gcloud secrets versions access latest \
+  --secret=pbxsense-relay-admin \
+  --project="$GOOGLE_CLOUD_PROJECT")"
+curl -fsS \
+  -H "X-PBXSense-Admin-Token: $TOKEN" \
+  "$PBXSENSE_RELAY_URL/v1/internal/usage"
+```
+
+`PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS` controls the remote app fallback
+interval (15–300 seconds). `PBXSENSE_RELAY_CONTROL_EXCHANGE_SECONDS` controls
+the Agent's capability-scoped control exchange (60–900 seconds). Keep presence
+at 30/90 seconds; adjust these two noncritical intervals after reviewing real
+usage and Cloud Run/Firestore billing metrics.
 
 An administrator can verify an enabled Agent session with an authenticated
 `POST /v1/internal/agents/{agent_id}/secure/ping`. The Agent returns `pong` on

@@ -69,11 +69,13 @@ class AgentRelay:
         identity_path: str,
         display_name: str,
         timeout_seconds: float = 5,
+        enrollment_ticket: str = "",
     ) -> None:
         self._url = _validated_relay_url(url)
         self._path = Path(identity_path)
         self._display_name = display_name
         self._timeout_seconds = timeout_seconds
+        self._enrollment_ticket = enrollment_ticket.strip()
         self._lock = threading.Lock()
         self._state = self._load()
         self._protect_storage()
@@ -145,10 +147,16 @@ class AgentRelay:
             serialization.Encoding.Raw, serialization.PublicFormat.Raw,
         ))
         try:
+            activation_payload: dict[str, object] = {
+                "publicKey": public_key,
+                "displayName": self._display_name,
+            }
+            if self._enrollment_ticket and not self._state.get("agent_id"):
+                activation_payload["enrollmentTicket"] = self._enrollment_ticket
             response = self._request(
                 "/v1/activations",
-                {"publicKey": public_key, "displayName": self._display_name},
-                signed=False,
+                activation_payload,
+                signed=True,
             )
         except OSError:
             return {}
