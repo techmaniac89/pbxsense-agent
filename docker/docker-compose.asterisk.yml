@@ -1,0 +1,5 @@
+services:
+  pbxsense-agent:
+    volumes:
+      - ${ASTERISK_LOGS_HOST_PATH:-../../asterisk/logs}:/var/log/asterisk:ro
+      - ${ASTERISK_SPOOL_HOST_PATH:-../../asterisk/spool}:/var/spool/asterisk:ro

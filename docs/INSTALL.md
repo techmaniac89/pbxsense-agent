@@ -329,7 +329,28 @@ values remain the defaults when the wizard is run again.
 If you choose not to start it in the wizard, run:
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.asterisk.yml up -d --build
+```
+
+The example above is for Asterisk. The wizard prints the exact command for the
+selected connector. For a manual install, use the matching connector command:
+
+```bash
+# FreeSWITCH / FusionPBX
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.freeswitch.yml up -d --build
+
+# Grandstream UCM
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.grandstream.yml up -d --build
+
+# CUCM
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.cucm.yml up -d --build
+
+# Yeastar or mock (API/generated data; no PBX filesystem mount)
+docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 ```
 
 The Docker wizard prints the authenticated PC link when it finishes. Override
@@ -339,13 +360,14 @@ automatic address detection by running it with
 Rebuilding or upgrading with this command preserves the named data volume and
 `/var/lib/pbxsense-agent/relay_identity.json`, so registered apps remain linked
 to the Agent. The Compose project name is fixed to `pbxsense-agent`, making the
-volume stable even if the source folder is renamed. Never use `docker compose
-down -v` during an upgrade; `-v` deletes the relay identity.
+volume stable even if the source folder is renamed. Never add `down -v` to the
+Compose command during an upgrade; `-v` deletes the relay identity.
 
 To back up the identity before moving hosts:
 
 ```bash
-docker compose exec -T pbxsense-agent \
+docker compose --env-file .env -f docker/docker-compose.yml \
+  exec -T pbxsense-agent \
   sh -c 'cat /var/lib/pbxsense-agent/relay_identity.json' \
   > relay_identity.json.backup
 chmod 600 relay_identity.json.backup
@@ -361,6 +383,10 @@ http://127.0.0.1:8765/home
 http://127.0.0.1:8765/pair
 ```
 
+These examples use the default port. If `PBXSENSE_AGENT_PORT` is changed, the
+Docker listener, health check, LAN override mapping, and setup-wizard link all
+use that configured value.
+
 The default compose file uses `network_mode: host` so a container running on the
 PBX host can reach local AMI at `127.0.0.1:5038`.
 
@@ -368,25 +394,59 @@ If Asterisk is on another LAN host, use the LAN override and set
 `ASTERISK_AMI_HOST` in `.env`:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.lan.yml up --build
 ```
+
+When Asterisk filesystem history is also needed, combine all three files:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.asterisk.yml \
+  -f docker/docker-compose.lan.yml up --build
+```
+
+The LAN override publishes `PBXSENSE_AGENT_PORT` on the same host and container
+port. Docker Compose reads this value from the project `.env` file.
 
 ## Docker Volume Paths
 
-The compose file mounts Asterisk logs and spool read-only:
+Connector overrides mount their PBX files read-only. The common
+`docker/docker-compose.yml` contains only Agent data/log volumes and creates no
+connector-specific host directories.
+
+For Asterisk:
 
 ```text
-ASTERISK_LOGS_HOST_PATH=../asterisk/logs
-ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
+ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 ```
+
+For FreeSWITCH/FusionPBX, `FREESWITCH_FILES_HOST_PATH` is a root containing
+`cdr/`, `voicemail/`, and `recordings/`:
+
+```text
+FREESWITCH_FILES_HOST_PATH=../freeswitch
+```
+
+For Grandstream UCM, `GRANDSTREAM_UCM_FILES_HOST_PATH` is a root containing
+`cdr/Master.csv`, `voicemail/`, `recordings/`, and optionally `security/`:
+
+```text
+GRANDSTREAM_UCM_FILES_HOST_PATH=../grandstream
+```
+
+CUCM uses the separate history and JTAPI paths documented in the CUCM section.
+All connector mounts are optional operational inputs; use the common Compose
+file alone when the selected connector does not need local files.
 
 If this repository is in the same folder as the `asterisk` folder, keep those
 defaults. If the Agent compose file is in the same folder as the `asterisk`
 folder, use:
 
 ```text
-ASTERISK_LOGS_HOST_PATH=./asterisk/logs
-ASTERISK_SPOOL_HOST_PATH=./asterisk/spool
+ASTERISK_LOGS_HOST_PATH=../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
 ```
 
 For an Agent container, the Agent should still use the container-visible paths:
@@ -413,7 +473,7 @@ ASTERISK_VOICEMAIL_PATH=/path/to/asterisk/spool/voicemail
 ## Parent Compose Layout
 
 If a parent folder owns the main compose file and contains both `pbxsense-agent`
-and `asterisk`, use `docker-compose.parent-example.yml` as the service shape.
+and `asterisk`, use `docker/docker-compose.parent-example.yml` as the service shape.
 The important paths are:
 
 ```yaml

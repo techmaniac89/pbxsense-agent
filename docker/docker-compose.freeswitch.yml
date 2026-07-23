@@ -1,0 +1,8 @@
+services:
+  pbxsense-agent:
+    environment:
+      FREESWITCH_CDR_JSON_PATH: ${FREESWITCH_CDR_JSON_PATH:-/var/lib/pbxsense-agent/freeswitch/cdr}
+      FREESWITCH_VOICEMAIL_PATH: ${FREESWITCH_VOICEMAIL_PATH:-/var/lib/pbxsense-agent/freeswitch/voicemail}
+      FREESWITCH_RECORDINGS_PATH: ${FREESWITCH_RECORDINGS_PATH:-/var/lib/pbxsense-agent/freeswitch/recordings}
+    volumes:
+      - ${FREESWITCH_FILES_HOST_PATH:-../freeswitch}:/var/lib/pbxsense-agent/freeswitch:ro

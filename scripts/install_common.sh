@@ -400,7 +400,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/vendor/jtapi" /var/lib/pbxsense-agent/cucm/cdr /var/lib/pbxsense-agent/cucm/cmr /var/log/pbxsense-agent
 
-for entry in pbxsense_agent jtapi_bridge scripts docs requirements.txt .env.example CODEX.md README.md SECURITY.md Dockerfile docker-compose.yml docker-compose.lan.yml docker-compose.parent-example.yml; do
+for entry in pbxsense_agent jtapi_bridge scripts docs docker requirements.txt .env.example CODEX.md README.md SECURITY.md; do
   if [ -e "$SOURCE_DIR/$entry" ]; then
     rm -rf "$INSTALL_DIR/$entry"
     cp -R "$SOURCE_DIR/$entry" "$INSTALL_DIR/$entry"

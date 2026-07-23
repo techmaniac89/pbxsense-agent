@@ -1,21 +1,21 @@
+# Asterisk-family example for a parent Compose project. Other connectors should
+# start from docker/docker-compose.yml and add only their matching override.
 name: pbxsense-agent
 
 services:
   pbxsense-agent:
     build:
-      context: .
+      context: ./pbxsense-agent
     container_name: pbxsense-agent
     restart: unless-stopped
     network_mode: host
     env_file:
-      - .env
+      - ./pbxsense-agent/.env
     volumes:
       - pbxsense-agent-data:/var/lib/pbxsense-agent
       - pbxsense-agent-logs:/var/log/pbxsense-agent
-      - ${ASTERISK_LOGS_HOST_PATH:-../asterisk/logs}:/var/log/asterisk:ro
-      - ${ASTERISK_SPOOL_HOST_PATH:-../asterisk/spool}:/var/spool/asterisk:ro
-      - ${CUCM_HISTORY_HOST_PATH:-./cucm-history}:/var/lib/pbxsense-agent/cucm
-      - ${CUCM_JTAPI_HOST_PATH:-./vendor/jtapi}:/opt/pbxsense-agent/vendor/jtapi:ro
+      - ./asterisk/logs:/var/log/asterisk:ro
+      - ./asterisk/spool:/var/spool/asterisk:ro
       - /etc/localtime:/etc/localtime:ro
 
 volumes:

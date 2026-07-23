@@ -1,0 +1,5 @@
+services:
+  pbxsense-agent:
+    volumes:
+      - ${CUCM_HISTORY_HOST_PATH:-../cucm-history}:/var/lib/pbxsense-agent/cucm:ro
+      - ${CUCM_JTAPI_HOST_PATH:-../vendor/jtapi}:/opt/pbxsense-agent/vendor/jtapi:ro

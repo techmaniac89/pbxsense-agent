@@ -239,7 +239,20 @@ def index(request: Request):
                 <span>PBX: {escape(settings.pbx_type)}</span>
                 <small>Version {AGENT_VERSION} &middot; {AGENT_RELEASE_CHANNEL.title()}</small>
               </span>
-              <a class="button footer-contact" href="mailto:techmaniac89@gmail.com">Contact</a>
+              <span class="footer-actions">
+                <a
+                  class="discord-badge"
+                  href="https://discord.gg/5GgsSRasQB"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Join PBXSense on Discord"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M19.5 5.34A16.3 16.3 0 0 0 15.44 4l-.5 1.02a15.1 15.1 0 0 0-5.86 0L8.56 4A16.5 16.5 0 0 0 4.5 5.35C1.93 9.16 1.24 12.88 1.59 16.54a16.7 16.7 0 0 0 4.98 2.5l1.2-1.64c-.66-.25-1.3-.56-1.9-.92l.47-.36c3.66 1.7 7.63 1.7 11.25 0l.48.36c-.6.36-1.24.67-1.9.92l1.2 1.64a16.7 16.7 0 0 0 4.98-2.5c.42-4.24-.72-7.92-2.85-11.2ZM8.83 14.28c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.88 2.27-2 2.27Zm6.34 0c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.87 2.27-2 2.27Z"></path>
+                  </svg>
+                  <span>Discord</span>
+                </a>
+              </span>
             </div>
           </section>
         """,
@@ -498,7 +511,35 @@ def _page(*, title: str, body: str) -> str:
           }}
           .footer-meta {{ display: grid; gap: 3px; }}
           .footer small {{ font-size: inherit; }}
-          .footer-contact {{ flex: 0 0 auto; }}
+          .footer-actions {{
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            flex: 0 0 auto;
+          }}
+          .discord-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 40px;
+            padding: 0 14px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 999px;
+            background: #5865f2;
+            color: #fff;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 800;
+            box-shadow: 0 8px 22px rgba(88, 101, 242, 0.22);
+            transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+          }}
+          .discord-badge svg {{ width: 18px; height: 18px; fill: currentColor; }}
+          .discord-badge:hover {{
+            border-color: rgba(255, 255, 255, 0.28);
+            background: #6875f5;
+            color: #fff;
+            transform: translateY(-1px);
+          }}
           pre {{
             margin: 18px 0 0;
             padding: 18px;
@@ -513,6 +554,8 @@ def _page(*, title: str, body: str) -> str:
           @media (max-width: 520px) {{
             main {{ align-items: start; padding-top: 24px; }}
             .hero-card, .json-card {{ padding: 22px; border-radius: 22px; }}
+            .footer {{ align-items: start; }}
+            .footer-actions {{ flex-wrap: wrap; justify-content: end; }}
             .diagnostics div {{ grid-template-columns: 1fr; gap: 3px; }}
             .footer {{ align-items: center; }}
           }}

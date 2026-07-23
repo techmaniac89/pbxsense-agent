@@ -30,8 +30,8 @@ journalctl -u pbxsense-agent -f
 Docker:
 
 ```bash
-docker compose ps
-docker compose logs -f
+docker compose --env-file .env -f docker/docker-compose.yml ps
+docker compose --env-file .env -f docker/docker-compose.yml logs -f
 ```
 
 Health endpoint:
@@ -192,7 +192,8 @@ ASTERISK_AMI_HOST=192.168.x.x
 Then run:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.lan.yml up --build
 ```
 
 ## Endpoint Quick Check

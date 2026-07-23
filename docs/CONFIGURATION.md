@@ -19,7 +19,7 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
 | `PBXSENSE_AGENT_TOKEN` | empty | Shared token for local/VPN/direct-Agent pairing and protected endpoints; it is not sent to the hosted relay. |
 | `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP/login timeout in seconds. |
-| `PBXSENSE_AGENT_PORT` | `8765` | Service port used by the Linux systemd installer. |
+| `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP port used by the Linux service and Docker container, including its health check and LAN port mapping. |
 | `PBXSENSE_EXTENSION_NAMES` | empty | Optional friendly-name map such as `101=Reception,120=Support`. |
 | `PBXSENSE_SNAPSHOT_POLL_SECONDS` | `1` | Central live PBX polling cadence, clamped to at least 0.5 seconds. |
 | `PBXSENSE_HISTORY_POLL_SECONDS` | `30` | CDR, voicemail, recording, and security-history refresh cadence, clamped to at least 5 seconds. |
@@ -76,8 +76,8 @@ For Docker, the CDR and voicemail paths are container paths. Mount the host
 folders into those locations with:
 
 ```text
-ASTERISK_LOGS_HOST_PATH=../asterisk/logs
-ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
+ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 ```
 
 ## Grandstream UCM AMI Settings
@@ -95,6 +95,7 @@ ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
 | `GRANDSTREAM_UCM_VOICEMAIL_PATH` | empty | Optional UCM voicemail folder visible to the Agent. |
 | `GRANDSTREAM_UCM_RECORDINGS_PATH` | empty | Optional UCM recording root visible to the Agent. |
 | `GRANDSTREAM_UCM_SECURITY_LOG_PATH` | empty | Optional UCM security log used for aggregate authentication/ACL Security Signals. |
+| `GRANDSTREAM_UCM_FILES_HOST_PATH` | `../grandstream` | Docker-only host root, relative to `docker/`, mounted read-only by `docker/docker-compose.grandstream.yml`; expected children are `cdr/Master.csv`, `voicemail/`, `recordings/`, and optionally `security/`. |
 
 UCM AMI users are created under **Value-added Features > AMI**. Restrict the
 user to the Agent IP and grant only `system`, `call`, `reporting`, `command`,
@@ -119,6 +120,7 @@ active.
 | `FREESWITCH_CDR_JSON_PATH` | empty | Optional local `mod_json_cdr` folder visible to the Agent. |
 | `FREESWITCH_VOICEMAIL_PATH` | empty | Optional local FreeSWITCH voicemail metadata folder visible to the Agent. |
 | `FREESWITCH_RECORDINGS_PATH` | empty | Optional local FreeSWITCH recording root visible to the Agent. |
+| `FREESWITCH_FILES_HOST_PATH` | `../freeswitch` | Docker-only host root, relative to `docker/`, mounted read-only by `docker/docker-compose.freeswitch.yml`; expected children are `cdr/`, `voicemail/`, and `recordings/`. |
 
 ## Yeastar P-Series Settings
 
@@ -244,8 +246,12 @@ passwords, secrets, and tokens are never populated into an existing file.
 After changing `.env` in Docker:
 
 ```bash
-docker compose up -d --build --force-recreate
+sh ./scripts/setup_docker.sh
 ```
+
+The wizard preserves existing values and selects the matching connector
+override. For unattended upgrades, repeat the same `-f` files used at install
+and add `--force-recreate`.
 
 After changing `/etc/pbxsense-agent.env` on Linux:
 

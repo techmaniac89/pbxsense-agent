@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.12-beta",
+    [string]$Version = "0.5.17-beta",
     [string]$OutputDir = ""
 )
 
@@ -48,10 +48,7 @@ $AgentEntries = @(
     ".env.example",
     "CODEX.md",
     "README.md",
-    "Dockerfile",
-    "docker-compose.yml",
-    "docker-compose.lan.yml",
-    "docker-compose.parent-example.yml"
+    "docker"
 )
 
 function Copy-AgentPayload([string]$DestinationRoot) {

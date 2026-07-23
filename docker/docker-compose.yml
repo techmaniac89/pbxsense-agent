@@ -3,17 +3,16 @@ name: pbxsense-agent
 services:
   pbxsense-agent:
     build:
-      context: ./pbxsense-agent
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: pbxsense-agent
     restart: unless-stopped
     network_mode: host
     env_file:
-      - ./pbxsense-agent/.env
+      - ../.env
     volumes:
       - pbxsense-agent-data:/var/lib/pbxsense-agent
       - pbxsense-agent-logs:/var/log/pbxsense-agent
-      - ./asterisk/logs:/var/log/asterisk:ro
-      - ./asterisk/spool:/var/spool/asterisk:ro
       - /etc/localtime:/etc/localtime:ro
 
 volumes:

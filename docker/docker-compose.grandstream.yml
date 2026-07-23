@@ -1,0 +1,9 @@
+services:
+  pbxsense-agent:
+    environment:
+      GRANDSTREAM_UCM_CDR_CSV_PATH: ${GRANDSTREAM_UCM_CDR_CSV_PATH:-/var/lib/pbxsense-agent/grandstream/cdr/Master.csv}
+      GRANDSTREAM_UCM_VOICEMAIL_PATH: ${GRANDSTREAM_UCM_VOICEMAIL_PATH:-/var/lib/pbxsense-agent/grandstream/voicemail}
+      GRANDSTREAM_UCM_RECORDINGS_PATH: ${GRANDSTREAM_UCM_RECORDINGS_PATH:-/var/lib/pbxsense-agent/grandstream/recordings}
+      GRANDSTREAM_UCM_SECURITY_LOG_PATH: ${GRANDSTREAM_UCM_SECURITY_LOG_PATH:-/var/lib/pbxsense-agent/grandstream/security}
+    volumes:
+      - ${GRANDSTREAM_UCM_FILES_HOST_PATH:-../grandstream}:/var/lib/pbxsense-agent/grandstream:ro

@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.12-beta` on the **Breeze** channel.
+The current Agent release is `0.5.17-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -571,20 +571,20 @@ history.
 If this `pbxsense-agent` repository lives beside the `asterisk` folder, keep:
 
 ```text
-ASTERISK_LOGS_HOST_PATH=../asterisk/logs
-ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
+ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 ```
 
 If the PBXSense Agent compose file is in the same folder as the `asterisk`
 folder, change those two host paths to:
 
 ```text
-ASTERISK_LOGS_HOST_PATH=./asterisk/logs
-ASTERISK_SPOOL_HOST_PATH=./asterisk/spool
+ASTERISK_LOGS_HOST_PATH=../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../asterisk/spool
 ```
 
 If your main compose file is one folder above `pbxsense-agent` and also contains
-the `asterisk` folder, use `docker-compose.parent-example.yml` as the shape for
+the `asterisk` folder, use `docker/docker-compose.parent-example.yml` as the shape for
 the PBXSense service. In that layout the important paths are:
 
 ```yaml
@@ -601,13 +601,64 @@ volumes:
 labels from AMI. Keep the mapping only if your PBX exposes numbers without
 friendly names, or if you want to rename them for the app.
 
-Keep all PBXSense/Asterisk values in `.env`. The Dockerfile only sets Python
+Keep all PBXSense/Asterisk values in `.env`. `docker/Dockerfile` only sets Python
 runtime defaults such as unbuffered logging.
 
 Then start the Agent:
 
 ```bash
-docker compose up --build
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.asterisk.yml up --build
+```
+
+The setup wizard chooses the connector override automatically. For manual
+starts, add the matching override for Asterisk, FreeSWITCH/FusionPBX,
+Grandstream UCM, or CUCM. Yeastar and mock need only
+`docker/docker-compose.yml`
+because they do not read PBX files from the Docker host. Connector mounts are
+deliberately absent from the common file so unused host directories are not
+created.
+
+```bash
+# FreeSWITCH / FusionPBX
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.freeswitch.yml up --build
+
+# Grandstream UCM
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.grandstream.yml up --build
+
+# CUCM
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.cucm.yml up --build
+
+# Yeastar or mock
+docker compose --env-file .env -f docker/docker-compose.yml up --build
+```
+
+The connector-specific host roots are:
+
+```text
+ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
+ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
+FREESWITCH_FILES_HOST_PATH=../freeswitch
+GRANDSTREAM_UCM_FILES_HOST_PATH=../grandstream
+CUCM_HISTORY_HOST_PATH=../cucm-history
+CUCM_JTAPI_HOST_PATH=../vendor/jtapi
+```
+
+FreeSWITCH expects `cdr/`, `voicemail/`, and `recordings/` below its host root.
+Grandstream expects `cdr/Master.csv`, `voicemail/`, `recordings/`, and
+optionally `security/`. CUCM history and JTAPI use their independent roots.
+All of these PBX inputs are mounted read-only.
+
+To reach a PBX on another LAN host, append the networking override after the
+connector override:
+
+```bash
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.asterisk.yml \
+  -f docker/docker-compose.lan.yml up --build
 ```
 
 Open:
@@ -615,6 +666,10 @@ Open:
 ```text
 http://127.0.0.1:8765/home
 ```
+
+`8765` is the default. A custom `PBXSENSE_AGENT_PORT` is honored by the Docker
+listener and health check; the LAN override publishes that same configured
+port.
 
 To pair the app, open the Agent pairing page:
 
@@ -649,7 +704,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.12-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.17-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -660,7 +715,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.5.12-beta`, attach the matching files from
+For a release tag such as `agent-v0.5.17-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 
@@ -712,8 +767,9 @@ Read the result like this:
 On the host running the Agent, also check:
 
 ```bash
-docker compose logs -f
-docker compose exec pbxsense-agent sh -lc 'python - <<PY
+docker compose --env-file .env -f docker/docker-compose.yml logs -f
+docker compose --env-file .env -f docker/docker-compose.yml \
+  exec pbxsense-agent sh -lc 'python - <<PY
 import os, socket
 host=os.environ["ASTERISK_AMI_HOST"]
 port=int(os.environ["ASTERISK_AMI_PORT"])
@@ -728,7 +784,8 @@ receive AMI's greeting. The Agent will still try to log in, because some
 deployments may not send a useful banner. Check what the port sends:
 
 ```bash
-docker compose exec pbxsense-agent sh -lc 'python - <<PY
+docker compose --env-file .env -f docker/docker-compose.yml \
+  exec pbxsense-agent sh -lc 'python - <<PY
 import os, socket
 host=os.environ["ASTERISK_AMI_HOST"]
 port=int(os.environ["ASTERISK_AMI_PORT"])
@@ -751,10 +808,11 @@ pbxsense-agent-logs:/var/log/pbxsense-agent
 ```
 
 The data volume stores `relay_identity.json`, which is the Agent's private relay
-identity and the link to its registered apps. Rebuilding with `docker compose
-up -d --build` preserves it. Moving or renaming the source folder also preserves
-the Compose project name. Do not use `docker compose down -v` unless you intend
-to erase the identity and pair every app again.
+identity and the link to its registered apps. Rebuilding through the setup
+wizard, or with the applicable connector command above, preserves it. Moving or
+renaming the source folder also preserves the Compose project name. Do not add
+`down -v` to the Compose command unless you intend to erase the identity and
+pair every app again.
 
 The protected **Paired apps** page can also revoke registrations individually
 with **Remove app**. This stops that app's push and Internet Relay delivery
@@ -763,14 +821,13 @@ without affecting other paired phones.
 Current runtime logs still go to Docker stdout, so use:
 
 ```bash
-docker compose logs -f
+docker compose --env-file .env -f docker/docker-compose.yml logs -f
 ```
 
-The compose file also mounts `/etc/localtime` read-only so timestamps follow the
-host timezone.
-
-It also mounts the Asterisk log and spool folders read-only. For the current
-Asterisk Docker setup, that gives the Agent access to:
+The common Compose file mounts `/etc/localtime` read-only so timestamps follow
+the host timezone. Connector files are not present in that common file. The
+`docker/docker-compose.asterisk.yml` override mounts the Asterisk log and spool folders
+read-only, giving the Agent access to paths such as:
 
 ```text
 /var/log/asterisk/cdr-custom/Master.csv
@@ -779,10 +836,11 @@ Asterisk Docker setup, that gives the Agent access to:
 
 ### Network Mode
 
-`docker-compose.yml` uses `network_mode: host` so a container running on the PBX
+`docker/docker-compose.yml` uses `network_mode: host` so a container running on the PBX
 host can reach local AMI at `127.0.0.1:5038`.
 
-If Asterisk is on another LAN host, use the LAN override and set:
+If a PBX is on another LAN host, append `docker/docker-compose.lan.yml` after the
+selected connector override and set its connector host, for example:
 
 ```text
 ASTERISK_AMI_HOST=192.168.x.x
@@ -791,10 +849,15 @@ ASTERISK_AMI_HOST=192.168.x.x
 Then run:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
+docker compose --env-file .env -f docker/docker-compose.yml \
+  -f docker/docker-compose.asterisk.yml \
+  -f docker/docker-compose.lan.yml up --build
 ```
 
-Keep AMI private to the LAN or VPN.
+The LAN override changes the service to bridge networking, publishes the
+configured `PBXSENSE_AGENT_PORT` on the same container port, and provides
+`host.docker.internal`. Keep PBX management protocols private to the LAN or
+VPN.
 
 ## Minimal Asterisk AMI User
 

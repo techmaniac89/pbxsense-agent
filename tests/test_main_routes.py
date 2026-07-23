@@ -177,13 +177,15 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("LOCAL_WEB_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 10", source)
         self.assertIn("async def renew_local_admin_session", source)
 
-    def test_agent_page_hides_relay_version_and_offers_contact(self) -> None:
+    def test_agent_page_hides_relay_version_and_offers_discord(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
 
         self.assertNotIn('("internetRelayProtocol", "Secure relay version", False)', source)
-        self.assertIn('href="mailto:techmaniac89@gmail.com"', source)
+        self.assertNotIn('href="mailto:techmaniac89@gmail.com"', source)
+        self.assertIn('href="https://discord.gg/5GgsSRasQB"', source)
+        self.assertIn('aria-label="Join PBXSense on Discord"', source)
+        self.assertIn('class="discord-badge"', source)
         self.assertIn('class="footer-meta"', source)
-        self.assertIn('class="button footer-contact"', source)
 
 
 if __name__ == "__main__":
