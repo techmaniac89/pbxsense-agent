@@ -32,6 +32,7 @@ class AmiEndpoint:
     active_channels: int = 0
     label: str = ""
     role: str = "extension"
+    connection_type: str = ""
     number: str = ""
     # A PBX-provided presence state, such as DND or Away. This is kept apart
     # from device_state: a phone can be registered while its owner is away.
@@ -711,16 +712,17 @@ def _build_trunks(
             status_text = "Working"
             detail = _registered_trunk_detail(endpoint.device_state)
 
-        trunks.append(
-            {
-                "name": name,
-                "endpoint": endpoint.extension,
-                "statusText": status_text,
-                "detail": detail,
-                "activeChannels": endpoint.active_channels,
-                "available": not unavailable,
-            }
-        )
+        trunk = {
+            "name": name,
+            "endpoint": endpoint.extension,
+            "statusText": status_text,
+            "detail": detail,
+            "activeChannels": endpoint.active_channels,
+            "available": not unavailable,
+        }
+        if endpoint.connection_type:
+            trunk["connectionType"] = endpoint.connection_type
+        trunks.append(trunk)
 
     return trunks
 

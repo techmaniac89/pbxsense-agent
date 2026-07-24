@@ -43,6 +43,7 @@ def mock_snapshot() -> AmiSnapshot:
                 device_state="Reachable",
                 label="Main SIP trunk",
                 role="trunk",
+                connection_type="PJSIP",
             ),
         ],
         queues=[

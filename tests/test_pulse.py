@@ -382,6 +382,7 @@ class PulseMappingTest(unittest.TestCase):
 
         self.assertEqual(endpoints[0].device_state, "Reachable")
         self.assertEqual(endpoints[0].ip_address, "192.168.1.102")
+        self.assertEqual(endpoints[0].connection_type, "PJSIP")
 
     def test_ami_unreachable_contact_stays_unreachable(self) -> None:
         endpoints = _endpoints_from_events(
@@ -431,8 +432,10 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(endpoints[0].extension, "102")
         self.assertEqual(endpoints[0].device_state, "Reachable")
         self.assertEqual(endpoints[0].role, "extension")
+        self.assertEqual(endpoints[0].connection_type, "SIP")
         self.assertEqual(endpoints[1].device_state, "Unreachable")
         self.assertEqual(endpoints[1].role, "trunk")
+        self.assertEqual(endpoints[1].connection_type, "SIP")
 
     def test_pjsip_uri_can_provide_trunk_number(self) -> None:
         self.assertEqual(
@@ -972,6 +975,7 @@ class PulseMappingTest(unittest.TestCase):
                         device_state="Registered",
                         label="Cosmote",
                         role="trunk",
+                        connection_type="PRI",
                     ),
                 ],
             ),
@@ -984,6 +988,7 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(payload["trunks"][0]["statusText"], "Working")
         self.assertEqual(payload["trunks"][0]["detail"], "Registered and ready")
         self.assertEqual(payload["trunks"][0]["available"], True)
+        self.assertEqual(payload["trunks"][0]["connectionType"], "PRI")
 
     def test_active_trunk_channel_does_not_create_duplicate_trunk_signal(self) -> None:
         payload = build_home_payload(

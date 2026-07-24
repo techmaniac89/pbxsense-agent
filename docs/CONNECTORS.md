@@ -42,6 +42,11 @@ dashboard metadata.
 The Asterisk connector reads PJSIP endpoints and also asks for classic
 `chan_sip` peers when that AMI action is available.
 
+Normalized trunk entries include an optional `connectionType`. The Asterisk
+connector reports `PJSIP` or `SIP` for the endpoint source it can identify.
+Connectors that observe BRI, PRI, analog, or another PSTN technology should use
+the same field and keep those external connections separate from People.
+
 It also uses AMI's read-only `QueueStatus` action when the AMI user has the
 `agent` read permission. The Agent reports queue counts and wait times only;
 it does not return caller names or numbers, nor does it add/remove/pause queue

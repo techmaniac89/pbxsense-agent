@@ -335,6 +335,7 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
                     "ObjectName",
                 ),
                 role=_endpoint_role(extension, fields),
+                connection_type="SIP" if event.name == "PeerEntry" else "PJSIP",
                 number=_endpoint_number(fields),
                 presence=_first_value(
                     fields,
