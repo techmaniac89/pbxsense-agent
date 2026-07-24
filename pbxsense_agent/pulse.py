@@ -83,8 +83,8 @@ class ActivityTracker:
         self,
         *,
         keep_for: timedelta = timedelta(hours=24),
-        phone_outage_confirmation: timedelta = timedelta(seconds=5),
-        phone_recovery_confirmation: timedelta = timedelta(seconds=5),
+        phone_outage_confirmation: timedelta = timedelta(seconds=30),
+        phone_recovery_confirmation: timedelta = timedelta(seconds=60),
     ) -> None:
         self._keep_for = keep_for
         self._phone_outage_confirmation = phone_outage_confirmation
@@ -303,8 +303,8 @@ class EndpointAvailabilitySignalTracker:
     def __init__(
         self,
         *,
-        outage_confirmation: timedelta = timedelta(seconds=5),
-        recovery_confirmation: timedelta = timedelta(seconds=5),
+        outage_confirmation: timedelta = timedelta(seconds=30),
+        recovery_confirmation: timedelta = timedelta(seconds=60),
         role: str = "extension",
     ) -> None:
         self._outage_confirmation = outage_confirmation
@@ -339,14 +339,11 @@ class EndpointAvailabilitySignalTracker:
                 state = self._states.setdefault(extension, _EndpointSignalState())
                 if _endpoint_unavailable(endpoint):
                     if state.recovery_started_at is not None:
+                        # A brief reachable sample is not a confirmed recovery.
+                        # Restore the existing outage without creating another
+                        # notification episode or occurrence ID.
                         state.recovery_started_at = None
-                        state.outage_started_at = now
-                        # A fresh outage is a new Health incident even when
-                        # the prior recovery had not yet completed its calm
-                        # confirmation window. Never suppress it.
-                        state.episode_notified = False
-                        state.signal_visible = False
-                        state.notification_id = ""
+                        state.signal_visible = state.episode_notified
                     elif state.outage_started_at is None:
                         state.outage_started_at = now
                     if not state.notification_id:

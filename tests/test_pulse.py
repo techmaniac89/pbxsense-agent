@@ -778,9 +778,11 @@ class PulseMappingTest(unittest.TestCase):
             tracker.observe(unavailable, now + timedelta(minutes=1)),
             {"200"},
         )
+        first_notification_id = tracker.notification_ids().get("200")
 
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=1, seconds=1)), set())
-        self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=1, seconds=2)), set())
+        self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=1, seconds=2)), {"200"})
+        self.assertEqual(tracker.notification_ids().get("200"), first_notification_id)
         self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=3)), {"200"})
 
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=3, seconds=1)), set())
@@ -791,7 +793,7 @@ class PulseMappingTest(unittest.TestCase):
             {"200"},
         )
 
-    def test_new_outage_is_not_suppressed_during_recovery_window(self) -> None:
+    def test_recovery_flicker_does_not_create_another_outage_episode(self) -> None:
         tracker = EndpointAvailabilitySignalTracker(
             outage_confirmation=timedelta(0)
         )
@@ -811,7 +813,7 @@ class PulseMappingTest(unittest.TestCase):
         first_notification_id = tracker.notification_ids()["200"]
         self.assertEqual(tracker.observe(reachable, now + timedelta(seconds=1)), set())
         self.assertEqual(tracker.observe(unavailable, now + timedelta(seconds=2)), {"200"})
-        self.assertNotEqual(
+        self.assertEqual(
             tracker.notification_ids()["200"],
             first_notification_id,
         )
@@ -840,7 +842,7 @@ class PulseMappingTest(unittest.TestCase):
         signal = next(item for item in payload["signals"] if item["kind"] == "endpoint_unavailable")
         self.assertEqual(signal["notificationId"], notification_ids["200"])
 
-    def test_default_phone_outage_requires_five_continuous_seconds(self) -> None:
+    def test_default_phone_outage_requires_thirty_continuous_seconds(self) -> None:
         tracker = EndpointAvailabilitySignalTracker()
         now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
         unavailable = AmiSnapshot(
@@ -851,14 +853,18 @@ class PulseMappingTest(unittest.TestCase):
 
         self.assertEqual(tracker.observe(unavailable, now), set())
         self.assertEqual(
-            tracker.observe(unavailable, now + timedelta(seconds=4)), set()
+            tracker.observe(unavailable, now + timedelta(seconds=29)), set()
         )
         self.assertEqual(
-            tracker.observe(unavailable, now + timedelta(seconds=5)), {"200"}
+            tracker.observe(unavailable, now + timedelta(seconds=30)), {"200"}
         )
 
     def test_trunk_outage_requires_five_continuous_seconds(self) -> None:
-        tracker = EndpointAvailabilitySignalTracker(role="trunk")
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(seconds=5),
+            recovery_confirmation=timedelta(0),
+            role="trunk",
+        )
         now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
         unavailable = AmiSnapshot(
             reachable=True,
@@ -1646,7 +1652,7 @@ class PulseMappingTest(unittest.TestCase):
             )
         )
 
-    def test_default_phone_recovery_requires_five_continuous_seconds(self) -> None:
+    def test_default_phone_recovery_requires_sixty_continuous_seconds(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
         tracker = ActivityTracker()
         offline = AmiSnapshot(
@@ -1661,10 +1667,10 @@ class PulseMappingTest(unittest.TestCase):
         )
 
         tracker.observe(offline, now)
-        tracker.observe(offline, now + timedelta(seconds=5))
-        self.assertEqual(tracker.observe(online, now + timedelta(seconds=6)), [])
-        self.assertEqual(tracker.observe(online, now + timedelta(seconds=10)), [])
-        events = tracker.observe(online, now + timedelta(seconds=11))
+        tracker.observe(offline, now + timedelta(seconds=30))
+        self.assertEqual(tracker.observe(online, now + timedelta(seconds=31)), [])
+        self.assertEqual(tracker.observe(online, now + timedelta(seconds=90)), [])
+        events = tracker.observe(online, now + timedelta(seconds=91))
 
         self.assertEqual(
             [event["kind"] for event in events],

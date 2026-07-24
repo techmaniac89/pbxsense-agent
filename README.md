@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.21-beta` on the **Breeze** channel.
+The current Agent release is `0.5.25-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -172,9 +172,10 @@ are:
 - `PBXSENSE_HISTORY_POLL_SECONDS`: cached CDR, voicemail, and security-history
   refresh cadence; defaults to `30` seconds and is clamped to at least `5`.
 - `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS`: continuous offline period
-  before the phone Health alert; defaults to `5` seconds.
+  before the phone Health alert; defaults to `30` seconds.
 - `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS`: continuous online period
-  before the recovery Activity; defaults to `5` seconds.
+  before the recovery Activity and a later outage can be armed; defaults to
+  `60` seconds.
 - `PBXSENSE_TRUNK_OUTAGE_CONFIRMATION_SECONDS`: continuous unavailable period
   before the trunk Health alert; defaults to `5` seconds.
 - `ASTERISK_AMI_*`: Asterisk AMI host, port, username, password, and timeout.
@@ -709,7 +710,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.21-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.25-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -720,7 +721,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.5.21-beta`, attach the matching files from
+For a release tag such as `agent-v0.5.25-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 

@@ -29,7 +29,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.2"
+RELAY_VERSION = "0.5.3"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -90,10 +90,38 @@ async def bound_public_requests(request: Request, call_next: Any) -> Any:
             )
     client = _client_key(request)
     is_activation = request.url.path == "/v1/activations"
-    limit = 6 if is_activation else 120
-    if not _consume_window(
-        _client_window(client), limit=limit, seconds=60
-    ):
+    if is_activation:
+        # Agents behind one customer NAT should not share a tiny QR allowance.
+        # Keep a broad source-IP ceiling, then limit each Agent key separately.
+        if not _consume_window(
+            _client_window(client), limit=60, seconds=60
+        ):
+            return JSONResponse(
+                status_code=429, content={"detail": "Request rate limit exceeded"}
+            )
+        try:
+            activation_body = json.loads(await request.body())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            activation_body = {}
+        public_key = (
+            str(activation_body.get("publicKey", ""))[:200]
+            if isinstance(activation_body, dict)
+            else ""
+        )
+        activation_client = (
+            "activation:"
+            + hashlib.sha256(public_key.encode("utf-8")).hexdigest()
+            if public_key
+            else f"activation-source:{client}"
+        )
+        allowed = _consume_window(
+            _client_window(activation_client), limit=12, seconds=60
+        )
+    else:
+        allowed = _consume_window(
+            _client_window(client), limit=120, seconds=60
+        )
+    if not allowed:
         return JSONResponse(
             status_code=429, content={"detail": "Request rate limit exceeded"}
         )

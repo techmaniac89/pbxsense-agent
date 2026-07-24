@@ -290,6 +290,35 @@ class RelayTest(unittest.TestCase):
             self.assertEqual(activation, {"id": "activation_new", "secret": "secret_new"})
             self.assertEqual(relay.requests[0][0], "/v1/activations")
 
+    def test_activation_failure_is_retained_for_agent_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _ActivationRelay(str(Path(directory) / "identity.json"))
+
+            def unavailable(path: str, payload: dict, *, signed: bool) -> dict:
+                raise RelayRequestError(429, "Relay returned HTTP 429")
+
+            relay._request = unavailable  # type: ignore[method-assign]
+
+            self.assertEqual(relay.activation(), {})
+            self.assertIn("HTTP 429", relay.status()["lastActivationError"])
+
+    def test_unconfirmed_cached_activation_is_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _ActivationRelay(str(Path(directory) / "identity.json"))
+            relay._state["activation"] = {
+                "id": "activation_maybe_consumed",
+                "secret": "secret_maybe_consumed",
+                "expires_at": 9999999999.0,
+            }
+
+            def unavailable(path: str, payload: dict, *, signed: bool) -> dict:
+                raise OSError("status unavailable")
+
+            relay._request = unavailable  # type: ignore[method-assign]
+
+            self.assertEqual(relay.activation(), {})
+            self.assertIn("status unavailable", relay.status()["lastActivationError"])
+
     def test_relay_status_expiry_removes_stale_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _ActivationRelay(str(Path(directory) / "identity.json"))
@@ -430,6 +459,10 @@ class RelayTest(unittest.TestCase):
                     "osVersion": "",
                 },
             )
+            self.assertIn(
+                "/v1/activations",
+                [request[0] for request in relay.requests],
+            )
 
     def test_registration_is_not_ready_until_device_is_visible_in_relay_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -453,6 +486,30 @@ class RelayTest(unittest.TestCase):
             self.assertEqual(
                 result,
                 {"configured": True, "queued": True, "delivered": False},
+            )
+
+    def test_rejected_registration_does_not_prepare_another_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+
+            def reject_registration(path: str, payload: dict, *, signed: bool) -> dict:
+                relay.requests.append((path, payload, signed))
+                if path.endswith("/devices"):
+                    raise RelayRequestError(400, "invalid registration")
+                return {"devices": []}
+
+            relay._request = reject_registration  # type: ignore[method-assign]
+
+            result = relay.register_device(
+                fcm_token="token-rejected",
+                meaningful=True,
+                activity=True,
+            )
+
+            self.assertFalse(result["delivered"])
+            self.assertNotIn(
+                "/v1/activations",
+                [request[0] for request in relay.requests],
             )
 
     def test_registers_optional_app_and_device_metadata(self) -> None:

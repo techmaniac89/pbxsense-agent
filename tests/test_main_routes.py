@@ -98,13 +98,17 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("navigator.clipboard.writeText", source)
         self.assertIn("copyFeedback.classList.add('visible')", source)
 
-    def test_enrolled_pairing_waits_for_replacement_cloud_activation(self) -> None:
+    def test_enrolled_pairing_falls_back_to_a_usable_local_qr(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
 
-        self.assertIn("activation_pending", source)
-        self.assertIn("Preparing secure pairing", source)
-        self.assertIn("This page will refresh automatically.", source)
-        self.assertIn("'style=\"display:none\"' if activation_pending", source)
+        self.assertNotIn("activation_pending", source)
+        self.assertNotIn("Preparing secure pairing", source)
+        self.assertIn('<div class="qr">{qr_svg}</div>', source)
+        self.assertIn("Local pairing ready", source)
+        self.assertIn(
+            "Push setup will continue through this Agent.",
+            source,
+        )
 
     def test_empty_paired_app_states_use_the_neutral_gold_card(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
@@ -136,6 +140,8 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("MAX_EVENTS_PER_AGENT_PER_HOUR", source)
         self.assertIn("MAX_SECURE_SNAPSHOT_BYTES", source)
         self.assertIn("Request rate limit exceeded", source)
+        self.assertIn('"activation:"', source)
+        self.assertIn("limit=12", source)
         self.assertIn("_verify_public_key_request(public_key, request)", source)
         self.assertIn('@app.get("/v1/internal/usage")', source)
         self.assertIn('@app.get("/admin/usage"', source)
@@ -212,6 +218,38 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn('aria-label="Join PBXSense on Discord"', source)
         self.assertIn('class="discord-badge"', source)
         self.assertIn('class="footer-meta"', source)
+
+    def test_pair_and_diagnostics_reuse_home_navigation_and_footer(self) -> None:
+        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+
+        self.assertIn('current="pair"', source)
+        self.assertIn('primary="apps"', source)
+        self.assertIn('navigation_current="diagnostics"', source)
+        self.assertIn(
+            'excluded=("pair", "apps") if navigation_current == "diagnostics" else ()',
+            source,
+        )
+        self.assertIn("include_agent_footer=True", source)
+        self.assertIn(
+            '("pushRelayActivationError", "Pairing relay error", False)',
+            source,
+        )
+        self.assertGreaterEqual(source.count("{_agent_footer_html()}"), 3)
+        self.assertIn(
+            'label_overrides={"pair": "Add another app"}',
+            source,
+        )
+        self.assertIn('excluded=("diagnostics",)', source)
+        self.assertNotIn(
+            '<div class="section-heading"><span>Paired apps</span>',
+            source,
+        )
+        self.assertIn(
+            ".device-list {{ display: grid; gap: 12px; margin-top: 24px; }}",
+            source,
+        )
+        self.assertNotIn("<span>Please wait<small>", source)
+        self.assertIn('navigation_current == "diagnostics"', source)
 
 
 if __name__ == "__main__":

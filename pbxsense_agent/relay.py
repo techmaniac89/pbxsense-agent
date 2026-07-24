@@ -101,18 +101,28 @@ class AgentRelay:
             ),
             "rejectedOutboxItems": len(self._state.get("rejected_outbox", [])),
             "lastOutboxError": str(self._state.get("last_outbox_error", "")),
+            "lastActivationError": str(
+                self._state.get("last_activation_error", "")
+            ),
         }
 
     def activation(self) -> dict[str, str]:
         """Return a short-lived QR capability for the protected Agent page."""
         with self._lock:
-            try:
-                return self._activation_locked()
-            except (OSError, TypeError, ValueError):
-                # Cloud enrollment is optional for local pairing. A stale
-                # identity file, read-only volume, missing crypto package, or
-                # temporary relay failure must never turn /pair into HTTP 500.
-                return {}
+            return self._activation_with_tracking_locked()
+
+    def _activation_with_tracking_locked(self) -> dict[str, str]:
+        try:
+            activation = self._activation_locked()
+        except (OSError, TypeError, ValueError) as exc:
+            # Cloud enrollment is optional for local pairing, but the protected
+            # admin page must retain the real reason it fell back to LAN.
+            self._state["last_activation_error"] = str(exc)[:240]
+            self._save()
+            return {}
+        if self._state.pop("last_activation_error", None) is not None:
+            self._save()
+        return activation
 
     def _activation_locked(self) -> dict[str, str]:
         if not self._url:
@@ -136,9 +146,18 @@ class AgentRelay:
                         self._save()
                     else:
                         return {"id": str(activation["id"]), "secret": str(activation["secret"])}
+                except RelayRequestError as exc:
+                    if exc.status in {401, 404}:
+                        # The relay no longer recognizes this capability. Never
+                        # serve a potentially consumed QR; replace it below.
+                        self._state.pop("activation", None)
+                        self._save()
+                    else:
+                        raise
                 except OSError:
-                    # Keep the still-valid QR during a temporary relay outage.
-                    return {"id": str(activation["id"]), "secret": str(activation["secret"])}
+                    # A capability whose state cannot be confirmed may already
+                    # be consumed. Fall back locally instead of reusing it.
+                    raise
             else:
                 self._state.pop("activation", None)
                 self._save()
@@ -146,27 +165,24 @@ class AgentRelay:
         public_key = _encode(private.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw,
         ))
-        try:
-            activation_payload: dict[str, object] = {
-                "publicKey": public_key,
-                "displayName": self._display_name,
-            }
-            if self._enrollment_ticket and not self._state.get("agent_id"):
-                activation_payload["enrollmentTicket"] = self._enrollment_ticket
-            response = self._request(
-                "/v1/activations",
-                activation_payload,
-                signed=True,
-            )
-        except OSError:
-            return {}
+        activation_payload: dict[str, object] = {
+            "publicKey": public_key,
+            "displayName": self._display_name,
+        }
+        if self._enrollment_ticket and not self._state.get("agent_id"):
+            activation_payload["enrollmentTicket"] = self._enrollment_ticket
+        response = self._request(
+            "/v1/activations",
+            activation_payload,
+            signed=True,
+        )
         activation = {
             "id": str(response.get("activationId", "")),
             "secret": str(response.get("activationSecret", "")),
             "expires_at": _iso_timestamp(str(response.get("expiresAt", ""))),
         }
         if not activation["id"] or not activation["secret"]:
-            return {}
+            raise ValueError("Relay activation response is incomplete")
         self._state["activation"] = activation
         self._save()
         return {"id": str(activation["id"]), "secret": str(activation["secret"])}
@@ -209,19 +225,34 @@ class AgentRelay:
                        if encryption_public_key.strip() else {}),
                 },
             )
+            initial_registration_revision = int(
+                self._state.get("device_registration_revision", 0)
+            )
             enrolled = self._ensure_enrolled()
             if enrolled:
                 self._flush()
-            accepted = enrolled and not any(
-                item.get("kind") == "devices"
-                and str(item.get("payload", {}).get("fcmToken", "")) == token
-                for item in self._state.get("outbox", [])
+            accepted = (
+                enrolled
+                and int(self._state.get("device_registration_revision", 0))
+                > initial_registration_revision
+                and not any(
+                    item.get("kind") == "devices"
+                    and str(item.get("payload", {}).get("fcmToken", "")) == token
+                    for item in self._state.get("outbox", [])
+                )
             )
             if accepted and relay_device_id.strip() and encryption_public_key.strip():
                 self._secure_devices_refreshed_at = 0.0
             delivered = accepted and self._device_is_listed(
                 token, relay_device_id.strip()
             )
+            if accepted:
+                # Prepare the next short-lived capability while the successful
+                # pairing request still has a healthy relay connection. This
+                # keeps "Add another app" ready instead of making the browser
+                # wait for a replacement activation after the previous QR was
+                # consumed.
+                self._activation_with_tracking_locked()
             # Pairing claims the relay activation just before the app sends its
             # FCM token. Keep that token durably until enrollment completes
             # instead of losing the registration in this short race window.
@@ -296,12 +327,9 @@ class AgentRelay:
                 self._secure_devices_refreshed_at = 0.0
                 # Prepare the next short-lived capability before the browser
                 # opens "Add another app". If the Relay is temporarily
-                # unavailable, /pair will keep waiting instead of exposing a
-                # misleading LAN-only QR for this enrolled Agent.
-                try:
-                    self._activation_locked()
-                except (OSError, TypeError, ValueError):
-                    pass
+                # unavailable, the admin page records the exact reason it has
+                # to offer LAN pairing.
+                self._activation_with_tracking_locked()
                 return True
             except OSError:
                 return False

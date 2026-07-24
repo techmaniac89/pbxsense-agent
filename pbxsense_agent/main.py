@@ -229,32 +229,9 @@ def index(request: Request):
               <span class="dot"></span>
               <span>{status_text}<small>{status_detail}</small></span>
             </div>
-            <div class="actions">
-              <a class="button primary" href="/pair{_link_token_suffix(request)}">Pair app</a>
-              <a class="button" href="/apps{_link_token_suffix(request)}">Paired apps</a>
-              <a class="button" href="/diagnostics{_link_token_suffix(request)}">Diagnostics</a>
-            </div>
+            {_agent_navigation_html(request, current="home", primary="pair")}
             {diagnostic_html}
-            <div class="footer">
-              <span class="footer-meta">
-                <span>PBX: {escape(settings.pbx_type)}</span>
-                <small>Version {AGENT_VERSION} &middot; {AGENT_RELEASE_CHANNEL.title()}</small>
-              </span>
-              <span class="footer-actions">
-                <a
-                  class="discord-badge"
-                  href="https://discord.gg/5GgsSRasQB"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="Join PBXSense on Discord"
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M19.5 5.34A16.3 16.3 0 0 0 15.44 4l-.5 1.02a15.1 15.1 0 0 0-5.86 0L8.56 4A16.5 16.5 0 0 0 4.5 5.35C1.93 9.16 1.24 12.88 1.59 16.54a16.7 16.7 0 0 0 4.98 2.5l1.2-1.64c-.66-.25-1.3-.56-1.9-.92l.47-.36c3.66 1.7 7.63 1.7 11.25 0l.48.36c-.6.36-1.24.67-1.9.92l1.2 1.64a16.7 16.7 0 0 0 4.98-2.5c.42-4.24-.72-7.92-2.85-11.2ZM8.83 14.28c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.88 2.27-2 2.27Zm6.34 0c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.87 2.27-2 2.27Z"></path>
-                  </svg>
-                  <span>Discord</span>
-                </a>
-              </span>
-            </div>
+            {_agent_footer_html()}
           </section>
         """,
     )
@@ -479,7 +456,7 @@ def _page(*, title: str, body: str) -> str:
             border-bottom: 1px solid #3d3228;
           }}
           .diagnostics div:last-child {{ border-bottom: 0; }}
-          .device-list {{ display: grid; gap: 12px; margin-top: 16px; }}
+          .device-list {{ display: grid; gap: 12px; margin-top: 24px; }}
           .device-card {{
             padding: 16px;
             border: 1px solid var(--line);
@@ -542,7 +519,7 @@ def _page(*, title: str, body: str) -> str:
             transform: translateY(-1px);
           }}
           pre {{
-            margin: 18px 0 0;
+            margin: 24px 0 0;
             padding: 18px;
             border-radius: 18px;
             background: #100d0a;
@@ -614,22 +591,15 @@ def pair(request: Request):
     paired_apps_url = "/apps?" + urlencode(apps_query)
     relay_degraded = (
         relay_status.get("configured") is True
-        and relay_status.get("enrolled") is not True
         and "activation=" not in payload
     )
-    activation_pending = (
-        relay_status.get("enrolled") is True
-        and "activation=" not in payload
-    )
-    if activation_pending:
-        pairing_status = "Preparing secure pairing"
-        pairing_detail = (
-            "Waiting for the push relay to issue this app's protected pairing capability."
-        )
-    elif relay_status.get("enrolled") is True:
+    pairing_attention = relay_degraded and relay_status.get("enrolled") is not True
+    if relay_status.get("enrolled") is True:
         pairing_status = "Add another app"
         pairing_detail = (
             "Scan this QR on the additional phone. It will register its own push-notification device with this Agent."
+            if not relay_degraded
+            else "Scan this QR while the additional phone is on the Agent's network. Push setup will continue through this Agent."
         )
     elif relay_degraded:
         pairing_status = "Local pairing ready"
@@ -644,13 +614,18 @@ def pair(request: Request):
         body=f"""
           <section class="hero-card">
             {_brand_html()}
-            <div id="pairing-status" class="status {'attention' if relay_degraded else 'ok'}">
+            <div id="pairing-status" class="status {'attention' if pairing_attention else 'ok'}">
               <span class="dot"></span>
               <span>{pairing_status}<small>{pairing_detail}</small></span>
             </div>
-            {'<div class="status"><span class="dot"></span><span>Please wait<small>This page will refresh automatically.</small></span></div>' if activation_pending else ''}
-            <div class="qr" {'style="display:none"' if activation_pending else ''}>{qr_svg}</div>
-            <div class="pairing-text-row" {'style="display:none"' if activation_pending else ''}>
+            {_agent_navigation_html(
+                request,
+                current="pair",
+                primary="apps",
+                excluded=("diagnostics",),
+            )}
+            <div class="qr">{qr_svg}</div>
+            <div class="pairing-text-row">
               <div id="pairing-text" class="pairing-code">{escape(payload)}</div>
               <button id="copy-pairing-text" class="copy-button" type="button" title="Copy pairing text" aria-label="Copy pairing text">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -659,9 +634,6 @@ def pair(request: Request):
                 </svg>
                 <span id="copy-feedback" class="copy-feedback" role="status" aria-live="polite">Copied</span>
               </button>
-            </div>
-            <div class="actions">
-              <a class="button" href="/{_link_token_suffix(request)}">Agent status</a>
             </div>
             <script>
               (() => {{
@@ -697,9 +669,6 @@ def pair(request: Request):
                 const initialDeviceRevision = {json.dumps(initial_device_revision)};
                 const statusUrl = {json.dumps('/push/devices/status' + _link_token_suffix(request))};
                 const appsUrl = {json.dumps(paired_apps_url)};
-                if ({json.dumps(activation_pending)}) {{
-                  window.setTimeout(() => window.location.reload(), 1500);
-                }}
                 const poll = async () => {{
                   try {{
                     const response = await fetch(statusUrl, {{ cache: 'no-store' }});
@@ -727,6 +696,7 @@ def pair(request: Request):
                 window.setTimeout(poll, 1500);
               }})();
             </script>
+            {_agent_footer_html()}
           </section>
         """,
     )
@@ -740,37 +710,40 @@ def paired_apps(request: Request):
     result = push_relay.devices()
     devices = result.get("devices", [])
     wait_for_device = request.query_params.get("waitForDevice") == "1"
+    details = ""
     if result.get("state") == "notEnrolled" and wait_for_device:
-        content = _waiting_for_registered_app()
+        summary = _waiting_for_registered_app()
     elif result.get("state") == "notEnrolled":
-        content = """
+        summary = """
           <div class="status empty">
             <span class="dot"></span>
             <span>No registered apps<small>Pair your first app. If this Agent was rebuilt and apps are missing, restore its previous relay identity or pair them again.</small></span>
           </div>
         """
     elif result.get("available") is not True:
-        content = f"""
+        summary = f"""
           <div class="status attention">
             <span class="dot"></span>
             <span>Apps unavailable<small>{escape(str(result.get('error', 'The push relay is unavailable.')))}</small></span>
           </div>
         """
     elif (not isinstance(devices, list) or not devices) and wait_for_device:
-        content = _waiting_for_registered_app()
+        summary = _waiting_for_registered_app()
     elif not isinstance(devices, list) or not devices:
-        content = """
+        summary = """
           <div class="status empty">
             <span class="dot"></span>
             <span>No registered apps<small>Pair an app to register it for push notifications.</small></span>
           </div>
         """
     else:
-        content = f"""
+        summary = f"""
           <div class="status ok">
             <span class="dot"></span>
             <span>{len(devices)} registered {'app' if len(devices) == 1 else 'apps'}<small>Push registration details.</small></span>
           </div>
+        """
+        details = f"""
           <div class="device-list">{''.join(_device_card(device, request) for device in devices if isinstance(device, dict))}</div>
         """
     removal = request.query_params.get("removal", "")
@@ -788,13 +761,17 @@ def paired_apps(request: Request):
         body=f"""
           <section class="hero-card">
             {_brand_html()}
-            <div class="section-heading"><span>Paired apps</span><small>Push relay</small></div>
             {removal_notice}
-            {content}
-            <div class="actions">
-              <a class="button primary" href="/pair{_link_token_suffix(request)}">Add another app</a>
-              <a class="button" href="/{_link_token_suffix(request)}">Agent status</a>
-            </div>
+            {summary}
+            {_agent_navigation_html(
+                request,
+                current="apps",
+                primary="pair",
+                excluded=("diagnostics",),
+                label_overrides={"pair": "Add another app"},
+            )}
+            {details}
+            {_agent_footer_html()}
           </section>
         """,
     )
@@ -922,7 +899,15 @@ def _diagnostics_response(request: Request):
             settings.cucm_cdr_path, settings.cucm_cmr_path
         )
     if _wants_html(request):
-        return HTMLResponse(_json_page(request, "PBXSense diagnostics", payload))
+        return HTMLResponse(
+            _json_page(
+                request,
+                "PBXSense diagnostics",
+                payload,
+                navigation_current="diagnostics",
+                include_agent_footer=True,
+            )
+        )
     return JSONResponse(payload)
 
 
@@ -1252,6 +1237,62 @@ def _brand_html() -> str:
     """
 
 
+def _agent_navigation_html(
+    request: Request,
+    *,
+    current: str,
+    primary: str,
+    excluded: tuple[str, ...] = (),
+    label_overrides: dict[str, str] | None = None,
+    extra_links: tuple[tuple[str, str, bool], ...] = (),
+) -> str:
+    suffix = _link_token_suffix(request)
+    labels = label_overrides or {}
+    links = (
+        ("pair", "Pair app", f"/pair{suffix}"),
+        ("apps", "Paired apps", f"/apps{suffix}"),
+        ("home", "Agent status", f"/{suffix}"),
+        ("diagnostics", "Diagnostics", f"/diagnostics{suffix}"),
+    )
+    rendered = "".join(
+        f'<a class="button{" primary" if is_primary else ""}" '
+        f'href="{href}">{label}</a>'
+        for label, href, is_primary in extra_links
+    )
+    rendered += "".join(
+        f'<a class="button{" primary" if key == primary else ""}" '
+        f'href="{href}">{labels.get(key, label)}</a>'
+        for key, label, href in links
+        if key != current and key not in excluded
+    )
+    return f'<div class="actions">{rendered}</div>'
+
+
+def _agent_footer_html() -> str:
+    return f"""
+      <div class="footer">
+        <span class="footer-meta">
+          <span>PBX: {escape(settings.pbx_type)}</span>
+          <small>Version {AGENT_VERSION} &middot; {AGENT_RELEASE_CHANNEL.title()}</small>
+        </span>
+        <span class="footer-actions">
+          <a
+            class="discord-badge"
+            href="https://discord.gg/5GgsSRasQB"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Join PBXSense on Discord"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19.5 5.34A16.3 16.3 0 0 0 15.44 4l-.5 1.02a15.1 15.1 0 0 0-5.86 0L8.56 4A16.5 16.5 0 0 0 4.5 5.35C1.93 9.16 1.24 12.88 1.59 16.54a16.7 16.7 0 0 0 4.98 2.5l1.2-1.64c-.66-.25-1.3-.56-1.9-.92l.47-.36c3.66 1.7 7.63 1.7 11.25 0l.48.36c-.6.36-1.24.67-1.9.92l1.2 1.64a16.7 16.7 0 0 0 4.98-2.5c.42-4.24-.72-7.92-2.85-11.2ZM8.83 14.28c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.88 2.27-2 2.27Zm6.34 0c-1.1 0-2-1.02-2-2.27 0-1.25.88-2.27 2-2.27 1.13 0 2.03 1.03 2 2.27 0 1.25-.87 2.27-2 2.27Z"></path>
+            </svg>
+            <span>Discord</span>
+          </a>
+        </span>
+      </div>
+    """
+
+
 def _beacon_svg() -> str:
     """Match the PBXBeaconIcon used by the companion Flutter app."""
     return """
@@ -1269,6 +1310,9 @@ def _json_page(
     request: Request,
     title: str,
     payload: dict,
+    *,
+    navigation_current: str | None = None,
+    include_agent_footer: bool = False,
 ) -> str:
     formatted = escape(json.dumps(payload, indent=2, ensure_ascii=False))
     token_suffix = _link_token_suffix(request)
@@ -1279,16 +1323,36 @@ def _json_page(
     moment_hours = request.query_params.get("momentHours", "").strip()
     if moment_hours:
         raw_json_query["momentHours"] = moment_hours
+    navigation = (
+        _agent_navigation_html(
+            request,
+            current=navigation_current,
+            primary="" if navigation_current == "diagnostics" else "home",
+            excluded=("pair", "apps") if navigation_current == "diagnostics" else (),
+            extra_links=(
+                (
+                    "Raw JSON",
+                    f"?{urlencode(raw_json_query)}",
+                    navigation_current == "diagnostics",
+                ),
+            ),
+        )
+        if navigation_current
+        else f"""
+            <div class="actions">
+              <a class="button" href="/{token_suffix}">Agent status</a>
+              <a class="button primary" href="?{urlencode(raw_json_query)}">Raw JSON</a>
+            </div>
+        """
+    )
     return _page(
         title=title,
         body=f"""
           <section class="json-card">
             {_brand_html()}
-            <div class="actions">
-              <a class="button" href="/{token_suffix}">Agent status</a>
-              <a class="button primary" href="?{urlencode(raw_json_query)}">Raw JSON</a>
-            </div>
+            {navigation}
             <pre><code>{formatted}</code></pre>
+            {_agent_footer_html() if include_agent_footer else ""}
           </section>
         """,
     )
@@ -1303,6 +1367,7 @@ def _wants_html(request: Request) -> bool:
 def _agent_status() -> dict:
     diagnostics = connector.diagnostics()
     relay_status = internet_relay.status()
+    push_status = push_relay.status()
     diagnostics["internetRelayState"] = (
         "Disabled"
         if relay_status["enabled"] is not True
@@ -1311,6 +1376,9 @@ def _agent_status() -> dict:
         else "Connecting securely"
     )
     diagnostics["internetRelayProtocol"] = f"v{relay_status['protocolVersion']}"
+    diagnostics["pushRelayActivationError"] = str(
+        push_status.get("lastActivationError", "")
+    ) or "None"
     diagnostics["ok"] = diagnostics.get("ok") is True or diagnostics.get("loginAccepted") is True
     if diagnostics["ok"] and not diagnostics.get("message"):
         diagnostics["message"] = f"{connector.diagnostics_label} connection check succeeded."
@@ -1344,6 +1412,7 @@ def _diagnostic_rows(diagnostics: dict, message: object) -> str:
         ("tlsEnabled", "TLS enabled", True),
         ("tlsVerification", "TLS verification", True),
         ("internetRelayState", "Internet relay", False),
+        ("pushRelayActivationError", "Pairing relay error", False),
     )
     rows: list[str] = []
     for label, value in connection_statuses:
