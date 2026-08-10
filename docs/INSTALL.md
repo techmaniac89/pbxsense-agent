@@ -11,6 +11,20 @@ management is preferred. Use development mode only for local testing.
 Run the installer on the PBX host, or on a small Linux machine that can reach
 the PBX connector.
 
+Download the current archive and checksum from the repository's latest GitHub
+Release, verify it, and enter the extracted directory:
+
+```bash
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.29-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
+sha256sum --check --ignore-missing SHA256SUMS.txt
+tar -xzf PBXSenseAgent-0.5.29-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.5.29-beta-linux-source-installer
+```
+
+The checksum command must report `OK` before installation. On a machine where
+the repository was cloned or copied directly, start from its root instead.
+
 ```bash
 cd pbxsense-agent
 sudo sh ./scripts/install_debian.sh
@@ -35,7 +49,7 @@ archives preserve executable modes.
 Both distribution-specific installers:
 
 - Install Python runtime packages through `apt-get` or `dnf`.
-- Auto-detects local Asterisk or FreeSWITCH files and commands when possible.
+- Auto-detect local Asterisk or FreeSWITCH files and commands when possible.
 - Lets you confirm `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or `mock` mode interactively.
 - Prompts for timezone, Agent port, and connector timeout.
 - Prompts for AMI, ESL, or Yeastar API credentials and keeps existing values on reinstall.

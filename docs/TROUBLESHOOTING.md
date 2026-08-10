@@ -133,7 +133,7 @@ when closed-app push notifications are required.
 If push notifications work but the app cannot use encrypted Home snapshots
 away from the LAN:
 
-- Confirm the hosted relay reports service `0.5.2` and use current Breeze
+- Confirm the hosted relay reports service `0.5.4` and use current Breeze
   app/Agent builds.
 - Confirm `PBXSENSE_INTERNET_RELAY_ENABLED` is `true` (the default) and restart
   the Agent after changing an explicit override.

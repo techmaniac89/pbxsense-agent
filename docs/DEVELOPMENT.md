@@ -115,7 +115,8 @@ delivery applies a separate correlation policy so a temporary shared outage on
 a large PBX does not generate dozens of notifications:
 
 - hold newly confirmed phone outages for a 15-second correlation window;
-- notify one or two affected phones individually;
+- release one affected phone as an individual notification after the window;
+- combine two affected phones into one confirmed two-phone notification;
 - correlate three or more recently affected phones into one incident;
 - update the same Android notification no more than once every 30 seconds;
 - suppress per-phone outage and recovery pushes while the PBX or Agent
