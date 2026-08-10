@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.27-beta` on the **Breeze** channel.
+The current Agent release is `0.5.28-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -710,20 +710,20 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.27-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.28-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
 runs the full test suite, creates the Linux server-installer archive, writes a
 `SHA256SUMS.txt` file, and publishes both files in the GitHub Releases menu.
-Pre-release versions such as `0.5.27-beta` are marked as pre-releases.
+Pre-release versions such as `0.5.28-beta` are marked as pre-releases.
 
 The source-installer archive includes the Agent code, docs, install script, and
 uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.5.27-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.5.28-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging
