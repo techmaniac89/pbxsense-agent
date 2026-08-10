@@ -716,7 +716,8 @@ dist/
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
 runs the full test suite, creates the Linux server-installer archive, writes a
 `SHA256SUMS.txt` file, and publishes both files in the GitHub Releases menu.
-Pre-release versions such as `0.5.28-beta` are marked as pre-releases.
+Breeze beta versions are published as normal GitHub Releases so they remain
+visible in the repository's primary Releases area.
 
 The source-installer archive includes the Agent code, docs, install script, and
 uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd

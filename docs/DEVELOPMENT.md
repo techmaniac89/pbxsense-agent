@@ -184,6 +184,6 @@ Pushing to `main` triggers `.github/workflows/release-agent.yml`. It:
 
 Functional changes therefore need a new `AGENT_VERSION` before they are pushed
 to `main`. Keep the default in `packaging/linux/build_release.ps1` and the
-release examples in `README.md` synchronized with it. Beta versions are
-published as GitHub pre-releases. The workflow also supports a manual retry
-through `workflow_dispatch`.
+release examples in `README.md` synchronized with it. Breeze beta versions are
+published as normal GitHub Releases so server installers remain easy to find.
+The workflow also supports a manual retry through `workflow_dispatch`.

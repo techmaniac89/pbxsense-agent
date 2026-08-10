@@ -49,7 +49,6 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=agent-v$version" >> $env:GITHUB_OUTPUT
-          "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - name: Ensure this version has not already been published
         shell: pwsh
@@ -98,7 +97,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
-          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           $assets = Get-ChildItem dist -File | ForEach-Object { $_.FullName }
           $arguments = @("release", "create", $env:RELEASE_TAG) + $assets + @(
@@ -107,7 +105,4 @@ jobs:
             "--title", "PBXSense Agent $env:RELEASE_VERSION",
             "--generate-notes"
           )
-          if ($env:IS_PRERELEASE -eq "true") {
-            $arguments += "--prerelease"
-          }
           gh @arguments
