@@ -170,3 +170,20 @@ dist/
 
 Release notes should include supported connectors, upgrade notes, and installer
 changes.
+
+## Automated GitHub Releases
+
+Pushing to `main` triggers `.github/workflows/release-agent.yml`. It:
+
+1. reads `AGENT_VERSION` from `pbxsense_agent/version.py`;
+2. refuses to overwrite an existing `agent-v<version>` release;
+3. installs dependencies and runs the full unit-test suite;
+4. builds the Linux source installer with `packaging/linux/build_release.ps1`;
+5. generates `SHA256SUMS.txt`; and
+6. creates the matching GitHub tag and Release with both assets attached.
+
+Functional changes therefore need a new `AGENT_VERSION` before they are pushed
+to `main`. Keep the default in `packaging/linux/build_release.ps1` and the
+release examples in `README.md` synchronized with it. Beta versions are
+published as GitHub pre-releases. The workflow also supports a manual retry
+through `workflow_dispatch`.

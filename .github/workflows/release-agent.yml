@@ -1,0 +1,113 @@
+name: Release PBXSense Agent
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, package, and publish
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements.txt
+
+      - name: Read and validate Agent version
+        id: version
+        shell: pwsh
+        run: |
+          $source = Get-Content pbxsense_agent/version.py -Raw
+          if ($source -notmatch 'AGENT_VERSION\s*=\s*"([^"]+)"') {
+            throw "Could not read AGENT_VERSION from pbxsense_agent/version.py"
+          }
+          $version = $Matches[1]
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "AGENT_VERSION '$version' is not a supported release version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=agent-v$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Ensure this version has not already been published
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $env:RELEASE_TAG already exists. Bump AGENT_VERSION before pushing another release."
+          }
+          $global:LASTEXITCODE = 0
+          gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tag $env:RELEASE_TAG already exists. Bump AGENT_VERSION before pushing another release."
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Run test suite
+        shell: pwsh
+        run: python -m unittest discover -s tests
+
+      - name: Build Linux server installer
+        shell: pwsh
+        run: |
+          ./packaging/linux/build_release.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -OutputDir "$PWD/dist"
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $assets = Get-ChildItem dist -File | Sort-Object Name
+          if (-not $assets) {
+            throw "The release build produced no files"
+          }
+          $lines = foreach ($asset in $assets) {
+            $hash = (Get-FileHash -Algorithm SHA256 $asset.FullName).Hash.ToLowerInvariant()
+            "$hash  $($asset.Name)"
+          }
+          $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          $assets = Get-ChildItem dist -File | ForEach-Object { $_.FullName }
+          $arguments = @("release", "create", $env:RELEASE_TAG) + $assets + @(
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--target", $env:GITHUB_SHA,
+            "--title", "PBXSense Agent $env:RELEASE_VERSION",
+            "--generate-notes"
+          )
+          if ($env:IS_PRERELEASE -eq "true") {
+            $arguments += "--prerelease"
+          }
+          gh @arguments
