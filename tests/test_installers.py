@@ -73,6 +73,21 @@ class InstallerStructureTest(unittest.TestCase):
         self.assertIn("GRANDSTREAM_UCM_FILES_HOST_PATH", grandstream)
         self.assertIn("GRANDSTREAM_UCM_CDR_CSV_PATH", grandstream)
 
+    def test_release_runtime_is_locked_and_least_privilege(self) -> None:
+        common = Path("scripts/install_common.sh").read_text(encoding="utf-8")
+        compose = Path("docker/docker-compose.yml").read_text(encoding="utf-8")
+        dockerfile = Path("docker/Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("--require-hashes", common)
+        self.assertIn('chown -R root:root "$INSTALL_DIR"', common)
+        self.assertIn("ProtectSystem=strict", common)
+        self.assertIn("ReadWritePaths=/var/lib/pbxsense-agent /var/log/pbxsense-agent", common)
+        self.assertIn("read_only: true", compose)
+        self.assertIn("cap_drop:", compose)
+        self.assertIn("no-new-privileges:true", compose)
+        self.assertIn("--require-hashes -r requirements.lock", dockerfile)
+        self.assertTrue(Path("requirements.lock").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

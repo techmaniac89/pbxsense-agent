@@ -151,6 +151,21 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS", source)
         self.assertIn('"privacy": "Agent identifiers are one-way hashes;', source)
 
+    def test_relay_mutations_are_atomic_replay_safe_and_secret_separated(self) -> None:
+        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        agent = Path("pbxsense_agent/relay.py").read_text(encoding="utf-8")
+
+        self.assertIn("@firestore.transactional\ndef _claim_activation_transaction", source)
+        self.assertIn("@firestore.transactional\ndef _register_agent_device_transaction", source)
+        self.assertIn("_require_replay_protected_signature(agent_id, agent, request)", source)
+        self.assertIn("Replayed secure Agent request", source)
+        self.assertIn("PBXSENSE_RELAY_TICKET_SECRET must differ", source)
+        self.assertIn("_admin_cookie_value()", source)
+        self.assertIn("hops[-2]", source)
+        self.assertIn("async for chunk in request.stream()", source)
+        self.assertIn('"X-PBXSense-Nonce": nonce', agent)
+        self.assertIn('"X-PBXSense-Signature-V2"', agent)
+
     def test_push_relay_deduplicates_tokens_and_tags_notification_episodes(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
 

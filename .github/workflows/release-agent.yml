@@ -7,33 +7,37 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: agent-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Test, package, and publish
+  build:
+    name: Test and package
     runs-on: windows-latest
     timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - name: Check out release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install test dependencies
         shell: pwsh
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements.lock
 
       - name: Read and validate Agent version
         id: version
@@ -49,23 +53,6 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=agent-v$version" >> $env:GITHUB_OUTPUT
-
-      - name: Ensure this version has not already been published
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            throw "Release $env:RELEASE_TAG already exists. Bump AGENT_VERSION before pushing another release."
-          }
-          $global:LASTEXITCODE = 0
-          gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" *> $null
-          if ($LASTEXITCODE -eq 0) {
-            throw "Tag $env:RELEASE_TAG already exists. Bump AGENT_VERSION before pushing another release."
-          }
-          $global:LASTEXITCODE = 0
 
       - name: Run test suite
         shell: pwsh
@@ -91,18 +78,53 @@ jobs:
           }
           $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8
 
-      - name: Publish GitHub Release
-        shell: pwsh
+      - name: Stage immutable release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-release-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified build assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-release-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Ensure this version has not already been published
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
         run: |
-          $assets = Get-ChildItem dist -File | ForEach-Object { $_.FullName }
-          $arguments = @("release", "create", $env:RELEASE_TAG) + $assets + @(
-            "--repo", $env:GITHUB_REPOSITORY,
-            "--target", $env:GITHUB_SHA,
-            "--title", $env:RELEASE_VERSION,
-            "--generate-notes"
-          )
-          gh @arguments
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists. Bump AGENT_VERSION before publishing again." >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists. Bump AGENT_VERSION before publishing again." >&2
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_VERSION" \
+            --generate-notes

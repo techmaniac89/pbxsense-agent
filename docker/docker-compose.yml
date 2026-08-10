@@ -8,6 +8,13 @@ services:
     container_name: pbxsense-agent
     restart: unless-stopped
     network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     env_file:
       - ../.env
     volumes:

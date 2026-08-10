@@ -10,6 +10,7 @@ import base64
 import hashlib
 import html
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -29,14 +30,12 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.4"
+RELAY_VERSION = "0.5.5"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
-_ticket_secret = os.getenv(
-    "PBXSENSE_RELAY_TICKET_SECRET", _admin_token
-).strip()
+_ticket_secret = os.getenv("PBXSENSE_RELAY_TICKET_SECRET", "").strip()
 _enrollment_mode = os.getenv(
     "PBXSENSE_RELAY_ENROLLMENT_MODE", "open"
 ).strip().lower()
@@ -44,10 +43,16 @@ if _enrollment_mode not in {"open", "ticket", "closed"}:
     raise RuntimeError(
         "PBXSENSE_RELAY_ENROLLMENT_MODE must be open, ticket, or closed"
     )
-_require_signed_existing_activations = os.getenv(
-    "PBXSENSE_RELAY_REQUIRE_SIGNED_EXISTING_ACTIVATIONS",
-    "true" if _enrollment_mode in {"ticket", "closed"} else "false",
-).strip().lower() in {"1", "true", "yes", "on"}
+if _enrollment_mode == "ticket" and not _ticket_secret:
+    raise RuntimeError(
+        "PBXSENSE_RELAY_TICKET_SECRET is required when ticket enrollment is enabled"
+    )
+if _ticket_secret and _admin_token and hmac.compare_digest(
+    _ticket_secret, _admin_token
+):
+    raise RuntimeError(
+        "PBXSENSE_RELAY_TICKET_SECRET must differ from PBXSENSE_RELAY_ADMIN_TOKEN"
+    )
 AGENT_LOSS_TIMEOUT_SECONDS = 90
 MAX_DEVICES_PER_AGENT = max(
     1, min(50, int(os.getenv("PBXSENSE_RELAY_MAX_DEVICES_PER_AGENT", "10")))
@@ -72,22 +77,33 @@ _request_windows: dict[str, deque[float]] = defaultdict(deque)
 _event_windows: dict[str, deque[float]] = defaultdict(deque)
 logger = logging.getLogger(__name__)
 _admin_cookie = "pbxsense_relay_admin"
+_trust_forwarded_for = bool(os.getenv("K_SERVICE")) or os.getenv(
+    "PBXSENSE_RELAY_TRUST_PROXY", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @app.middleware("http")
 async def bound_public_requests(request: Request, call_next: Any) -> Any:
-    """Reject obvious floods before they can generate Firestore operations."""
+    """Bound request memory and floods before they generate backend work."""
+    maximum = (
+        MAX_SECURE_SNAPSHOT_BYTES
+        if request.url.path.endswith("/secure/snapshots")
+        else 1024 * 1024
+    )
     content_length = request.headers.get("content-length", "")
-    if content_length.isdigit():
-        maximum = (
-            MAX_SECURE_SNAPSHOT_BYTES
-            if request.url.path.endswith("/secure/snapshots")
-            else 1024 * 1024
+    if content_length.isdigit() and int(content_length) > maximum:
+        return JSONResponse(
+            status_code=413, content={"detail": "Request body is too large"}
         )
-        if int(content_length) > maximum:
-            return JSONResponse(
-                status_code=413, content={"detail": "Request body is too large"}
-            )
+    if request.method.upper() in {"POST", "PUT", "PATCH"}:
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > maximum:
+                return JSONResponse(
+                    status_code=413, content={"detail": "Request body is too large"}
+                )
+        request._body = bytes(body)
     client = _client_key(request)
     is_activation = request.url.path == "/v1/activations"
     if is_activation:
@@ -177,7 +193,7 @@ async def usage_dashboard_login(request: Request) -> Any:
     )
     response.set_cookie(
         _admin_cookie,
-        supplied,
+        _admin_cookie_value(),
         max_age=8 * 60 * 60,
         httponly=True,
         secure=True,
@@ -221,7 +237,7 @@ async def create_activation(request: Request) -> dict[str, str]:
         .stream()
     )
     ticket_payload: dict[str, object] | None = None
-    if existing_agents and _require_signed_existing_activations:
+    if existing_agents:
         _verify_public_key_request(public_key, request)
     elif _enrollment_mode == "closed":
         raise HTTPException(status_code=503, detail="New relay enrollment is paused")
@@ -260,18 +276,8 @@ async def create_activation(request: Request) -> dict[str, str]:
 async def claim_activation(activation_id: str, request: Request) -> dict[str, str]:
     body = await _json_body(request)
     secret = _bounded_text(body.get("activationSecret"), "activationSecret", 200)
+    activation_id = _bounded_identifier(activation_id, "activationId")
     activation_ref = db.collection("activations").document(activation_id)
-    snapshot = activation_ref.get()
-    if not snapshot.exists:
-        raise HTTPException(status_code=401, detail="Unknown activation")
-    activation = snapshot.to_dict() or {}
-    valid_secret = hmac.compare_digest(
-        str(activation.get("secretHash", "")),
-        hashlib.sha256(secret.encode("utf-8")).hexdigest(),
-    )
-    expires_at = activation.get("expiresAt")
-    if not valid_secret or activation.get("claimedAt") or not isinstance(expires_at, datetime) or expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Expired or used activation")
     encryption_public_key = _optional_text(
         body.get("encryptionPublicKey"), limit=100
     )
@@ -282,73 +288,111 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
     # Encryption remains opt-in and is represented only by the optional key.
     relay_device_id = f"device_{secrets.token_urlsafe(12)}"
     relay_access_token = secrets.token_urlsafe(32)
+    site_name = _optional_text(body.get("siteName"), limit=120)
+    transaction = db.transaction()
+    try:
+        claim = _claim_activation_transaction(
+            transaction,
+            activation_ref=activation_ref,
+            supplied_secret_hash=hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+            requested_site_name=site_name,
+            relay_device_id=relay_device_id,
+            relay_access_token=relay_access_token,
+            encryption_public_key=encryption_public_key,
+        )
+    except AlreadyExists as exc:
+        raise HTTPException(
+            status_code=401, detail="Activation or enrollment ticket was already used"
+        ) from exc
+    agent_id = str(claim["agentId"])
+    site_id = str(claim["siteId"])
+    logger.info("activation_claimed agent_id=%s reused=%s", agent_id, claim["reusedAgent"])
+    result = {"status": "claimed", "agentId": agent_id, "siteId": site_id}
+    result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
+    return result
 
-    existing_agents = list(
+
+@firestore.transactional
+def _claim_activation_transaction(
+    transaction: Any,
+    *,
+    activation_ref: Any,
+    supplied_secret_hash: str,
+    requested_site_name: str,
+    relay_device_id: str,
+    relay_access_token: str,
+    encryption_public_key: str,
+) -> dict[str, object]:
+    """Consume one QR capability and create its app registration atomically."""
+    now = datetime.now(timezone.utc)
+    snapshot = activation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise HTTPException(status_code=401, detail="Unknown activation")
+    activation = snapshot.to_dict() or {}
+    expires_at = activation.get("expiresAt")
+    if (
+        not hmac.compare_digest(str(activation.get("secretHash", "")), supplied_secret_hash)
+        or activation.get("claimedAt")
+        or not isinstance(expires_at, datetime)
+        or expires_at < now
+    ):
+        raise HTTPException(status_code=401, detail="Expired or used activation")
+
+    existing_agents = (
         db.collection("agents")
         .where("publicKey", "==", activation["publicKey"])
         .limit(1)
-        .stream()
+        .get(transaction=transaction)
     )
-    if existing_agents:
+    reused = bool(existing_agents)
+    if reused:
         existing = existing_agents[0]
         agent = existing.to_dict() or {}
         if agent.get("revoked"):
             raise HTTPException(status_code=403, detail="This Agent identity has been revoked")
-        existing_site_id = str(agent.get("siteId", ""))
-        if not existing_site_id:
+        agent_id = existing.id
+        site_id = str(agent.get("siteId", ""))
+        if not site_id:
             raise HTTPException(status_code=500, detail="Existing Agent has no site identity")
-        batch = db.batch()
-        batch.update(
-            activation_ref,
+    else:
+        site_name = _bounded_text(
+            requested_site_name or activation.get("displayName"), "siteName", 120
+        )
+        site_id = f"site_{secrets.token_urlsafe(10)}"
+        agent_id = f"agent_{secrets.token_urlsafe(12)}"
+
+    devices_ref = db.collection("agents").document(agent_id).collection("devices")
+    if len(devices_ref.limit(MAX_DEVICES_PER_AGENT).get(transaction=transaction)) >= MAX_DEVICES_PER_AGENT:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This Agent has reached its {MAX_DEVICES_PER_AGENT}-app limit",
+        )
+
+    if not reused:
+        transaction.create(
+            db.collection("sites").document(site_id),
+            {"name": site_name, "createdAt": firestore.SERVER_TIMESTAMP},
+        )
+        transaction.create(
+            db.collection("agents").document(agent_id),
             {
-                "claimedAt": firestore.SERVER_TIMESTAMP,
-                "agentId": existing.id,
-                "siteId": existing_site_id,
-                "reusedAgent": True,
+                "tenantId": site_id,
+                "siteId": site_id,
+                "siteName": site_name,
+                "displayName": activation["displayName"],
+                "publicKey": activation["publicKey"],
+                "enrolledAt": firestore.SERVER_TIMESTAMP,
+                "lastSeenAt": firestore.SERVER_TIMESTAMP,
+                "revoked": False,
+                **({"accountId": activation["accountId"]} if activation.get("accountId") else {}),
             },
         )
-        batch.commit()
-        logger.info("activation_claimed agent_id=%s reused=true", existing.id)
-        _create_relay_device(
-            existing.id, existing_site_id, relay_device_id,
-            relay_access_token, encryption_public_key,
-        )
-        result = {
-            "status": "claimed", "agentId": existing.id,
-            "siteId": existing_site_id,
-        }
-        result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
-        return result
-
-    site_name = _bounded_text(
-        body.get("siteName", activation.get("displayName")), "siteName", 120
-    )
-    site_id = f"site_{secrets.token_urlsafe(10)}"
-    agent_id = f"agent_{secrets.token_urlsafe(12)}"
-    batch = db.batch()
-    batch.create(db.collection("sites").document(site_id), {"name": site_name, "createdAt": firestore.SERVER_TIMESTAMP})
-    batch.create(db.collection("agents").document(agent_id), {
-        "tenantId": site_id,
-        "siteId": site_id,
-        "siteName": site_name,
-        "displayName": activation["displayName"],
-        "publicKey": activation["publicKey"],
-        "enrolledAt": firestore.SERVER_TIMESTAMP,
-        "lastSeenAt": firestore.SERVER_TIMESTAMP,
-        "revoked": False,
-        **({"accountId": activation["accountId"]} if activation.get("accountId") else {}),
-    })
-    batch.update(activation_ref, {"claimedAt": firestore.SERVER_TIMESTAMP, "agentId": agent_id, "siteId": site_id})
     ticket_id = str(activation.get("enrollmentTicketId", ""))
     if _enrollment_mode == "ticket":
         ticket_expires_at = activation.get("enrollmentTicketExpiresAt")
-        if (
-            not ticket_id
-            or not isinstance(ticket_expires_at, datetime)
-            or ticket_expires_at < datetime.now(timezone.utc)
-        ):
+        if not ticket_id or not isinstance(ticket_expires_at, datetime) or ticket_expires_at < now:
             raise HTTPException(status_code=401, detail="Enrollment ticket expired")
-        batch.create(
+        transaction.create(
             db.collection("enrollmentTickets").document(ticket_id),
             {
                 "accountId": activation.get("accountId", ""),
@@ -356,38 +400,30 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
                 "expiresAt": ticket_expires_at,
             },
         )
-    try:
-        batch.commit()
-    except AlreadyExists as exc:
-        raise HTTPException(
-            status_code=401, detail="Enrollment ticket was already used"
-        ) from exc
-    _create_relay_device(
-        agent_id, site_id, relay_device_id,
-        relay_access_token, encryption_public_key,
+    transaction.create(
+        devices_ref.document(relay_device_id),
+        {
+            "siteId": site_id,
+            "accessTokenHash": hashlib.sha256(relay_access_token.encode("utf-8")).hexdigest(),
+            **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+            "lastConnectedAt": firestore.SERVER_TIMESTAMP,
+            "expiresAt": now + timedelta(days=30),
+            "meaningfulEnabled": True,
+            "activityEnabled": True,
+        },
     )
-    logger.info("activation_claimed agent_id=%s reused=false", agent_id)
-    result = {"status": "claimed", "agentId": agent_id, "siteId": site_id}
-    result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
-    return result
-
-
-def _create_relay_device(
-    agent_id: str, site_id: str, device_id: str,
-    access_token: str, encryption_public_key: str,
-) -> None:
-    _require_device_capacity(agent_id)
-    db.collection("agents").document(agent_id).collection("devices").document(device_id).create({
-        "siteId": site_id,
-        "accessTokenHash": hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
-        **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
-        "createdAt": firestore.SERVER_TIMESTAMP,
-        "updatedAt": firestore.SERVER_TIMESTAMP,
-        "lastConnectedAt": firestore.SERVER_TIMESTAMP,
-        "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
-        "meaningfulEnabled": True,
-        "activityEnabled": True,
-    })
+    transaction.update(
+        activation_ref,
+        {
+            "claimedAt": firestore.SERVER_TIMESTAMP,
+            "agentId": agent_id,
+            "siteId": site_id,
+            "reusedAgent": reused,
+        },
+    )
+    return {"agentId": agent_id, "siteId": site_id, "reusedAgent": reused}
 
 
 @app.post("/v1/activations/{activation_id}/status")
@@ -417,10 +453,11 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
     device_id = requested_device_id or hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
     encryption_public_key = _optional_text(body.get("encryptionPublicKey"), limit=100)
     devices_ref = db.collection("agents").document(agent_id).collection("devices")
-    if not devices_ref.document(device_id).get().exists:
-        _require_device_capacity(agent_id)
-    devices_ref.document(device_id).set(
-        {
+    _register_agent_device_transaction(
+        db.transaction(),
+        device_ref=devices_ref.document(device_id),
+        devices_ref=devices_ref,
+        values={
             "fcmToken": fcm_token,
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
             "activityEnabled": bool(body.get("activityEnabled", True)),
@@ -437,27 +474,99 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
             "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
             **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
         },
+    )
+    _assign_device_token_transaction(
+        db.transaction(), devices_ref.document(device_id), fcm_token
+    )
+    return {"status": "registered", "deviceId": device_id}
+
+
+@firestore.transactional
+def _register_agent_device_transaction(
+    transaction: Any,
+    *,
+    device_ref: Any,
+    devices_ref: Any,
+    values: dict[str, object],
+) -> None:
+    existing = device_ref.get(transaction=transaction)
+    if not existing.exists and len(
+        devices_ref.limit(MAX_DEVICES_PER_AGENT).get(transaction=transaction)
+    ) >= MAX_DEVICES_PER_AGENT:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This Agent has reached its {MAX_DEVICES_PER_AGENT}-app limit",
+        )
+    transaction.set(
+        device_ref,
+        {
+            **values,
+        },
         merge=True,
     )
-    # Keep an O(1) ownership pointer for this secret FCM token. This migrates a
-    # previous registration even when an Agent rebuild changed its identity,
-    # without a collection-group query or an additional Firestore index.
+
+
+@firestore.transactional
+def _assign_device_token_transaction(
+    transaction: Any, device_ref: Any, fcm_token: str
+) -> None:
+    """Give one FCM token one owner, atomically across Agent rebuilds."""
+    device_snapshot = device_ref.get(transaction=transaction)
+    if not device_snapshot.exists:
+        raise HTTPException(status_code=404, detail="Paired app no longer exists")
+    device = device_snapshot.to_dict() or {}
+    previous_token = str(device.get("fcmToken", ""))
     token_ref = db.collection("deviceTokens").document(
         hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
     )
-    previous = token_ref.get()
-    previous_path = str((previous.to_dict() or {}).get("devicePath", "")) \
-        if previous.exists else ""
-    current_path = devices_ref.document(device_id).path
-    if previous_path and previous_path != current_path:
-        previous_ref = db.document(previous_path)
-        if previous_ref.get().exists:
-            previous_ref.delete()
-    token_ref.set({
-        "devicePath": current_path,
-        "updatedAt": firestore.SERVER_TIMESTAMP,
-    })
-    return {"status": "registered", "deviceId": device_id}
+    token_snapshot = token_ref.get(transaction=transaction)
+    previous_owner_path = str(
+        (token_snapshot.to_dict() or {}).get("devicePath", "")
+    ) if token_snapshot.exists else ""
+    previous_owner_ref = (
+        _device_path_reference(previous_owner_path)
+        if previous_owner_path and previous_owner_path != device_ref.path
+        else None
+    )
+    if previous_owner_ref is not None:
+        previous_owner_ref.get(transaction=transaction)
+    old_token_ref = None
+    old_token_snapshot = None
+    if previous_token and previous_token != fcm_token:
+        old_token_ref = db.collection("deviceTokens").document(
+            hashlib.sha256(previous_token.encode("utf-8")).hexdigest()
+        )
+        old_token_snapshot = old_token_ref.get(transaction=transaction)
+
+    if previous_owner_ref is not None:
+        transaction.delete(previous_owner_ref)
+    if old_token_ref is not None and old_token_snapshot is not None:
+        old_path = str((old_token_snapshot.to_dict() or {}).get("devicePath", "")) \
+            if old_token_snapshot.exists else ""
+        if old_path == device_ref.path:
+            transaction.delete(old_token_ref)
+    transaction.set(
+        device_ref,
+        {"fcmToken": fcm_token, "updatedAt": firestore.SERVER_TIMESTAMP},
+        merge=True,
+    )
+    transaction.set(
+        token_ref,
+        {"devicePath": device_ref.path, "updatedAt": firestore.SERVER_TIMESTAMP},
+    )
+
+
+def _device_path_reference(path: str) -> Any | None:
+    parts = path.split("/")
+    if (
+        len(parts) != 4
+        or parts[0] != "agents"
+        or parts[2] != "devices"
+        or not _optional_identifier(parts[1])
+        or not _optional_identifier(parts[3])
+    ):
+        return None
+    return db.document(path)
 
 
 @app.post("/v1/agents/{agent_id}/devices/list")
@@ -525,7 +634,6 @@ async def heartbeat(agent_id: str, request: Request) -> dict[str, object]:
 async def secure_exchange(agent_id: str, request: Request) -> dict[str, object]:
     """Exchange bounded control frames over an outbound-only Agent session."""
     body, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
-    await _require_replay_protected_signature(agent_id, agent, request)
     if body.get("protocolVersion") != 1:
         raise HTTPException(status_code=400, detail="Unsupported secure relay protocol")
     session_id = _bounded_identifier(body.get("sessionId"), "sessionId")
@@ -596,7 +704,6 @@ async def secure_exchange(agent_id: str, request: Request) -> dict[str, object]:
 @app.post("/v1/agents/{agent_id}/secure/snapshots")
 async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str, int]:
     body, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
-    await _require_replay_protected_signature(agent_id, agent, request)
     envelopes = body.get("envelopes", [])
     if not isinstance(envelopes, list) or len(envelopes) > 20:
         raise HTTPException(status_code=400, detail="Invalid secure envelopes")
@@ -677,24 +784,11 @@ async def register_own_device(
     agent_id: str, device_id: str, request: Request
 ) -> dict[str, object]:
     """Let a paired app register push without reaching the Agent's LAN URL."""
-    device_ref, device = _authenticate_relay_device(agent_id, device_id, request)
+    device_ref, _ = _authenticate_relay_device(agent_id, device_id, request)
     body = await _json_body(request)
     fcm_token = _bounded_text(body.get("fcmToken"), "fcmToken", 4096)
-    previous_token = str(device.get("fcmToken", ""))
-    if previous_token and previous_token != fcm_token:
-        previous_token_ref = db.collection("deviceTokens").document(
-            hashlib.sha256(previous_token.encode("utf-8")).hexdigest()
-        )
-        previous_token_snapshot = previous_token_ref.get()
-        if (
-            previous_token_snapshot.exists
-            and str((previous_token_snapshot.to_dict() or {}).get("devicePath", ""))
-            == device_ref.path
-        ):
-            previous_token_ref.delete()
     device_ref.set(
         {
-            "fcmToken": fcm_token,
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
             "activityEnabled": bool(body.get("activityEnabled", True)),
             "platform": _bounded_text(
@@ -710,21 +804,7 @@ async def register_own_device(
         },
         merge=True,
     )
-    token_ref = db.collection("deviceTokens").document(
-        hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
-    )
-    previous = token_ref.get()
-    previous_path = str((previous.to_dict() or {}).get("devicePath", "")) \
-        if previous.exists else ""
-    current_path = device_ref.path
-    if previous_path and previous_path != current_path:
-        previous_ref = db.document(previous_path)
-        if previous_ref.get().exists:
-            previous_ref.delete()
-    token_ref.set({
-        "devicePath": current_path,
-        "updatedAt": firestore.SERVER_TIMESTAMP,
-    })
+    _assign_device_token_transaction(db.transaction(), device_ref, fcm_token)
     logger.info("device_self_registered agent_id=%s device_id=%s", agent_id, device_id)
     return {"delivered": True, "deviceId": device_id}
 
@@ -747,7 +827,9 @@ async def revoke_own_device(
         hashlib.sha256(token.encode("utf-8")).hexdigest(), expected
     ):
         raise HTTPException(status_code=401, detail="Invalid device credential")
-    _delete_device_registration(agent_id, device_id, device=device)
+    _delete_device_registration(
+        agent_id, device_id, expected_access_token_hash=expected
+    )
     return {"status": "removed"}
 
 
@@ -921,6 +1003,7 @@ async def _authenticate_agent(
         _decode_public_key(agent["publicKey"]).verify(_decode_signature(signature), message)
     except (InvalidSignature, ValueError, KeyError) as exc:
         raise HTTPException(status_code=401, detail="Invalid Agent signature") from exc
+    await _require_replay_protected_signature(agent_id, agent, request)
     if touch_presence:
         db.collection("agents").document(agent_id).update(
             {"lastSeenAt": firestore.SERVER_TIMESTAMP}
@@ -978,10 +1061,19 @@ def _optional_identifier(value: object) -> str:
 
 def _client_key(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
-    candidate = forwarded.split(",", 1)[0].strip() if forwarded else ""
-    if candidate:
-        return candidate[:64]
-    return str(request.client.host if request.client else "unknown")[:64]
+    hops = (
+        [item.strip() for item in forwarded.split(",") if item.strip()]
+        if _trust_forwarded_for else []
+    )
+    # Cloud Run appends its proxy hop. The first value is caller-controlled;
+    # use the address immediately before the trusted proxy when available.
+    candidate = hops[-2] if len(hops) >= 2 else str(
+        request.client.host if request.client else "unknown"
+    )
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return "unknown"
 
 
 def _consume_window(
@@ -1037,6 +1129,30 @@ def _verify_public_key_request(public_key: str, request: Request) -> None:
         raise HTTPException(
             status_code=401, detail="Invalid activation signature"
         ) from exc
+    nonce = request.headers.get("x-pbxsense-nonce", "")
+    signature_v2 = request.headers.get("x-pbxsense-signature-v2", "")
+    if not 16 <= len(nonce) <= 96 or not nonce.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(status_code=401, detail="Invalid activation nonce")
+    digest = hashlib.sha256(raw_body).hexdigest()
+    v2_message = (
+        f"{timestamp}\n{nonce}\n{request.method.upper()}\n{request.url.path}\n{digest}"
+    ).encode("utf-8")
+    try:
+        _decode_public_key(public_key).verify(
+            _decode_signature(signature_v2), v2_message
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise HTTPException(
+            status_code=401, detail="Invalid secure activation signature"
+        ) from exc
+    nonce_id = hashlib.sha256(f"{public_key}:{nonce}".encode("utf-8")).hexdigest()
+    try:
+        db.collection("activationNonces").document(nonce_id).create({
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "expiresAt": datetime.now(timezone.utc) + timedelta(minutes=10),
+        })
+    except AlreadyExists as exc:
+        raise HTTPException(status_code=409, detail="Replayed activation request") from exc
 
 
 def _sign_enrollment_ticket(payload: dict[str, object]) -> str:
@@ -1092,44 +1208,49 @@ def _verify_enrollment_ticket(ticket: str) -> dict[str, object]:
     }
 
 
-def _require_device_capacity(agent_id: str) -> None:
-    devices = (
-        db.collection("agents")
-        .document(agent_id)
-        .collection("devices")
-        .limit(MAX_DEVICES_PER_AGENT)
-        .stream()
-    )
-    if sum(1 for _ in devices) >= MAX_DEVICES_PER_AGENT:
-        raise HTTPException(
-            status_code=409,
-            detail=f"This Agent has reached its {MAX_DEVICES_PER_AGENT}-app limit",
-        )
-
-
 def _delete_device_registration(
     agent_id: str,
     device_id: str,
     *,
-    device: dict[str, Any] | None = None,
+    expected_access_token_hash: str = "",
 ) -> None:
     device_ref = (
         db.collection("agents").document(agent_id)
         .collection("devices").document(device_id)
     )
-    if device is None:
-        snapshot = device_ref.get()
-        device = (snapshot.to_dict() or {}) if snapshot.exists else {}
-    fcm_token = str(device.get("fcmToken", ""))
-    device_ref.delete()
-    if not fcm_token:
-        return
-    token_ref = db.collection("deviceTokens").document(
-        hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
+    _delete_device_registration_transaction(
+        db.transaction(), device_ref, expected_access_token_hash
     )
-    pointer = token_ref.get()
-    if pointer.exists and str((pointer.to_dict() or {}).get("devicePath", "")) == device_ref.path:
-        token_ref.delete()
+
+
+@firestore.transactional
+def _delete_device_registration_transaction(
+    transaction: Any, device_ref: Any, expected_access_token_hash: str
+) -> None:
+    snapshot = device_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return
+    device = snapshot.to_dict() or {}
+    if expected_access_token_hash and not hmac.compare_digest(
+        str(device.get("accessTokenHash", "")), expected_access_token_hash
+    ):
+        raise HTTPException(status_code=409, detail="Paired app changed; retry removal")
+    fcm_token = str(device.get("fcmToken", ""))
+    token_ref = (
+        db.collection("deviceTokens").document(
+            hashlib.sha256(fcm_token.encode("utf-8")).hexdigest()
+        )
+        if fcm_token else None
+    )
+    pointer = token_ref.get(transaction=transaction) if token_ref else None
+    transaction.delete(device_ref)
+    if (
+        token_ref is not None
+        and pointer is not None
+        and pointer.exists
+        and str((pointer.to_dict() or {}).get("devicePath", "")) == device_ref.path
+    ):
+        transaction.delete(token_ref)
 
 
 def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], responses: list[Any]) -> int:
@@ -1139,7 +1260,7 @@ def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], respons
             continue
         device_id = str(device.get("_documentId", ""))
         if device_id:
-            _delete_device_registration(agent_id, device_id, device=device)
+            _delete_device_registration(agent_id, device_id)
             removed += 1
     return removed
 
@@ -1245,13 +1366,22 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 
 def _admin_authenticated(request: Request) -> bool:
-    supplied = request.headers.get("x-pbxsense-admin-token", "")
-    if not supplied:
-        supplied = request.cookies.get(_admin_cookie, "")
-    return bool(
-        _admin_token
-        and hmac.compare_digest(supplied, _admin_token)
+    header_token = request.headers.get("x-pbxsense-admin-token", "")
+    cookie_token = request.cookies.get(_admin_cookie, "")
+    return bool(_admin_token) and (
+        hmac.compare_digest(header_token, _admin_token)
+        or hmac.compare_digest(cookie_token, _admin_cookie_value())
     )
+
+
+def _admin_cookie_value() -> str:
+    if not _admin_token:
+        return ""
+    return hmac.new(
+        _admin_token.encode("utf-8"),
+        b"pbxsense-relay-admin-cookie-v1",
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _require_admin(request: Request) -> None:

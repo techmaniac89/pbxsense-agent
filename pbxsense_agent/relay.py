@@ -827,7 +827,7 @@ class AgentRelay:
         payload: dict[str, object],
         *,
         signed: bool,
-        replay_protected: bool = False,
+        replay_protected: bool = True,
     ) -> dict[str, Any]:
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -848,8 +848,12 @@ class AgentRelay:
                 })
         request = urllib.request.Request(f"{self._url}{path}", data=raw, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
-                decoded = json.loads(response.read().decode("utf-8"))
+            # __init__ accepts only HTTPS, plus explicit loopback HTTP for development.
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:  # nosec B310
+                response_body = response.read(5 * 1024 * 1024 + 1)
+                if len(response_body) > 5 * 1024 * 1024:
+                    raise OSError("Relay response exceeds the 5 MiB safety limit")
+                decoded = json.loads(response_body.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:200]

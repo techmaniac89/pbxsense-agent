@@ -4,9 +4,10 @@ import json
 import ssl
 import time
 from datetime import datetime
+from collections.abc import Iterator
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .history import CdrCall, VoicemailMessage
@@ -17,6 +18,25 @@ from .version import AGENT_VERSION
 
 class YeastarError(OSError):
     pass
+
+
+MAX_RECORDING_BYTES = 256 * 1024 * 1024
+MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _bounded_recording_chunks(response: Any) -> Iterator[bytes]:
+    total = 0
+    try:
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_RECORDING_BYTES:
+                raise YeastarError("Yeastar recording exceeds the 256 MiB safety limit")
+            yield chunk
+    finally:
+        response.close()
 
 
 class YeastarClient:
@@ -64,6 +84,16 @@ class YeastarClient:
             "tokenAccepted": False,
             "apiReachable": False,
         }
+        if self._settings.yeastar_base_url.lower().startswith("http://"):
+            result["securityWarning"] = (
+                "Yeastar API uses plaintext HTTP; credentials and PBX data are "
+                "vulnerable to interception."
+            )
+        elif not self._settings.yeastar_verify_tls:
+            result["securityWarning"] = (
+                "TLS certificate verification is disabled; credentials and PBX data "
+                "are vulnerable to interception."
+            )
         try:
             self._api("system/information")
             result["tokenAccepted"] = True
@@ -73,22 +103,30 @@ class YeastarClient:
         result["ok"] = result["apiReachable"] is True
         return result
 
-    def download_recording(self, recording_id: str) -> tuple[bytes, str, str]:
+    def download_recording(self, recording_id: str) -> tuple[Iterator[bytes], str, str]:
         response = self._api("recording/download", {"file": recording_id})
         resource = _string(response, "download_resource_url")
         if not resource:
             raise YeastarError("Yeastar did not return a recording download URL")
         separator = "&" if "?" in resource else "?"
-        url = f"{self._settings.yeastar_base_url}{resource}{separator}access_token={self._token()}"
+        url = _validated_http_url(
+            f"{self._settings.yeastar_base_url}{resource}{separator}access_token={self._token()}"
+        )
         request = Request(url, headers={"User-Agent": "PBXSense-Agent"})
         try:
-            context = None if self._settings.yeastar_verify_tls else ssl._create_unverified_context()
-            with urlopen(request, timeout=self._settings.timeout_seconds, context=context) as result:
-                return (
-                    result.read(),
-                    _string(response, "file") or recording_id,
-                    result.headers.get_content_type(),
-                )
+            # Legacy PBXs may explicitly disable verification; diagnostics keep
+            # this visible and the secure default remains enabled.
+            context = None if self._settings.yeastar_verify_tls else ssl._create_unverified_context()  # nosec B323
+            result = urlopen(request, timeout=self._settings.timeout_seconds, context=context)  # nosec B310
+            content_length = result.headers.get("Content-Length", "")
+            if content_length.isdigit() and int(content_length) > MAX_RECORDING_BYTES:
+                result.close()
+                raise YeastarError("Yeastar recording exceeds the 256 MiB safety limit")
+            return (
+                _bounded_recording_chunks(result),
+                _string(response, "file") or recording_id,
+                result.headers.get_content_type(),
+            )
         except (HTTPError, URLError, TimeoutError) as exc:
             raise YeastarError(f"Yeastar recording download failed: {exc}") from exc
 
@@ -270,7 +308,9 @@ class YeastarClient:
         payload: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         query = f"?{urlencode(params)}" if params else ""
-        url = f"{self._settings.yeastar_base_url}/openapi/{self._settings.yeastar_api_version}/{endpoint}{query}"
+        url = _validated_http_url(
+            f"{self._settings.yeastar_base_url}/openapi/{self._settings.yeastar_api_version}/{endpoint}{query}"
+        )
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = Request(
             url,
@@ -279,9 +319,15 @@ class YeastarClient:
             headers={"User-Agent": "PBXSense-Agent", "Content-Type": "application/json"},
         )
         try:
-            context = None if self._settings.yeastar_verify_tls else ssl._create_unverified_context()
-            with urlopen(request, timeout=self._settings.timeout_seconds, context=context) as response:
-                result = json.loads(response.read().decode("utf-8"))
+            context = None if self._settings.yeastar_verify_tls else ssl._create_unverified_context()  # nosec B323
+            with urlopen(request, timeout=self._settings.timeout_seconds, context=context) as response:  # nosec B310
+                content_length = response.headers.get("Content-Length", "")
+                if content_length.isdigit() and int(content_length) > MAX_API_RESPONSE_BYTES:
+                    raise YeastarError("Yeastar API response exceeds the 8 MiB safety limit")
+                response_body = response.read(MAX_API_RESPONSE_BYTES + 1)
+                if len(response_body) > MAX_API_RESPONSE_BYTES:
+                    raise YeastarError("Yeastar API response exceeds the 8 MiB safety limit")
+                result = json.loads(response_body.decode("utf-8"))
         except HTTPError as exc:
             raise YeastarError(f"Yeastar API {endpoint} failed: HTTP {exc.code}") from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -293,6 +339,15 @@ class YeastarClient:
                 f"Yeastar API {endpoint} failed: {_string(result, 'errmsg') or result.get('errcode')}"
             )
         return result
+
+
+def _validated_http_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise YeastarError("Yeastar URL must use HTTP or HTTPS and include a host")
+    if parsed.username or parsed.password:
+        raise YeastarError("Yeastar URL must not contain embedded credentials")
+    return value
 
 
 def _channels_from_call_response(response: dict[str, Any]) -> list[AmiChannel]:

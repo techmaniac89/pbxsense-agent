@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
+import re
 import ssl
 import time
 from collections import defaultdict
@@ -8,7 +10,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from xml.etree import ElementTree as ET
+
+from defusedxml import ElementTree as ET
 
 from .pulse import AmiEndpoint, AmiSnapshot
 from .history import CdrCall
@@ -19,6 +22,9 @@ from .version import AGENT_VERSION
 
 class CucmError(OSError):
     pass
+
+
+MAX_SOAP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class CucmClient:
@@ -84,6 +90,11 @@ class CucmClient:
             "axlReachable": False,
             "risPortReachable": False,
         }
+        if not self._settings.cucm_verify_tls:
+            result["securityWarning"] = (
+                "TLS certificate verification is disabled; CUCM credentials and "
+                "cluster data are vulnerable to interception."
+            )
         try:
             self._directory_inventory()
             result["axlReachable"] = True
@@ -337,8 +348,10 @@ class CucmClient:
         credential = base64.b64encode(
             f"{self._settings.cucm_username}:{self._settings.cucm_password}".encode()
         ).decode("ascii")
+        host = _validated_cucm_host(self._settings.cucm_host)
+        url_host = f"[{host}]" if ":" in host else host
         request = Request(
-            f"https://{self._settings.cucm_host}:8443{path}",
+            f"https://{url_host}:8443{path}",
             data=envelope,
             method="POST",
             headers={
@@ -348,14 +361,39 @@ class CucmClient:
                 "User-Agent": "PBXSense-Agent",
             },
         )
-        context = None if self._settings.cucm_verify_tls else ssl._create_unverified_context()
+        # Verification can be disabled only by explicit legacy-PBX configuration;
+        # diagnostics retain a persistent warning when it is.
+        context = None if self._settings.cucm_verify_tls else ssl._create_unverified_context()  # nosec B323
         try:
-            with urlopen(request, timeout=self._settings.timeout_seconds, context=context) as response:
-                return ET.fromstring(response.read())
+            # The URL is constructed with a fixed HTTPS scheme, port, and path.
+            with urlopen(request, timeout=self._settings.timeout_seconds, context=context) as response:  # nosec B310
+                content_length = response.headers.get("Content-Length", "")
+                if content_length.isdigit() and int(content_length) > MAX_SOAP_RESPONSE_BYTES:
+                    raise CucmError("CUCM SOAP response exceeds the 8 MiB safety limit")
+                payload = response.read(MAX_SOAP_RESPONSE_BYTES + 1)
+                if len(payload) > MAX_SOAP_RESPONSE_BYTES:
+                    raise CucmError("CUCM SOAP response exceeds the 8 MiB safety limit")
+                return ET.fromstring(payload)
         except HTTPError as exc:
             raise CucmError(f"CUCM SOAP request failed: HTTP {exc.code}") from exc
         except (URLError, TimeoutError, ET.ParseError, ssl.SSLError) as exc:
             raise CucmError(f"CUCM SOAP request failed: {exc}") from exc
+
+
+def _validated_cucm_host(value: str) -> str:
+    host = value.strip().strip("[]")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if len(host) > 253 or not re.fullmatch(
+        r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+        host,
+    ):
+        raise CucmError("CUCM host is not a valid hostname or IP address")
+    return host
 
 
 def _merge_inventory_and_registration(

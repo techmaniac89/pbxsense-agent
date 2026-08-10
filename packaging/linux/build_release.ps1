@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.30-beta",
+    [string]$Version = "0.5.32-beta",
     [string]$OutputDir = ""
 )
 
@@ -45,6 +45,7 @@ $AgentEntries = @(
     "scripts",
     "docs",
     "requirements.txt",
+    "requirements.lock",
     ".env.example",
     "CODEX.md",
     "README.md",

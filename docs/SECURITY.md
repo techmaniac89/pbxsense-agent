@@ -39,7 +39,9 @@ operator `ping`/`pong` smoke test.
 
 ## Agent Token
 
-Set `PBXSENSE_AGENT_TOKEN` for production and LAN deployments.
+`PBXSENSE_AGENT_TOKEN` is mandatory for every non-mock deployment. The Agent
+refuses to start without it; the native and Docker setup wizards generate it
+automatically.
 
 Native and Docker installers print a complete authenticated admin URL instead
 of asking the administrator to transcribe the token. Successful access removes
@@ -64,9 +66,11 @@ Push registration bodies and relay text fields have explicit size limits.
 Oversized request bodies are rejected before they can be persisted to the
 Agent outbox, Firestore, or Firebase Cloud Messaging.
 
-Release dependencies require `cryptography` 48.0.1 or newer within the current
-major line. This floor is intentional: older 45.x resolution was affected by
-published security advisories and must not be restored by a compatibility cap.
+Release dependencies require `cryptography` 50.x. Versions before 49/50 are
+affected by published 2026 advisories. Production installers, containers, and
+release CI consume the generated `requirements.lock` files with
+`--require-hashes`; edit the input `requirements.txt` files and regenerate both
+locks together when updating dependencies.
 
 Generate a token:
 
@@ -115,11 +119,23 @@ PBXSense app with the new pairing URL or QR payload.
 The installer creates a dedicated `pbxsense` service user and runs the Agent
 from `/opt/pbxsense-agent`.
 
-The systemd unit uses:
+The installed application tree is root-owned and read-only to the service user.
+Only `/var/lib/pbxsense-agent` and `/var/log/pbxsense-agent` are writable. The
+systemd unit also uses:
 
 ```text
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ```
 
 Do not run the Agent as root outside the installer. The service only needs
@@ -159,6 +175,14 @@ volumes:
 
 Keep `.env` out of source control. It contains PBX credentials and the Agent
 token.
+
+The supplied Compose profile runs with a read-only root filesystem, drops all
+Linux capabilities, enables `no-new-privileges`, and keeps only the Agent data
+and log volumes writable.
+
+CUCM and Yeastar HTTPS certificate verification should remain enabled. If an
+operator disables it for a legacy PBX, diagnostics retain a security warning;
+use a trusted internal CA instead of leaving verification disabled.
 
 Cisco's JTAPI Client jars are cluster-supplied proprietary dependencies and
 are intentionally not committed, packaged, or uploaded in the Docker build

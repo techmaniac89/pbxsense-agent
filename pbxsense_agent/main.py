@@ -11,7 +11,8 @@ from html import escape
 from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import StreamingResponse
 
 from .connectors import connector_for_settings
 from .cucm import enrich_cucm_trunks_with_history
@@ -127,6 +128,11 @@ async def renew_local_admin_session(request: Request, call_next):
 @app.on_event("startup")
 async def start_relay_publisher() -> None:
     global _internet_relay_task, _relay_heartbeat_task, _relay_publish_task, _snapshot_task
+    if settings.mode != "mock" and not settings.token:
+        raise RuntimeError(
+            "PBXSENSE_AGENT_TOKEN is required outside mock mode; run the installer "
+            "or generate a token before starting the Agent"
+        )
     _snapshot_task = asyncio.create_task(_snapshot_loop())
     if settings.relay_url:
         _relay_publish_task = asyncio.create_task(_relay_publish_loop())
@@ -882,10 +888,11 @@ def recording(recording_id: str, request: Request):
             content, filename, media_type = connector.download_recording(recording_id)
         except OSError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return Response(
+        safe_filename = filename.replace('"', "'").replace("\r", "").replace("\n", "")
+        return StreamingResponse(
             content=content,
             media_type=media_type if media_type != "application/octet-stream" else "audio/wav",
-            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+            headers={"Content-Disposition": f'inline; filename="{safe_filename}"'},
         )
 
     root = _recordings_path()
@@ -1158,9 +1165,15 @@ async def revoke_push_device(request: Request) -> dict[str, bool]:
 async def _bounded_json_object(
     request: Request, *, max_bytes: int = 64 * 1024
 ) -> dict[str, object]:
-    raw = await request.body()
-    if len(raw) > max_bytes:
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > max_bytes:
         raise HTTPException(status_code=413, detail="Request body is too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise HTTPException(status_code=413, detail="Request body is too large")
+    raw = bytes(body)
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

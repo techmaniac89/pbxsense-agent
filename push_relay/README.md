@@ -123,14 +123,31 @@ be used to sign another ticket.
 
 The relay additionally enforces:
 
-- six activation requests per source address per minute per instance;
+- 60 activation requests per trusted source address per minute and 12 per
+  Agent public key per instance;
 - 120 total requests per source address per minute per instance;
 - ten paired apps per Agent by default;
 - 60 notification events per Agent per hour per instance;
 - a 2 MiB encrypted-snapshot request limit;
 - bounded identifiers before Agent/device Firestore lookups;
-- signed activation refreshes for existing identities in `ticket`/`closed`
-  mode.
+- nonce-bound signed activation refreshes for every existing Agent identity,
+  including during staged `open` enrollment.
+
+Ticket enrollment fails startup unless `PBXSENSE_RELAY_TICKET_SECRET` is set,
+and it must differ from the administrator token. Administrative browser
+sessions store a derived, eight-hour HttpOnly cookie rather than the raw admin
+token. Signed Agent mutations include a one-time nonce; replayed requests are
+rejected even inside the five-minute timestamp window.
+
+Enable Firestore TTL on the `expiresAt` field for the `activationNonces` and
+`secureNonces` collection groups. The nonce documents are authentication
+state, not usage history, and are safe to delete after their ten-minute replay
+window.
+
+Deploy compatibility note: Agent `0.5.32-beta` sends both the legacy signature
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.5`,
+which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
+signed Relay endpoints after that Relay upgrade.
 
 These application limits complement Cloud Run scaling; they do not replace an
 edge DDoS service for a high-volume public deployment.
@@ -183,7 +200,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.4` provides the encrypted Internet Relay data path and
+Relay service `0.5.5` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -203,7 +220,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.4 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.5 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the

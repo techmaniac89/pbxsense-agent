@@ -400,7 +400,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/vendor/jtapi" /var/lib/pbxsense-agent/cucm/cdr /var/lib/pbxsense-agent/cucm/cmr /var/log/pbxsense-agent
 
-for entry in pbxsense_agent jtapi_bridge scripts docs docker requirements.txt .env.example CODEX.md README.md SECURITY.md; do
+for entry in pbxsense_agent jtapi_bridge scripts docs docker requirements.txt requirements.lock .env.example CODEX.md README.md; do
   if [ -e "$SOURCE_DIR/$entry" ]; then
     rm -rf "$INSTALL_DIR/$entry"
     cp -R "$SOURCE_DIR/$entry" "$INSTALL_DIR/$entry"
@@ -472,10 +472,11 @@ if [ "$(env_value CUCM_JTAPI_ENABLED)" = "true" ]; then
 fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
-"$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/.venv/bin/python" -m pip install --require-hashes -r "$INSTALL_DIR/requirements.lock"
 
-chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" /var/lib/pbxsense-agent /var/log/pbxsense-agent
+chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
+chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/pbxsense-agent /var/log/pbxsense-agent
 # Remove the retired access helper when upgrading from Agent 0.5.5/0.5.6.
 rm -f /usr/local/bin/pbxsense-agent
 chmod 600 "$ENV_FILE"
@@ -494,12 +495,26 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
 Environment=PBXSENSE_AGENT_PORT=$AGENT_PORT
+Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=$ENV_FILE
 ExecStart=$INSTALL_DIR/.venv/bin/uvicorn pbxsense_agent.main:app --host 0.0.0.0 --port \${PBXSENSE_AGENT_PORT}
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/pbxsense-agent /var/log/pbxsense-agent
 
 [Install]
 WantedBy=multi-user.target
