@@ -102,7 +102,7 @@ jobs:
           $arguments = @("release", "create", $env:RELEASE_TAG) + $assets + @(
             "--repo", $env:GITHUB_REPOSITORY,
             "--target", $env:GITHUB_SHA,
-            "--title", "PBXSense Agent $env:RELEASE_VERSION",
+            "--title", $env:RELEASE_VERSION,
             "--generate-notes"
           )
           gh @arguments
