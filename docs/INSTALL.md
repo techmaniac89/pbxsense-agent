@@ -15,11 +15,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.30-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.31-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.5.30-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.5.30-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.5.31-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.5.31-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -266,6 +266,8 @@ CUCM_USERNAME=pbxsense-readonly
 CUCM_PASSWORD=<application-user password>
 CUCM_AXL_VERSION=15.0
 CUCM_VERIFY_TLS=true
+CUCM_PERFMON_ENABLED=true
+CUCM_PERFMON_HOST=cucm-subscriber.example.com
 CUCM_CDR_PATH=/var/lib/pbxsense-agent/cucm/cdr
 CUCM_CMR_PATH=/var/lib/pbxsense-agent/cucm/cmr
 CUCM_JTAPI_ENABLED=false
@@ -275,6 +277,15 @@ CUCM_JTAPI_CLASSPATH=/opt/pbxsense-agent/vendor/jtapi/*
 Enable the Cisco AXL Web Service and Cisco RIS Data Collector services. Import
 the CUCM certificate authority into the Agent host trust store; disabling TLS
 verification is intended only for temporary diagnosis.
+
+SIP-trunk monitoring also reads AXL SIP-trunk/profile inventory and RisPortExt
+state. Enable Outbound OPTIONS Ping on the trunk's SIP profile so Registered,
+Partially Registered, and Out of Service are trustworthy reachability evidence.
+PerfMon collection is enabled by default and reads `Cisco SIP` call counters
+from `CUCM_PERFMON_HOST`, falling back to `CUCM_HOST`; disable it explicitly if
+the application user cannot access that service. PerfMon and recent completed
+CDRs corroborate working call processing but never override a current explicit
+out-of-service state.
 
 Configure CUCM CDR Management to deliver CDR and CMR CSV files to an SFTP
 inbox exposed at the configured paths. PBXSense reads files already present in

@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .connectors import connector_for_settings
+from .cucm import enrich_cucm_trunks_with_history
 from .diagnostics import connector_diagnostic_statuses
 from .history import (
     cucm_history_diagnostics,
@@ -1005,11 +1006,14 @@ def _refresh_home_state_locked() -> tuple:
                 )
             _history_refreshed_at = now_monotonic
         recent_calls, voicemails, security_events = _cached_history
+        endpoints = snapshot.endpoints
+        if settings.pbx_type == "cucm":
+            endpoints = enrich_cucm_trunks_with_history(endpoints, recent_calls)
         snapshot = snapshot.__class__(
             reachable=snapshot.reachable,
             agent_version=snapshot.agent_version,
             channels=snapshot.channels,
-            endpoints=snapshot.endpoints,
+            endpoints=endpoints,
             queues=snapshot.queues,
             recent_calls=recent_calls,
             voicemails=voicemails,

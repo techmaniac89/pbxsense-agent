@@ -5,11 +5,13 @@ import ssl
 import time
 from collections import defaultdict
 from dataclasses import replace
+from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
 from .pulse import AmiEndpoint, AmiSnapshot
+from .history import CdrCall
 from .jtapi import JtapiBridge
 from .settings import AgentSettings
 from .version import AGENT_VERSION
@@ -35,6 +37,10 @@ class CucmClient:
         self._cached_snapshot: AmiSnapshot | None = None
         self._refresh_after = 0.0
         self._jtapi = JtapiBridge(settings)
+        self._trunk_error = ""
+        self._perfmon_error = ""
+        self._perfmon_attempted = False
+        self._previous_perfmon: dict[str, int] = {}
 
     def snapshot(self) -> AmiSnapshot:
         if self._cached_snapshot and time.monotonic() < self._refresh_after:
@@ -43,6 +49,13 @@ class CucmClient:
             inventory = self._directory_inventory()
             registration = self._registration_status()
             endpoints = _merge_inventory_and_registration(inventory, registration)
+            try:
+                endpoints.extend(self._trunk_endpoints())
+                self._trunk_error = ""
+            except OSError as exc:
+                # Trunk serviceability is additive. A missing optional service
+                # must not make phone inventory and registration unreachable.
+                self._trunk_error = str(exc)
             result = AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -81,7 +94,23 @@ class CucmClient:
             result["risPortReachable"] = True
         except OSError as exc:
             result["risPortError"] = str(exc)
+        try:
+            self._trunk_endpoints()
+            self._trunk_error = ""
+        except OSError as exc:
+            self._trunk_error = str(exc)
         result.update(self._jtapi.diagnostics())
+        result["sipTrunkEvidenceAvailable"] = not bool(self._trunk_error)
+        if self._trunk_error:
+            result["sipTrunkError"] = self._trunk_error
+        result["perfmonConfigured"] = self._settings.cucm_perfmon_enabled
+        result["perfmonQueried"] = self._perfmon_attempted
+        result["perfmonReachable"] = (
+            not self._settings.cucm_perfmon_enabled
+            or (self._perfmon_attempted and not bool(self._perfmon_error))
+        )
+        if self._perfmon_error:
+            result["perfmonError"] = self._perfmon_error
         result["ok"] = (
             result["axlReachable"] is True and result["risPortReachable"] is True
         )
@@ -134,21 +163,167 @@ class CucmClient:
             body,
             "SelectCmDevice",
         )
-        devices: dict[str, dict[str, str]] = {}
-        for device in _elements(root, "CmDevice"):
-            name = _child_text(device, "Name")
+        return _risport_devices(root)
+
+    def _trunk_endpoints(self) -> list[AmiEndpoint]:
+        inventory = self._sip_trunk_inventory()
+        if not inventory:
+            return []
+        names = [item["name"] for item in inventory if item.get("name")]
+        service = self._trunk_registration_status(names)
+        perfmon = self._sip_perfmon_counters() if self._settings.cucm_perfmon_enabled else {}
+        endpoints: list[AmiEndpoint] = []
+        for item in inventory:
+            name = item["name"]
+            status = service.get(name, {})
+            options_ping = item.get("options_ping", "unknown")
+            health, confidence = _cucm_trunk_health(
+                status.get("status", ""),
+                options_ping=options_ping,
+            )
+            evidence = [f"CUCM service state: {status.get('status', 'Unknown') or 'Unknown'}"]
+            evidence.append(
+                "SIP OPTIONS Ping enabled"
+                if options_ping == "enabled"
+                else "SIP OPTIONS Ping disabled"
+                if options_ping == "disabled"
+                else "SIP OPTIONS Ping configuration unavailable"
+            )
+            counters = _perfmon_for_trunk(perfmon, name)
+            active = counters.get("CallsActive", 0)
+            completed = counters.get("CallsCompleted", 0)
+            previous_completed = self._previous_perfmon.get(
+                f"{name}|CallsCompleted", completed
+            )
+            if active > 0 or completed > previous_completed:
+                health, confidence = "healthy", "high"
+                evidence.append(
+                    "Active SIP call observed" if active > 0
+                    else "A SIP call completed since the previous sample"
+                )
+            for counter in ("CallsActive", "CallsAttempted", "CallsCompleted"):
+                if counter in counters:
+                    evidence.append(f"PerfMon {counter}: {counters[counter]}")
+                    self._previous_perfmon[f"{name}|{counter}"] = counters[counter]
+            endpoints.append(AmiEndpoint(
+                extension=name,
+                device_state=status.get("status", "Unknown") or "Unknown",
+                active_channels=max(0, active),
+                label=item.get("description", "") or name,
+                role="trunk",
+                connection_type="SIP",
+                health_status=health,
+                health_confidence=confidence,
+                health_evidence=tuple(evidence),
+            ))
+        return endpoints
+
+    def _sip_trunk_inventory(self) -> list[dict[str, str]]:
+        version = self._settings.cucm_axl_version
+        body = f"""
+          <axl:listSipTrunk xmlns:axl="http://www.cisco.com/AXL/API/{version}">
+            <searchCriteria><name>%</name></searchCriteria>
+            <returnedTags>
+              <name/><description/><sipProfileName/><destinations>
+                <destination><addressIpv4/><addressIpv6/><port/><sortOrder/></destination>
+              </destinations>
+            </returnedTags>
+          </axl:listSipTrunk>
+        """
+        root = self._soap("/axl/", body, f"CUCM:DB ver={version} listSipTrunk")
+        rows: list[dict[str, str]] = []
+        for trunk in _elements(root, "sipTrunk"):
+            name = _child_text(trunk, "name")
             if not name:
                 continue
-            ip = ""
-            ip_nodes = _elements(device, "IPAddress")
-            if ip_nodes:
-                ip = _child_text(ip_nodes[0], "IP") or (ip_nodes[0].text or "").strip()
-            devices[name] = {
-                "status": _child_text(device, "Status"),
-                "ip": ip,
-                "model": _child_text(device, "Model"),
-            }
-        return devices
+            profile = _child_text(trunk, "sipProfileName")
+            rows.append({
+                "name": name,
+                "description": _child_text(trunk, "description"),
+                "sip_profile": profile,
+                "options_ping": self._sip_profile_options_ping(profile),
+            })
+        return rows
+
+    def _sip_profile_options_ping(self, profile: str) -> str:
+        if not profile:
+            return "unknown"
+        version = self._settings.cucm_axl_version
+        body = f"""
+          <axl:getSipProfile xmlns:axl="http://www.cisco.com/AXL/API/{version}">
+            <name>{_xml_escape(profile)}</name>
+            <returnedTags><enableOutboundOptionsPing/></returnedTags>
+          </axl:getSipProfile>
+        """
+        try:
+            root = self._soap("/axl/", body, f"CUCM:DB ver={version} getSipProfile")
+        except OSError:
+            return "unknown"
+        value = _child_text(root, "enableOutboundOptionsPing").strip().lower()
+        if value in {"true", "t", "1", "yes"}:
+            return "enabled"
+        if value in {"false", "f", "0", "no"}:
+            return "disabled"
+        return "unknown"
+
+    def _trunk_registration_status(
+        self,
+        names: list[str],
+    ) -> dict[str, dict[str, str]]:
+        if not names:
+            return {}
+        items = "".join(
+            f"<ns:item><ns:Item>{_xml_escape(name)}</ns:Item></ns:item>"
+            for name in names[:1000]
+        )
+        body = f"""
+          <ns:SelectCmDeviceExt xmlns:ns="http://schemas.cisco.com/ast/soap">
+            <ns:StateInfo></ns:StateInfo>
+            <ns:CmSelectionCriteria>
+              <ns:MaxReturnedDevices>1000</ns:MaxReturnedDevices>
+              <ns:DeviceClass>SIP Trunk</ns:DeviceClass>
+              <ns:Model>255</ns:Model><ns:Status>Any</ns:Status>
+              <ns:NodeName></ns:NodeName><ns:SelectBy>Name</ns:SelectBy>
+              <ns:SelectItems>{items}</ns:SelectItems>
+              <ns:Protocol>Any</ns:Protocol><ns:DownloadStatus>Any</ns:DownloadStatus>
+            </ns:CmSelectionCriteria>
+          </ns:SelectCmDeviceExt>
+        """
+        root = self._soap(
+            "/realtimeservice2/services/RISService70",
+            body,
+            "SelectCmDeviceExt",
+        )
+        return _risport_devices(root)
+
+    def _sip_perfmon_counters(self) -> dict[str, int]:
+        self._perfmon_attempted = True
+        host = self._settings.cucm_perfmon_host or self._settings.cucm_host
+        body = f"""
+          <ns:perfmonCollectCounterData xmlns:ns="http://schemas.cisco.com/ast/soap">
+            <ns:Host>{_xml_escape(host)}</ns:Host><ns:Object>Cisco SIP</ns:Object>
+          </ns:perfmonCollectCounterData>
+        """
+        try:
+            root = self._soap(
+                "/perfmonservice2/services/PerfmonService",
+                body,
+                "perfmonCollectCounterData",
+            )
+            self._perfmon_error = ""
+        except OSError as exc:
+            self._perfmon_error = str(exc)
+            return {}
+        counters: dict[str, int] = {}
+        for item in _elements(root, "perfmonCollectCounterDataReturn"):
+            if _child_text(item, "CStatus") not in {"0", "1"}:
+                continue
+            name = _child_text(item, "Name")
+            try:
+                counters[name] = int(_child_text(item, "Value"))
+            except ValueError:
+                continue
+        return counters
 
     def _soap(self, path: str, operation: str, action: str) -> ET.Element:
         if not self._settings.cucm_host:
@@ -207,6 +382,125 @@ def _merge_inventory_and_registration(
             ip_address=ip,
         ))
     return endpoints
+
+
+def enrich_cucm_trunks_with_history(
+    endpoints: list[AmiEndpoint],
+    calls: list[CdrCall],
+    *,
+    now: datetime | None = None,
+    evidence_window: timedelta = timedelta(minutes=15),
+) -> list[AmiEndpoint]:
+    """Corroborate SIP-trunk health with recent completed CUCM CDRs.
+
+    A completed call proves that the trunk processed traffic recently, but it
+    does not override an explicit current out-of-service RisPort state.
+    """
+    current = now or datetime.now()
+    completed_devices: set[str] = set()
+    for call in calls:
+        if call.disposition != "ANSWERED" or call.duration_seconds <= 0:
+            continue
+        if call.started_at is None:
+            continue
+        call_time = call.started_at
+        comparable_now = current
+        if call_time.tzinfo is not None and comparable_now.tzinfo is None:
+            comparable_now = comparable_now.replace(tzinfo=call_time.tzinfo)
+        elif call_time.tzinfo is None and comparable_now.tzinfo is not None:
+            call_time = call_time.replace(tzinfo=comparable_now.tzinfo)
+        if timedelta(0) <= comparable_now - call_time <= evidence_window:
+            completed_devices.update(
+                value for value in (call.channel, call.destination_channel) if value
+            )
+
+    enriched: list[AmiEndpoint] = []
+    for endpoint in endpoints:
+        matched = endpoint.role == "trunk" and any(
+            _same_cucm_identity(endpoint.extension, device)
+            for device in completed_devices
+        )
+        if matched and endpoint.health_status != "down":
+            evidence = tuple(dict.fromkeys((
+                *endpoint.health_evidence,
+                "A completed CUCM CDR used this trunk within the last 15 minutes",
+            )))
+            enriched.append(replace(
+                endpoint,
+                health_status="healthy",
+                health_confidence="high",
+                health_evidence=evidence,
+            ))
+        else:
+            enriched.append(endpoint)
+    return enriched
+
+
+def _risport_devices(root: ET.Element) -> dict[str, dict[str, str]]:
+    devices: dict[str, dict[str, str]] = {}
+    for device in _elements(root, "CmDevice"):
+        name = _child_text(device, "Name")
+        if not name:
+            continue
+        ip = ""
+        ip_nodes = _elements(device, "IPAddress")
+        if ip_nodes:
+            ip = _child_text(ip_nodes[0], "IP") or (ip_nodes[0].text or "").strip()
+        devices[name] = {
+            "status": _child_text(device, "Status"),
+            "ip": ip,
+            "model": _child_text(device, "Model"),
+        }
+    return devices
+
+
+def _cucm_trunk_health(status: str, *, options_ping: str) -> tuple[str, str]:
+    normalized = "".join(character for character in status.lower() if character.isalnum())
+    if options_ping != "enabled":
+        return "unknown", "low"
+    if normalized in {"registered", "inservice", "fullservice"}:
+        return "healthy", "high"
+    if normalized in {"partiallyregistered", "partialservice", "partiallyinservice"}:
+        return "degraded", "high"
+    if normalized in {"unregistered", "outofservice", "rejected"}:
+        return "down", "high"
+    return "unknown", "low"
+
+
+def _perfmon_for_trunk(counters: dict[str, int], trunk_name: str) -> dict[str, int]:
+    wanted = {"CallsActive", "CallsAttempted", "CallsCompleted"}
+    trunk_identity = _normalized_cucm_identity(trunk_name)
+    matched: dict[str, int] = {}
+    for path, value in counters.items():
+        counter = path.rsplit("\\", 1)[-1]
+        if counter not in wanted:
+            continue
+        marker = "Cisco SIP("
+        start = path.lower().find(marker.lower())
+        if start < 0:
+            continue
+        start += len(marker)
+        end = path.find(")", start)
+        if end < 0:
+            continue
+        instance = _normalized_cucm_identity(path[start:end])
+        if trunk_identity and instance == trunk_identity:
+            matched[counter] = value
+    return matched
+
+
+def _same_cucm_identity(left: str, right: str) -> bool:
+    left_value = _normalized_cucm_identity(left)
+    right_value = _normalized_cucm_identity(right)
+    return bool(left_value and right_value) and (
+        left_value == right_value
+        or left_value in right_value
+        or right_value in left_value
+    )
+
+
+def _normalized_cucm_identity(value: str) -> str:
+    return "".join(character for character in value.lower() if character.isalnum())
 
 
 def _elements(root: ET.Element, local_name: str) -> list[ET.Element]:

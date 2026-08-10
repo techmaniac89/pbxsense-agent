@@ -61,6 +61,8 @@ class AgentSettings:
     cucm_password: str = ""
     cucm_axl_version: str = "15.0"
     cucm_verify_tls: bool = True
+    cucm_perfmon_enabled: bool = True
+    cucm_perfmon_host: str = ""
     cucm_cdr_path: str = "/var/lib/pbxsense-agent/cucm/cdr"
     cucm_cmr_path: str = "/var/lib/pbxsense-agent/cucm/cmr"
     cucm_jtapi_enabled: bool = False
@@ -198,6 +200,8 @@ class AgentSettings:
             cucm_password=os.getenv("CUCM_PASSWORD", ""),
             cucm_axl_version=os.getenv("CUCM_AXL_VERSION", "15.0").strip() or "15.0",
             cucm_verify_tls=_env_bool("CUCM_VERIFY_TLS", True),
+            cucm_perfmon_enabled=_env_bool("CUCM_PERFMON_ENABLED", True),
+            cucm_perfmon_host=os.getenv("CUCM_PERFMON_HOST", "").strip(),
             cucm_cdr_path=os.getenv(
                 "CUCM_CDR_PATH", "/var/lib/pbxsense-agent/cucm/cdr"
             ).strip(),

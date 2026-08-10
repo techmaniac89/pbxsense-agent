@@ -4,13 +4,21 @@ import csv
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from pbxsense_agent.cucm import CucmClient, _merge_inventory_and_registration
+from pbxsense_agent.cucm import (
+    CucmClient,
+    _cucm_trunk_health,
+    _merge_inventory_and_registration,
+    _perfmon_for_trunk,
+    _risport_devices,
+    enrich_cucm_trunks_with_history,
+)
 from pbxsense_agent.engine import build_engine_signals
-from pbxsense_agent.history import read_recent_cucm_calls
+from pbxsense_agent.history import CdrCall, read_recent_cucm_calls
 from pbxsense_agent.jtapi import JtapiBridge, _channel_from_call
-from pbxsense_agent.pulse import AmiChannel
+from pbxsense_agent.pulse import AmiChannel, AmiEndpoint
 from pbxsense_agent.settings import AgentSettings
 
 
@@ -42,6 +50,7 @@ class CucmConnectorTest(unittest.TestCase):
         client = CucmClient(settings)
         client._directory_inventory = lambda: []  # type: ignore[method-assign]
         client._registration_status = lambda: {}  # type: ignore[method-assign]
+        client._trunk_endpoints = lambda: []  # type: ignore[method-assign]
 
         class Calls:
             count = 0
@@ -79,6 +88,64 @@ class CucmConnectorTest(unittest.TestCase):
         self.assertEqual(endpoints[0].device_state, "Reachable")
         self.assertEqual(endpoints[0].ip_address, "10.0.0.12")
         self.assertEqual(endpoints[1].device_state, "Unavailable")
+
+    def test_trunk_health_requires_options_and_preserves_partial_service(self) -> None:
+        self.assertEqual(
+            _cucm_trunk_health("Registered", options_ping="enabled"),
+            ("healthy", "high"),
+        )
+        self.assertEqual(
+            _cucm_trunk_health("PartiallyRegistered", options_ping="enabled"),
+            ("degraded", "high"),
+        )
+        self.assertEqual(
+            _cucm_trunk_health("UnRegistered", options_ping="enabled"),
+            ("down", "high"),
+        )
+        self.assertEqual(
+            _cucm_trunk_health("Registered", options_ping="disabled"),
+            ("unknown", "low"),
+        )
+
+    def test_risport_ext_device_and_perfmon_instance_are_parsed(self) -> None:
+        from xml.etree import ElementTree as ET
+
+        root = ET.fromstring("""
+          <Envelope><CmDevice><Name>SIP_TRUNK_1</Name><Status>Registered</Status>
+          <IPAddress><IP>10.0.0.5</IP></IPAddress><Model>131</Model></CmDevice></Envelope>
+        """)
+        self.assertEqual(_risport_devices(root)["SIP_TRUNK_1"]["ip"], "10.0.0.5")
+        counters = {
+            r"\\cucm\Cisco SIP(SIP_TRUNK_1)\CallsActive": 2,
+            r"\\cucm\Cisco SIP(SIP_TRUNK_1)\CallsCompleted": 41,
+            r"\\cucm\Cisco SIP(OTHER)\CallsActive": 9,
+        }
+        self.assertEqual(
+            _perfmon_for_trunk(counters, "SIP_TRUNK_1"),
+            {"CallsActive": 2, "CallsCompleted": 41},
+        )
+
+    def test_recent_completed_cdr_corroborates_unknown_trunk_but_not_down(self) -> None:
+        now = datetime(2026, 8, 10, 12, 0)
+        calls = [CdrCall(
+            source="1001", destination="18005551212", disposition="ANSWERED",
+            started_at=now - timedelta(minutes=2), duration_seconds=30,
+            destination_channel="SIP_TRUNK_1",
+        )]
+        endpoints = [
+            AmiEndpoint(
+                extension="SIP_TRUNK_1", device_state="Unknown", role="trunk",
+                health_status="unknown", health_confidence="low",
+            ),
+            AmiEndpoint(
+                extension="SIP_TRUNK_1", device_state="OutOfService", role="trunk",
+                health_status="down", health_confidence="high",
+            ),
+        ]
+        enriched = enrich_cucm_trunks_with_history(endpoints, calls, now=now)
+        self.assertEqual(enriched[0].health_status, "healthy")
+        self.assertEqual(enriched[0].health_confidence, "high")
+        self.assertEqual(enriched[1].health_status, "down")
 
     def test_cdr_and_cmr_are_correlated_into_call_quality(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

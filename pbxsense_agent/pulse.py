@@ -724,6 +724,9 @@ def _build_trunks(
         elif health == "healthy":
             status_text = "Working"
             detail = _registered_trunk_detail(endpoint.device_state)
+        elif health == "degraded":
+            status_text = "Partially available"
+            detail = endpoint.device_state or "Some trunk destinations need attention"
         else:
             status_text = "Status unknown"
             detail = "The PBX did not provide enough live health evidence"
@@ -734,10 +737,10 @@ def _build_trunks(
             "statusText": status_text,
             "detail": detail,
             "activeChannels": endpoint.active_channels,
-            "available": health == "healthy",
+            "available": health in {"healthy", "degraded"},
             "healthStatus": health,
             "healthConfidence": endpoint.health_confidence or (
-                "high" if health in {"healthy", "down"} else "low"
+                "high" if health in {"healthy", "degraded", "down"} else "low"
             ),
             "healthEvidence": list(endpoint.health_evidence),
         }
@@ -1053,29 +1056,40 @@ def _trunk_signals(
 ) -> list[dict]:
     name = _extension_name(endpoint.extension, extension_names, endpoint.label)
     health = _trunk_health_state(endpoint)
-    if health in {"down", "unknown"}:
+    if health in {"down", "unknown", "degraded"}:
         unknown = health == "unknown"
+        degraded = health == "degraded"
         return [
             {
                 "id": f"sig_trunk_{endpoint.extension}_unavailable",
-                "kind": "trunk_health_unknown" if unknown else "trunk_unavailable",
+                "kind": (
+                    "trunk_health_unknown" if unknown
+                    else "trunk_degraded" if degraded
+                    else "trunk_unavailable"
+                ),
                 "category": "health",
                 "importance": "important",
                 "state": "active",
                 "title": (
                     f"{_trunk_display_name(name)} health cannot be confirmed."
-                    if unknown else f"{_trunk_display_name(name)} looks unavailable."
+                    if unknown else
+                    f"{_trunk_display_name(name)} is partially available."
+                    if degraded else f"{_trunk_display_name(name)} looks unavailable."
                 ),
                 "body": (
                     "PBXSense is waiting for trustworthy live trunk evidence."
-                    if unknown else "Incoming or outgoing calls through this trunk may be affected."
+                    if unknown else
+                    "Some trunk destinations or call-processing nodes need attention."
+                    if degraded else "Incoming or outgoing calls through this trunk may be affected."
                 ),
                 "timeLabel": "Just now",
                 "actionLabel": None,
                 "why": [
                     (
                         "The PBX stopped providing a conclusive state for this trunk."
-                        if unknown else "The PBX explicitly reported the trunk endpoint as unavailable."
+                        if unknown else
+                        "The PBX reported that only part of this trunk is currently usable."
+                        if degraded else "The PBX explicitly reported the trunk endpoint as unavailable."
                     ),
                     "PBXSense monitors trunks separately from phones and extensions.",
                 ],
@@ -1426,7 +1440,7 @@ def _endpoint_unavailable(endpoint: AmiEndpoint) -> bool:
 
 def _trunk_health_state(endpoint: AmiEndpoint) -> str:
     explicit = endpoint.health_status.strip().lower()
-    if explicit in {"healthy", "down", "unknown"}:
+    if explicit in {"healthy", "degraded", "down", "unknown"}:
         return explicit
     if endpoint.active_channels > 0:
         return "healthy"
