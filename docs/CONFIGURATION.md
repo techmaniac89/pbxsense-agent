@@ -35,6 +35,14 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_INTERNET_RELAY_ENABLED` | `true` | Makes encrypted Internet Relay available to apps that explicitly enable it while pairing. Set `false` to prohibit it for this Agent. |
 | `PBXSENSE_INTERNET_RELAY_POLL_SECONDS` | `15` | Changed-snapshot check cadence, clamped to at least 5 seconds. Unchanged snapshots are not rewritten; control checks run at most once every five minutes. |
 
+Endpoint confirmation controls when a per-device Health Signal becomes valid;
+it is separate from push correlation. On PBXs with three or more monitored
+phones, confirmed outages may wait up to 15 additional seconds so clustered
+failures can become one notification. Grouped push updates are limited to every
+30 seconds, grouped recovery requires 15 stable seconds, and the completed
+episode has a two-minute cooldown. These correlation timings are currently
+product defaults rather than environment settings.
+
 Internet Relay remains opt-in per app. The Agent capability is ready by default,
 but no snapshot is uploaded until an app explicitly enables it and registers an
 encryption key. Every opted-in app receives a distinct envelope;

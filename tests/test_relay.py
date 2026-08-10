@@ -63,6 +63,18 @@ class _RecordingRelay(AgentRelay):
         return {"status": "accepted"}
 
 
+def _offline_phone(extension: str) -> dict[str, object]:
+    return {
+        "id": f"sig_endpoint_{extension}_unavailable",
+        "kind": "endpoint_unavailable",
+        "state": "active",
+        "category": "health",
+        "importance": "attention",
+        "title": f"Phone {extension} looks unavailable",
+        "body": f"Extension {extension} is currently unreachable.",
+    }
+
+
 class _ActivationRelay(AgentRelay):
     def __init__(self, path: str, enrollment_ticket: str = "") -> None:
         super().__init__(
@@ -402,6 +414,97 @@ class RelayTest(unittest.TestCase):
             events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
             self.assertEqual(len(events), 2)
             self.assertEqual(events[1]["id"], "episode_two")
+
+    def test_one_phone_is_released_after_the_correlation_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phone = _offline_phone("101")
+
+            relay.observe([phone], total_phones=3, observed_at=100)
+            self.assertEqual(relay.requests, [])
+            relay.observe([phone], total_phones=3, observed_at=115)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["title"], "Phone 101 looks unavailable")
+
+    def test_two_phones_are_grouped_after_the_correlation_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phones = [_offline_phone("101"), _offline_phone("102")]
+
+            relay.observe(phones, total_phones=3, observed_at=100)
+            relay.observe(phones, total_phones=3, observed_at=115)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["title"], "2 phones look unavailable")
+            self.assertEqual(
+                events[0]["body"],
+                "PBXSense confirmed that both phones are currently unreachable.",
+            )
+            self.assertEqual(
+                events[0]["notificationTag"],
+                "pbxsense_endpoint_availability_incident",
+            )
+
+    def test_three_phones_are_grouped_immediately_as_a_shared_incident(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phones = [_offline_phone("101"), _offline_phone("102"), _offline_phone("103")]
+
+            relay.observe(phones, total_phones=5, observed_at=100)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["title"], "3 phones look unavailable")
+            self.assertEqual(
+                events[0]["body"],
+                "A shared network, power, or PBX interruption may be affecting "
+                "3 out of 5 monitored phones.",
+            )
+
+    def test_group_update_uses_remaining_count_and_replaces_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phones = [_offline_phone("101"), _offline_phone("102"), _offline_phone("103")]
+            relay.observe(phones, total_phones=3, observed_at=100)
+            relay.observe(phones[:1], total_phones=3, observed_at=120)
+            relay.observe(phones[:1], total_phones=3, observed_at=130)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[1]["title"], "1 phone still looks unavailable")
+            self.assertEqual(events[1]["body"], "The other affected phones recovered.")
+            self.assertEqual(events[0]["notificationTag"], events[1]["notificationTag"])
+
+    def test_group_recovery_requires_fifteen_stable_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phones = [_offline_phone("101"), _offline_phone("102"), _offline_phone("103")]
+            relay.observe(phones, total_phones=3, observed_at=100)
+            relay.observe([], total_phones=3, observed_at=130)
+            relay.observe([], total_phones=3, observed_at=144)
+            relay.observe([], total_phones=3, observed_at=145)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[1]["title"], "Phone availability restored")
+            self.assertEqual(events[1]["body"], "All 3 affected phones are reachable again.")
+
+    def test_connection_loss_suppresses_phone_incident_pushes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phones = [_offline_phone("101"), _offline_phone("102"), _offline_phone("103")]
+
+            relay.observe(
+                phones,
+                total_phones=3,
+                connection_ok=False,
+                observed_at=100,
+            )
+
+            self.assertEqual(relay.requests, [])
 
     def test_live_call_activity_stays_in_feed_without_push_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -170,7 +170,17 @@ async def _relay_publish_loop() -> None:
     while True:
         try:
             payload = await asyncio.to_thread(_home_payload)
-            await asyncio.to_thread(push_relay.observe, payload.get("signals", []))
+            people = payload.get("people", [])
+            connection = payload.get("connection", {})
+            await asyncio.to_thread(
+                push_relay.observe,
+                payload.get("signals", []),
+                total_phones=len(people) if isinstance(people, list) else 0,
+                connection_ok=(
+                    isinstance(connection, dict)
+                    and connection.get("kind") != "reconnecting"
+                ),
+            )
         except Exception:
             pass
         await asyncio.sleep(RELAY_PUBLISH_INTERVAL_SECONDS)

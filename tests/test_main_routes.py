@@ -157,7 +157,8 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("def _unique_devices_by_token", source)
         self.assertGreaterEqual(source.count("_unique_devices_by_token(["), 2)
         self.assertIn('"notificationId": event_id', source)
-        self.assertIn("messaging.AndroidNotification(tag=event_id)", source)
+        self.assertIn('_optional_identifier(event.get("notificationTag")) or event_id', source)
+        self.assertIn("messaging.AndroidNotification(tag=notification_tag)", source)
 
     def test_live_websocket_sends_quiet_heartbeats(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")

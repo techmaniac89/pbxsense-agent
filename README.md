@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.25-beta` on the **Breeze** channel.
+The current Agent release is `0.5.26-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -710,7 +710,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.25-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.26-beta-linux-source-installer.tar.gz
 ```
 
 Create the Linux release packages from a Linux release host and attach the
@@ -721,7 +721,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-For a release tag such as `agent-v0.5.25-beta`, attach the matching files from
+For a release tag such as `agent-v0.5.26-beta`, attach the matching files from
 `dist/`. The GitHub Release notes should include the Agent version, the
 supported PBX connectors, upgrade notes, and any installer changes.
 
@@ -893,6 +893,14 @@ Agent v1 intentionally starts small:
   ten-second quiet heartbeat over `/live`.
 - Gives each interruptive outage occurrence a `notificationId` while keeping
   its feed `id` stable, preventing local and delayed FCM delivery from stacking.
+- Keeps per-phone availability details in the Health feed while correlating
+  clustered phone outages for push delivery. One or two affected phones use
+  individual wording; three or more phones becoming unavailable within the
+  correlation window use one replaceable shared-incident notification.
+- Changes an active grouped notification to remaining-phone wording when fewer
+  than three phones are still unavailable. Shared network/PBX wording must
+  never be shown for a single remaining phone. Recovery is announced once,
+  only after the affected phones remain stable for the recovery window.
 - Keeps raw AMI fields inside `technical`, one layer deeper.
 
 This is enough to test real data while preserving the PBXSense philosophy:

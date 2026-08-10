@@ -135,6 +135,18 @@ The relay additionally enforces:
 These application limits complement Cloud Run scaling; they do not replace an
 edge DDoS service for a high-volume public deployment.
 
+### Grouped phone-availability delivery
+
+The Agent may publish multiple event IDs for successive states of one grouped
+phone-availability incident while assigning them one stable Android
+notification tag. The event IDs preserve relay idempotency; the stable tag
+causes the newest count or final recovery to replace the earlier notification.
+
+The Relay transports the Agent's selected wording and does not infer outage
+scope. The Agent must use shared network/PBX wording only for three or more
+currently affected phones. If the count drops below three, subsequent updates
+must use individual or remaining-phone wording.
+
 ### Billing guardrail
 
 Keep the relay in its own Google Cloud project. Create a project-scoped monthly
@@ -171,7 +183,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.3` provides the encrypted Internet Relay data path and
+Relay service `0.5.4` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -191,7 +203,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.3 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.4 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the

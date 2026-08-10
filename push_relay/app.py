@@ -29,7 +29,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.3"
+RELAY_VERSION = "0.5.4"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -815,6 +815,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     body = _bounded_text(event.get("body"), "body", 2048)
     category = _bounded_text(event.get("category"), "category", 64)
     importance = _bounded_text(event.get("importance"), "importance", 32)
+    notification_tag = _optional_identifier(event.get("notificationTag")) or event_id
     if category == "recommendation":
         return {"status": "ignored", "reason": "tips_are_feed_only"}
 
@@ -858,7 +859,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         },
         android=messaging.AndroidConfig(
             priority="high",
-            notification=messaging.AndroidNotification(tag=event_id),
+            notification=messaging.AndroidNotification(tag=notification_tag),
         ),
     )
     try:

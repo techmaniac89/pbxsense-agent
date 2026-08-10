@@ -108,6 +108,32 @@ carry an occurrence-scoped `notificationId`. Relay idempotency and Android
 notification tags use that occurrence so local and FCM copies collapse while a
 genuine later outage can notify again.
 
+### Phone-availability notification contract
+
+Per-device Health Signals remain visible and diagnosable in the feed. Push
+delivery applies a separate correlation policy so a temporary shared outage on
+a large PBX does not generate dozens of notifications:
+
+- hold newly confirmed phone outages for a 15-second correlation window;
+- notify one or two affected phones individually;
+- correlate three or more recently affected phones into one incident;
+- update the same Android notification no more than once every 30 seconds;
+- suppress per-phone outage and recovery pushes while the PBX or Agent
+  connection itself is unavailable;
+- require 15 continuous healthy seconds before sending one grouped recovery;
+- keep the completed incident in a two-minute cooldown before starting a new
+  episode.
+
+Message wording follows the current affected count. Shared network/PBX wording
+is valid only while at least three phones remain unavailable. When the incident
+drops to two or one phone, use remaining-phone wording such as **1 phone still
+looks unavailable** and explain that the other affected phones recovered. Never
+show **A shared network or PBX interruption may be affecting 1 phone**.
+
+Grouped updates use unique event IDs for relay idempotency and one stable
+notification tag for Android replacement. The grouped recovery uses that same
+tag so it replaces the outage notification instead of stacking beside it.
+
 The relay presence heartbeat is a separate task. It must remain independent of
 PBX snapshot, history, and signal failures so a slow connector cannot create a
 false Agent-lost notification.
