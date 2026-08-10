@@ -120,6 +120,7 @@ async def renew_local_admin_session(request: Request, call_next):
             _local_web_cookie_value(),
             max_age=LOCAL_WEB_COOKIE_MAX_AGE_SECONDS,
             httponly=True,
+            secure=_local_web_cookie_secure(request),
             samesite="strict",
         )
     return response
@@ -1438,6 +1439,8 @@ def _diagnostic_rows(diagnostics: dict, message: object) -> str:
         ("liveCallsAvailable", "Live calls", True),
         ("tlsEnabled", "TLS enabled", True),
         ("tlsVerification", "TLS verification", True),
+        ("outboundRegistrationsReported", "Outbound registrations reported", False),
+        ("outboundRegistrationWarning", "Outbound registration note", False),
         ("internetRelayState", "Internet relay", False),
         ("pushRelayActivationError", "Pairing relay error", False),
     )
@@ -1474,6 +1477,7 @@ def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
             _local_web_cookie_value(),
             max_age=LOCAL_WEB_COOKIE_MAX_AGE_SECONDS,
             httponly=True,
+            secure=_local_web_cookie_secure(request),
             samesite="strict",
         )
         return response
@@ -1485,6 +1489,13 @@ def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
 def _is_trusted_request(request: Request) -> bool:
     client_host = request.client.host if request.client else ""
     return is_private_or_loopback_host(client_host)
+
+
+def _local_web_cookie_secure(request: Request) -> bool:
+    """Bind the browser session to HTTPS, including proxy TLS termination."""
+    if settings.public_url:
+        return urlparse(settings.public_url).scheme == "https"
+    return request.url.scheme == "https"
 
 
 def _has_valid_local_web_cookie(request: Request) -> bool:
@@ -1547,7 +1558,11 @@ def _websocket_authorized(websocket: WebSocket) -> bool:
         token = websocket.query_params.get("token", "").strip()
         if not token:
             cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
-            if hmac.compare_digest(cookie, _local_web_cookie_value()):
+            client_host = websocket.client.host if websocket.client else ""
+            if (
+                is_private_or_loopback_host(client_host)
+                and hmac.compare_digest(cookie, _local_web_cookie_value())
+            ):
                 token = settings.token
     return hmac.compare_digest(token, settings.token)
 
@@ -1560,7 +1575,7 @@ def _link_token_suffix(request: Request) -> str:
 
 
 def _pairing_payload(request: Request) -> str:
-    agent_url = str(request.base_url).rstrip("/")
+    agent_url = settings.public_url or str(request.base_url).rstrip("/")
     query = {"agent": agent_url}
     if settings.token:
         query["token"] = settings.token

@@ -30,14 +30,14 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.5"
+RELAY_VERSION = "0.5.6"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
 _admin_token = os.getenv("PBXSENSE_RELAY_ADMIN_TOKEN", "").strip()
 _ticket_secret = os.getenv("PBXSENSE_RELAY_TICKET_SECRET", "").strip()
 _enrollment_mode = os.getenv(
-    "PBXSENSE_RELAY_ENROLLMENT_MODE", "open"
+    "PBXSENSE_RELAY_ENROLLMENT_MODE", "closed"
 ).strip().lower()
 if _enrollment_mode not in {"open", "ticket", "closed"}:
     raise RuntimeError(
@@ -66,6 +66,9 @@ MAX_SECURE_SNAPSHOT_BYTES = max(
 )
 MAX_EVENTS_PER_AGENT_PER_HOUR = max(
     1, min(1000, int(os.getenv("PBXSENSE_RELAY_MAX_EVENTS_PER_AGENT_HOUR", "60")))
+)
+MAX_AGENTS_PER_ACCOUNT = max(
+    1, min(1000, int(os.getenv("PBXSENSE_RELAY_MAX_AGENTS_PER_ACCOUNT", "10")))
 )
 REMOTE_APP_POLL_SECONDS = max(
     15, min(300, int(os.getenv("PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS", "60")))
@@ -360,6 +363,19 @@ def _claim_activation_transaction(
         )
         site_id = f"site_{secrets.token_urlsafe(10)}"
         agent_id = f"agent_{secrets.token_urlsafe(12)}"
+        account_id = str(activation.get("accountId", ""))
+        if account_id:
+            account_agents = (
+                db.collection("agents")
+                .where("accountId", "==", account_id)
+                .limit(MAX_AGENTS_PER_ACCOUNT)
+                .get(transaction=transaction)
+            )
+            if len(account_agents) >= MAX_AGENTS_PER_ACCOUNT:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This account has reached its Agent limit",
+                )
 
     devices_ref = db.collection("agents").document(agent_id).collection("devices")
     if len(devices_ref.limit(MAX_DEVICES_PER_AGENT).get(transaction=transaction)) >= MAX_DEVICES_PER_AGENT:
@@ -915,6 +931,14 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     except AlreadyExists:
         return {"status": "duplicate", "sent": 0}
 
+    try:
+        _consume_durable_event_quota(agent_id)
+    except Exception:
+        # A rejected request must remain retryable after the quota window
+        # changes or Firestore recovers.
+        event_ref.delete()
+        raise
+
     devices = [_device_record(document) for document in
         db.collection("agents").document(agent_id).collection("devices").stream()]
     now = datetime.now(timezone.utc)
@@ -1396,7 +1420,43 @@ def _relay_policy() -> dict[str, int]:
         "agentLossSeconds": AGENT_LOSS_TIMEOUT_SECONDS,
         "controlExchangeSeconds": CONTROL_EXCHANGE_SECONDS,
         "remotePollSeconds": REMOTE_APP_POLL_SECONDS,
+        "maxAppsPerAgent": MAX_DEVICES_PER_AGENT,
+        "maxEventsPerAgentHour": MAX_EVENTS_PER_AGENT_PER_HOUR,
+        "maxAgentsPerAccount": MAX_AGENTS_PER_ACCOUNT,
     }
+
+
+def _consume_durable_event_quota(agent_id: str) -> None:
+    """Enforce notification limits across Cloud Run instances and restarts."""
+    now = datetime.now(timezone.utc)
+    quota_ref = (
+        db.collection("agents").document(agent_id)
+        .collection("rateLimits").document(f"events_{now:%Y%m%d%H}")
+    )
+    _increment_durable_quota(
+        db.transaction(), quota_ref, MAX_EVENTS_PER_AGENT_PER_HOUR, now
+    )
+
+
+@firestore.transactional
+def _increment_durable_quota(
+    transaction: Any, quota_ref: Any, limit: int, now: datetime
+) -> None:
+    snapshot = quota_ref.get(transaction=transaction)
+    count = int((snapshot.to_dict() or {}).get("count", 0)) if snapshot.exists else 0
+    if count >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail="Agent notification quota exceeded",
+        )
+    transaction.set(
+        quota_ref,
+        {
+            "count": count + 1,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+            "expiresAt": now + timedelta(hours=2),
+        },
+    )
 
 
 def _usage_update(

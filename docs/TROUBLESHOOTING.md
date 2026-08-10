@@ -40,6 +40,15 @@ Health endpoint:
 http://<agent-host>:8765/health
 ```
 
+When native Agent TLS is enabled, use `https://` for the landing page,
+diagnostics, and health URLs. If startup fails, confirm both
+`PBXSENSE_AGENT_TLS_CERTFILE` and `PBXSENSE_AGENT_TLS_KEYFILE` are set and are
+readable inside the service or container. If the app rejects the connection,
+verify that the certificate is trusted by Android, matches the hostname in
+`PBXSENSE_AGENT_PUBLIC_URL`, and includes its full intermediate chain. A
+self-signed certificate installed only on the Agent host is not trusted by the
+phone.
+
 ## Asterisk AMI Checks
 
 Diagnostics fields:
@@ -133,7 +142,7 @@ when closed-app push notifications are required.
 If push notifications work but the app cannot use encrypted Home snapshots
 away from the LAN:
 
-- Confirm the hosted relay reports service `0.5.5` and use current Breeze
+- Confirm the hosted relay reports service `0.5.6` and use current Breeze
   app/Agent builds.
 - Confirm `PBXSENSE_INTERNET_RELAY_ENABLED` is `true` (the default) and restart
   the Agent after changing an explicit override.

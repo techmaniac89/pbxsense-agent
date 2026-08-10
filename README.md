@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.32-beta` on the **Breeze** channel.
+The current Agent release is `0.5.37-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -108,11 +108,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.32-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.37-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.5.32-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.5.32-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.5.37-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.5.37-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -186,6 +186,11 @@ are:
 - `PBXSENSE_TIMEZONE`: IANA timezone used for timestamps and history.
 - `PBXSENSE_AGENT_TOKEN`: shared token for local/VPN/direct-Agent pairing and
   protected Agent endpoints. It is not the app's Internet Relay credential.
+- `PBXSENSE_AGENT_TLS_CERTFILE` and `PBXSENSE_AGENT_TLS_KEYFILE`: native
+  HTTPS/WSS certificate and private key. Release apps require TLS for direct
+  LAN/VPN access.
+- `PBXSENSE_AGENT_PUBLIC_URL`: canonical HTTPS origin embedded in pairing QR
+  codes, especially when TLS terminates at a reverse proxy.
 - `PBXSENSE_RELAY_URL`: hosted relay endpoint. It must use HTTPS; HTTP is
   accepted only for a relay running on localhost during development.
 - `PBXSENSE_INTERNET_RELAY_ENABLED`: keeps encrypted Internet Relay available;
@@ -750,7 +755,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.32-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.37-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -764,7 +769,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.5.32-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.5.37-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging
@@ -937,6 +942,12 @@ Agent v1 intentionally starts small:
 
 - Reads active channels with `CoreShowChannels`.
 - Reads PJSIP endpoints with `PJSIPShowEndpoints`.
+- Reads outbound PJSIP registration state with
+  `PJSIPShowRegistrationsOutbound`, allowing registered provider trunks such
+  as `Cosmote` to confirm health even when they have no inbound contact.
+- Retains known FreeSWITCH, Yeastar, and CUCM trunks as low-confidence Unknown
+  during temporary vendor-query failures so outages are not silently cleared
+  or re-notified as new incidents.
 - Tries to infer extension display names from AMI endpoint fields.
 - Produces `/home` in the PBXSense app contract shape.
 - Streams an initial `home_snapshot`, typed changes, and a lightweight

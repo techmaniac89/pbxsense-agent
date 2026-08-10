@@ -147,6 +147,54 @@ class CucmConnectorTest(unittest.TestCase):
         self.assertEqual(enriched[0].health_confidence, "high")
         self.assertEqual(enriched[1].health_status, "down")
 
+    def test_perfmon_activity_does_not_override_explicit_down_trunk(self) -> None:
+        settings = replace(
+            AgentSettings.from_env(), pbx_type="cucm", mode="cucm",
+            cucm_perfmon_enabled=True,
+        )
+        client = CucmClient(settings)
+        client._sip_trunk_inventory = lambda: [{  # type: ignore[method-assign]
+            "name": "SIP_TRUNK_1", "description": "Carrier",
+            "options_ping": "enabled",
+        }]
+        client._trunk_registration_status = lambda names: {  # type: ignore[method-assign]
+            "SIP_TRUNK_1": {"status": "OutOfService"}
+        }
+        client._sip_perfmon_counters = lambda: {  # type: ignore[method-assign]
+            r"\cucm\Cisco SIP(SIP_TRUNK_1)\CallsActive": 1,
+        }
+
+        trunk = client._trunk_endpoints()[0]
+
+        self.assertEqual(trunk.health_status, "down")
+        self.assertEqual(trunk.health_confidence, "high")
+
+    def test_cucm_retains_known_trunk_as_unknown_on_service_query_failure(self) -> None:
+        settings = replace(AgentSettings.from_env(), pbx_type="cucm", mode="cucm")
+        client = CucmClient(settings)
+        known = AmiEndpoint(
+            extension="SIP_TRUNK_1", device_state="Registered", role="trunk",
+            health_status="healthy", health_confidence="high",
+        )
+        client._directory_inventory = lambda: []  # type: ignore[method-assign]
+        client._registration_status = lambda: {}  # type: ignore[method-assign]
+        calls = iter(([known], OSError("temporary")))
+
+        def trunks() -> list[AmiEndpoint]:
+            value = next(calls)
+            if isinstance(value, OSError):
+                raise value
+            return value
+
+        client._trunk_endpoints = trunks  # type: ignore[method-assign]
+        first = client.snapshot()
+        client._refresh_after = 0
+        second = client.snapshot()
+
+        self.assertEqual(first.endpoints[0].health_status, "healthy")
+        self.assertEqual(second.endpoints[0].health_status, "unknown")
+        self.assertIn("temporarily unavailable", second.endpoints[0].health_evidence[-1])
+
     def test_cdr_and_cmr_are_correlated_into_call_quality(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cdr = Path(directory, "cdr")

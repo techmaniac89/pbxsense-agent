@@ -19,7 +19,10 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
 | `PBXSENSE_AGENT_TOKEN` | empty | Shared token for local/VPN/direct-Agent pairing and protected endpoints; it is not sent to the hosted relay. |
 | `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP/login timeout in seconds. |
-| `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP port used by the Linux service and Docker container, including its health check and LAN port mapping. |
+| `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP or HTTPS port used by the Linux service and Docker container, including its health check and LAN port mapping. |
+| `PBXSENSE_AGENT_TLS_CERTFILE` | empty | PEM certificate chain for native Agent HTTPS/WSS. Configure together with `PBXSENSE_AGENT_TLS_KEYFILE`; release apps require TLS for direct LAN/VPN access. |
+| `PBXSENSE_AGENT_TLS_KEYFILE` | empty | PEM private key for native Agent HTTPS/WSS. Keep it readable only by the Agent service account. |
+| `PBXSENSE_AGENT_PUBLIC_URL` | empty | Canonical root origin embedded in pairing QR codes, such as `https://pbxsense-agent.example:8765`. Required when TLS terminates at a reverse proxy or request host/scheme is not canonical. |
 | `PBXSENSE_EXTENSION_NAMES` | empty | Optional friendly-name map such as `101=Reception,120=Support`. |
 | `PBXSENSE_SNAPSHOT_POLL_SECONDS` | `1` | Central live PBX polling cadence, clamped to at least 0.5 seconds. |
 | `PBXSENSE_HISTORY_POLL_SECONDS` | `30` | CDR, voicemail, recording, and security-history refresh cadence, clamped to at least 5 seconds. |
@@ -31,7 +34,7 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_RELAY_URL` | hosted PBXSense URL in `.env.example` | Shared notification/encrypted-data relay URL. Production URLs must use HTTPS; plain HTTP is accepted only for localhost development. Leave empty only for deliberately local-only installs. |
 | `PBXSENSE_RELAY_IDENTITY_PATH` | `/var/lib/pbxsense-agent/relay_identity.json` | Persistent Agent Ed25519 identity and durable relay state. Back up and preserve it across rebuilds. |
 | `PBXSENSE_RELAY_TIMEOUT` | `5` | Outbound relay HTTP timeout in seconds. |
-| `PBXSENSE_RELAY_ENROLLMENT_TICKET` | empty | Optional opaque first-enrollment ticket when the hosted Relay operates in paid/ticketed mode. Existing enrolled Agents authenticate with their durable identity and do not need another ticket. |
+| `PBXSENSE_RELAY_ENROLLMENT_TICKET` | empty | Operator-only bootstrap override for controlled testing/support. In production the subscribed app obtains a short-lived ticket and passes it automatically during QR pairing; end users do not configure it. Existing enrolled Agents authenticate with their durable identity. |
 | `PBXSENSE_INTERNET_RELAY_ENABLED` | `true` | Makes encrypted Internet Relay available to apps that explicitly enable it while pairing. Set `false` to prohibit it for this Agent. |
 | `PBXSENSE_INTERNET_RELAY_POLL_SECONDS` | `15` | Changed-snapshot check cadence, clamped to at least 5 seconds. Unchanged snapshots are not rewritten; control checks run at most once every five minutes. |
 
@@ -80,6 +83,34 @@ queued. The relay status exposes the rejected count and latest rejection.
 | `ASTERISK_VOICEMAIL_PATH` | `/var/spool/asterisk/voicemail` | Voicemail spool path inside the Agent runtime. |
 | `ASTERISK_RECORDINGS_PATH` | `/var/spool/asterisk/monitor` | MixMonitor recording root visible to the Agent. |
 | `ASTERISK_SECURITY_LOG_PATH` | `/var/log/asterisk/security` | Local Asterisk security log used for aggregate authentication/ACL Security Signals. |
+| `PBXSENSE_TRUNK_ENDPOINTS` | empty | Comma-separated exact Asterisk endpoint or outbound-registration names used as SIP trunks. Matching is case-insensitive. |
+
+For PJSIP provider trunks, the Agent combines endpoint/contact qualification,
+`PJSIPShowRegistrationsOutbound`, and observed active calls. `Registered`
+confirms healthy service; `Rejected`, `Unregistered`, `Stopped`, or `Failed`
+confirms an unavailable trunk. Transitional registration states remain
+uncertain instead of generating a false outage.
+
+## Cross-connector trunk evidence
+
+All connectors preserve the identity of previously observed trunks when an
+optional trunk-health query temporarily fails. The retained sample becomes
+`Unknown` with low confidence: it cannot declare either an outage or a
+recovery, and an existing incident keeps its notification episode instead of
+being recreated. A successfully returned empty inventory is treated as a real
+configuration change after the normal recovery window.
+
+- Asterisk and compatible Grandstream AMI use endpoint/contact state,
+  outbound-registration state when supported, and active calls. Diagnostics
+  show whether `PJSIPShowRegistrationsOutbound` is available.
+- FreeSWITCH uses Sofia gateway state and status. `UNREGED` is down;
+  `REGED` with a down reachability status is degraded rather than unknown.
+- Yeastar uses the P-Series trunk status API. Disabled, registering,
+  unmonitored, and unrecognized values remain unknown instead of creating a
+  false outage.
+- CUCM combines SIP OPTIONS serviceability, RisPort, PerfMon, and recent CDRs.
+  Traffic evidence can strengthen an unknown or healthy result but never
+  override an explicit current `OutOfService`/down state.
 
 For Docker, the CDR and voicemail paths are container paths. Mount the host
 folders into those locations with:

@@ -497,7 +497,7 @@ WorkingDirectory=$INSTALL_DIR
 Environment=PBXSENSE_AGENT_PORT=$AGENT_PORT
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=$ENV_FILE
-ExecStart=$INSTALL_DIR/.venv/bin/uvicorn pbxsense_agent.main:app --host 0.0.0.0 --port \${PBXSENSE_AGENT_PORT}
+ExecStart=$INSTALL_DIR/.venv/bin/python -m pbxsense_agent.server
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

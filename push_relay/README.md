@@ -96,9 +96,10 @@ Create two independent Secret Manager secrets:
 - `closed` pauses all new Agent identities while existing signed identities
   continue to pair apps.
 
-The deployment script defaults to `open` for a safe staged upgrade. After
-Agents have upgraded and the billing/licensing service can provision tickets,
-deploy with:
+The Relay application itself defaults to `closed`, so a missing environment
+variable cannot accidentally expose public enrollment. The official deployment
+script explicitly defaults to `ticket`; use `open` only as a deliberate,
+temporary development or migration override.
 
 ```sh
 GOOGLE_CLOUD_PROJECT=your-project-id \
@@ -116,10 +117,15 @@ Content-Type: application/json
 {"accountId":"customer_123","lifetimeMinutes":30}
 ```
 
-Provision the returned opaque value once as
-`PBXSENSE_RELAY_ENROLLMENT_TICKET` on the new Agent. It is consumed only when
-the first app claims the activation. It is not a Firebase credential and cannot
-be used to sign another ticket.
+The target production subscription flow does not ask users to enter this
+ticket: after a purchase or restore, the app will ask the subscription backend
+for a short-lived authorization and pass it to the local Agent during QR
+pairing. That automatic entitlement exchange must be deployed before switching
+new customer enrollment to ticket mode. Until then, beta deployments must
+explicitly choose `open`, while `PBXSENSE_RELAY_ENROLLMENT_TICKET` remains an
+operator-only bootstrap mechanism for controlled testing and support. A ticket
+is consumed when the first app claims the activation and is not a Firebase
+credential.
 
 The relay additionally enforces:
 
@@ -127,7 +133,9 @@ The relay additionally enforces:
   Agent public key per instance;
 - 120 total requests per source address per minute per instance;
 - ten paired apps per Agent by default;
-- 60 notification events per Agent per hour per instance;
+- ten Agents per subscription account by default;
+- 60 notification events per Agent per hour, enforced transactionally in
+  Firestore across instances and cold starts;
 - a 2 MiB encrypted-snapshot request limit;
 - bounded identifiers before Agent/device Firestore lookups;
 - nonce-bound signed activation refreshes for every existing Agent identity,
@@ -139,13 +147,13 @@ sessions store a derived, eight-hour HttpOnly cookie rather than the raw admin
 token. Signed Agent mutations include a one-time nonce; replayed requests are
 rejected even inside the five-minute timestamp window.
 
-Enable Firestore TTL on the `expiresAt` field for the `activationNonces` and
-`secureNonces` collection groups. The nonce documents are authentication
-state, not usage history, and are safe to delete after their ten-minute replay
-window.
+Enable Firestore TTL on the `expiresAt` field for the `activationNonces`,
+`secureNonces`, and `rateLimits` collection groups. Nonce documents are
+authentication state and rate-limit documents are short-lived quota counters;
+both are safe to delete after their enforcement windows.
 
-Deploy compatibility note: Agent `0.5.32-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.5`,
+Deploy compatibility note: Agent `0.5.37-beta` sends both the legacy signature
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.6`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -200,7 +208,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.5` provides the encrypted Internet Relay data path and
+Relay service `0.5.6` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -220,7 +228,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.5 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.6 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the

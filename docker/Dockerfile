@@ -25,6 +25,6 @@ USER pbxsense
 EXPOSE 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import os, urllib.request; port=os.environ.get('PBXSENSE_AGENT_PORT', '8765'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3).read()"
+  CMD python -c "import os, ssl, urllib.request; port=os.environ.get('PBXSENSE_AGENT_PORT', '8765'); tls=bool(os.environ.get('PBXSENSE_AGENT_TLS_CERTFILE')); scheme='https' if tls else 'http'; context=ssl._create_unverified_context() if tls else None; urllib.request.urlopen(f'{scheme}://127.0.0.1:{port}/health', timeout=3, context=context).read()"
 
-CMD ["sh", "-c", "exec uvicorn pbxsense_agent.main:app --host 0.0.0.0 --port \"${PBXSENSE_AGENT_PORT:-8765}\""]
+CMD ["python", "-m", "pbxsense_agent.server"]

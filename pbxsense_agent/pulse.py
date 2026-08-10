@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from threading import Lock
 from urllib.parse import quote
@@ -299,6 +299,7 @@ class _EndpointSignalState:
     episode_notified: bool = False
     signal_visible: bool = False
     notification_id: str = ""
+    missing_started_at: datetime | None = None
 
 
 class EndpointAvailabilitySignalTracker:
@@ -334,13 +335,27 @@ class EndpointAvailabilitySignalTracker:
         }
         visible: set[str] = set()
         with self._lock:
-            self._states = {
-                extension: state
-                for extension, state in self._states.items()
-                if extension in endpoints
-            }
+            if self._role == "trunk":
+                for extension in list(self._states):
+                    if extension in endpoints:
+                        continue
+                    state = self._states[extension]
+                    if state.missing_started_at is None:
+                        state.missing_started_at = now
+                    if now - state.missing_started_at < self._recovery_confirmation:
+                        if state.signal_visible:
+                            visible.add(extension)
+                    else:
+                        self._states.pop(extension, None)
+            else:
+                self._states = {
+                    extension: state
+                    for extension, state in self._states.items()
+                    if extension in endpoints
+                }
             for extension, endpoint in endpoints.items():
                 state = self._states.setdefault(extension, _EndpointSignalState())
+                state.missing_started_at = None
                 if self._role == "trunk" and _trunk_health_state(endpoint) == "unknown":
                     # Missing/ambiguous evidence must not declare recovery or
                     # start a new outage. Keep an already-confirmed incident
@@ -393,6 +408,23 @@ class EndpointAvailabilitySignalTracker:
                 for extension, state in self._states.items()
                 if state.signal_visible and state.notification_id
             }
+
+
+def uncertain_trunks(
+    endpoints: list[AmiEndpoint], evidence: str
+) -> list[AmiEndpoint]:
+    """Retain known trunk identities without asserting recovery or failure."""
+    return [
+        replace(
+            endpoint,
+            device_state="Unknown",
+            active_channels=0,
+            health_status="unknown",
+            health_confidence="low",
+            health_evidence=tuple(dict.fromkeys((*endpoint.health_evidence, evidence))),
+        )
+        for endpoint in endpoints
+    ]
 
 
 class EndpointAggregateTipTracker:

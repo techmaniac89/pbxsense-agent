@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot, uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -30,12 +30,21 @@ class FreeSwitchClient:
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
+        self._known_trunks: list[AmiEndpoint] = []
 
     def snapshot(self) -> AmiSnapshot:
         try:
             channels = self._channels()
             endpoints = self._endpoints(channels)
-            endpoints.extend(self._trunks())
+            try:
+                trunks = self._trunks()
+                self._known_trunks = trunks
+            except OSError:
+                trunks = uncertain_trunks(
+                    self._known_trunks,
+                    "FreeSWITCH gateway evidence is temporarily unavailable",
+                )
+            endpoints.extend(trunks)
             return AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -141,31 +150,28 @@ class FreeSwitchClient:
             return []
 
     def _trunks(self) -> list[AmiEndpoint]:
-        try:
-            with self._connect() as sock:
-                self._authenticate(sock)
-                summary = self._api(sock, "sofia status")
-                trunks: list[AmiEndpoint] = []
-                for name in _sofia_gateway_names(summary):
-                    detail = self._api(sock, f"sofia status gateway {name}")
-                    state = _detail_value(detail, "State")
-                    status = _detail_value(detail, "Status")
-                    health, confidence, evidence = _freeswitch_gateway_health(
-                        state, status
-                    )
-                    trunks.append(AmiEndpoint(
-                        extension=name,
-                        device_state=" / ".join(filter(None, (state, status))),
-                        label=name.split("::", 1)[-1],
-                        role="trunk",
-                        connection_type="SIP",
-                        health_status=health,
-                        health_confidence=confidence,
-                        health_evidence=(evidence,),
-                    ))
-                return trunks
-        except OSError:
-            return []
+        with self._connect() as sock:
+            self._authenticate(sock)
+            summary = self._api(sock, "sofia status")
+            trunks: list[AmiEndpoint] = []
+            for name in _sofia_gateway_names(summary):
+                detail = self._api(sock, f"sofia status gateway {name}")
+                state = _detail_value(detail, "State")
+                status = _detail_value(detail, "Status")
+                health, confidence, evidence = _freeswitch_gateway_health(
+                    state, status
+                )
+                trunks.append(AmiEndpoint(
+                    extension=name,
+                    device_state=" / ".join(filter(None, (state, status))),
+                    label=name.split("::", 1)[-1],
+                    role="trunk",
+                    connection_type="SIP",
+                    health_status=health,
+                    health_confidence=confidence,
+                    health_evidence=(evidence,),
+                ))
+            return trunks
 
     def _connect(self) -> socket.socket:
         try:
@@ -344,10 +350,15 @@ def _freeswitch_gateway_health(
     )
     if normalized_status == "UP" and normalized_state in {"REGED", "NOREG"}:
         return "healthy", "high", evidence
-    if normalized_state in {"FAILED", "FAIL_WAIT", "EXPIRED", "TIMEOUT", "DOWN"}:
+    if normalized_state in {
+        "FAILED", "FAIL_WAIT", "EXPIRED", "TIMEOUT", "DOWN", "UNREGED",
+        "UNREGISTERED",
+    }:
         return "down", "high", evidence
     if normalized_status == "DOWN" and normalized_state == "NOREG":
         return "down", "high", evidence
+    if normalized_status == "DOWN" and normalized_state == "REGED":
+        return "degraded", "high", evidence
     return "unknown", "low", evidence
 
 

@@ -16,6 +16,14 @@ internet.
 - If remote access is needed, put it behind a VPN or another controlled private
   network.
 
+Direct release-app connectivity requires HTTPS/WSS. Configure
+`PBXSENSE_AGENT_TLS_CERTFILE` and `PBXSENSE_AGENT_TLS_KEYFILE` for native TLS,
+or terminate TLS at a trusted reverse proxy and set
+`PBXSENSE_AGENT_PUBLIC_URL` to its canonical HTTPS origin. The certificate must
+be trusted by Android and valid for the advertised hostname. TLS does not make
+public exposure safe by itself: keep the Agent behind controlled access and
+retain token authentication.
+
 The hosted PBXSense relay carries activation, Agent presence, paired-device
 registration, eligible Signal notifications, and opaque encrypted Home
 snapshots for apps that explicitly enable Internet Relay while pairing. The
@@ -46,7 +54,9 @@ automatically.
 Native and Docker installers print a complete authenticated admin URL instead
 of asking the administrator to transcribe the token. Successful access removes
 the token from the address bar and creates a long-lived, renewable HttpOnly,
-SameSite=Strict cookie for that browser. It remains authorized until site data
+SameSite=Strict cookie for that browser. HTTPS Agent origins additionally mark
+the cookie `Secure`, including when TLS terminates at the canonical HTTPS origin
+configured through `PBXSENSE_AGENT_PUBLIC_URL`. It remains authorized until site data
 is cleared or the Agent token changes. Treat the printed installation URL like
 a password and open it only on the intended trusted PC.
 
@@ -65,6 +75,19 @@ that cookie for push registration or paired-app removal.
 Push registration bodies and relay text fields have explicit size limits.
 Oversized request bodies are rejected before they can be persisted to the
 Agent outbox, Firestore, or Firebase Cloud Messaging.
+
+The hosted Relay fails closed for new enrollment when its mode is not
+configured. Production deployment explicitly uses ticket enrollment. In the
+target subscription flow, tickets are short-lived, single-use authorizations
+issued by trusted subscription code and passed from the subscribed app to the
+local Agent during QR pairing; end users never type or store them. Ticket mode
+must not be enabled for new customers until that automatic entitlement exchange
+is deployed. Existing Agents continue authenticating with
+their durable Ed25519 identity. Firestore transactions enforce the hourly
+notification quota across Cloud Run instances and restarts, and ticketed
+accounts have a configurable Agent-count ceiling. In-memory source limits remain
+an inexpensive first layer, while Google Cloud budgets and instance caps remain
+the outer cost guardrails.
 
 Release dependencies require `cryptography` 50.x. Versions before 49/50 are
 affected by published 2026 advisories. Production installers, containers, and

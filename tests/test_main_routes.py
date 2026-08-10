@@ -39,6 +39,11 @@ class MainRouteStructureTest(unittest.TestCase):
             ),
         )
 
+    def test_agent_page_hides_outbound_registration_evidence_field(self) -> None:
+        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn('"Outbound registration evidence"', source)
+
     def test_freeswitch_diagnostics_use_esl_vocabulary(self) -> None:
         statuses = connector_diagnostic_statuses({
             "pbxType": "freeswitch",
@@ -138,6 +143,10 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn('"/v1/internal/enrollment-tickets"', source)
         self.assertIn("MAX_DEVICES_PER_AGENT", source)
         self.assertIn("MAX_EVENTS_PER_AGENT_PER_HOUR", source)
+        self.assertIn("MAX_AGENTS_PER_ACCOUNT", source)
+        self.assertIn("def _consume_durable_event_quota", source)
+        self.assertIn("@firestore.transactional\ndef _increment_durable_quota", source)
+        self.assertIn('"PBXSENSE_RELAY_ENROLLMENT_MODE", "closed"', source)
         self.assertIn("MAX_SECURE_SNAPSHOT_BYTES", source)
         self.assertIn("Request rate limit exceeded", source)
         self.assertIn('"activation:"', source)
@@ -217,6 +226,15 @@ class MainRouteStructureTest(unittest.TestCase):
 
         self.assertIn("def _require_safe_cookie_mutation", source)
         self.assertIn("Same-origin request required", source)
+
+    def test_browser_cookie_transport_is_scoped_to_its_security_boundary(self) -> None:
+        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(source.count("secure=_local_web_cookie_secure(request)"), 2)
+        self.assertIn("def _local_web_cookie_secure", source)
+        self.assertIn("urlparse(settings.public_url).scheme", source)
+        websocket_auth = source[source.index("def _websocket_authorized") :]
+        self.assertIn("is_private_or_loopback_host(client_host)", websocket_auth)
         self.assertGreaterEqual(source.count("_require_safe_cookie_mutation(request)"), 3)
 
     def test_admin_browser_session_is_long_lived_and_renews(self) -> None:

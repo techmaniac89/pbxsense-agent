@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class AgentSettings:
     voicemail_path: str
     timezone: str
     token: str
+    public_url: str = ""
     relay_url: str = ""
     relay_identity_path: str = "/var/lib/pbxsense-agent/relay_identity.json"
     relay_timeout_seconds: float = 5
@@ -125,6 +127,9 @@ class AgentSettings:
             ),
             timezone=os.getenv("PBXSENSE_TIMEZONE", os.getenv("TZ", "")).strip(),
             token=os.getenv("PBXSENSE_AGENT_TOKEN", "").strip(),
+            public_url=_public_url(
+                os.getenv("PBXSENSE_AGENT_PUBLIC_URL", "")
+            ),
             relay_url=os.getenv("PBXSENSE_RELAY_URL", "").strip().rstrip("/"),
             relay_identity_path=os.getenv(
                 "PBXSENSE_RELAY_IDENTITY_PATH",
@@ -232,6 +237,26 @@ def _parse_extension_names(raw: str) -> dict[str, str]:
         if extension and name:
             names[extension] = name
     return names
+
+
+def _public_url(raw: str) -> str:
+    value = raw.strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "PBXSENSE_AGENT_PUBLIC_URL must be a canonical HTTP(S) root origin"
+        )
+    return value
 
 
 def _normalize_pbx_type(raw: str) -> str:

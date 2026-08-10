@@ -15,11 +15,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.32-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.37-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.5.32-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.5.32-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.5.37-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.5.37-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -102,6 +102,23 @@ The explicit token-bearing pairing URL remains available for troubleshooting:
 ```text
 http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
 ```
+
+Those HTTP examples are for debug-app LAN development. Production/release apps
+require HTTPS/WSS for direct LAN or VPN access. Provide a certificate and key
+readable by the `pbxsense` service, then configure:
+
+```env
+PBXSENSE_AGENT_TLS_CERTFILE=/etc/pbxsense-agent/tls/fullchain.pem
+PBXSENSE_AGENT_TLS_KEYFILE=/etc/pbxsense-agent/tls/privkey.pem
+PBXSENSE_AGENT_PUBLIC_URL=https://pbxsense-agent.example:8765
+```
+
+Restart the service and open the HTTPS pairing URL. The certificate must chain
+to a CA trusted by the phone and its hostname must match the public URL. If a
+reverse proxy terminates TLS, leave the native TLS file settings empty, proxy
+HTTPS/WSS to the local Agent port, and set `PBXSENSE_AGENT_PUBLIC_URL` to the
+proxy's canonical HTTPS origin. Do not expose the Agent directly to the public
+Internet.
 
 After the first app enrolls the Agent with the push relay, the same protected
 page changes to **Add another app**. Scan its QR on each additional phone. The

@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from defusedxml import ElementTree as ET
 
-from .pulse import AmiEndpoint, AmiSnapshot
+from .pulse import AmiEndpoint, AmiSnapshot, uncertain_trunks
 from .history import CdrCall
 from .jtapi import JtapiBridge
 from .settings import AgentSettings
@@ -47,6 +47,7 @@ class CucmClient:
         self._perfmon_error = ""
         self._perfmon_attempted = False
         self._previous_perfmon: dict[str, int] = {}
+        self._known_trunks: list[AmiEndpoint] = []
 
     def snapshot(self) -> AmiSnapshot:
         if self._cached_snapshot and time.monotonic() < self._refresh_after:
@@ -56,12 +57,18 @@ class CucmClient:
             registration = self._registration_status()
             endpoints = _merge_inventory_and_registration(inventory, registration)
             try:
-                endpoints.extend(self._trunk_endpoints())
+                trunks = self._trunk_endpoints()
+                self._known_trunks = trunks
+                endpoints.extend(trunks)
                 self._trunk_error = ""
             except OSError as exc:
                 # Trunk serviceability is additive. A missing optional service
                 # must not make phone inventory and registration unreachable.
                 self._trunk_error = str(exc)
+                endpoints.extend(uncertain_trunks(
+                    self._known_trunks,
+                    "CUCM trunk serviceability evidence is temporarily unavailable",
+                ))
             result = AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -206,7 +213,7 @@ class CucmClient:
             previous_completed = self._previous_perfmon.get(
                 f"{name}|CallsCompleted", completed
             )
-            if active > 0 or completed > previous_completed:
+            if health != "down" and (active > 0 or completed > previous_completed):
                 health, confidence = "healthy", "high"
                 evidence.append(
                     "Active SIP call observed" if active > 0

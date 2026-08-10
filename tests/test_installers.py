@@ -37,16 +37,31 @@ class InstallerStructureTest(unittest.TestCase):
 
     def test_docker_port_is_consistent_with_agent_port_setting(self) -> None:
         dockerfile = Path("docker/Dockerfile").read_text(encoding="utf-8")
+        server = Path("pbxsense_agent/server.py").read_text(encoding="utf-8")
         lan_compose = Path("docker/docker-compose.lan.yml").read_text(encoding="utf-8")
         example_env = Path(".env.example").read_text(encoding="utf-8")
 
-        self.assertIn('${PBXSENSE_AGENT_PORT:-8765}', dockerfile)
+        self.assertIn('CMD ["python", "-m", "pbxsense_agent.server"]', dockerfile)
+        self.assertIn('os.getenv("PBXSENSE_AGENT_PORT", "8765")', server)
         self.assertIn("os.environ.get('PBXSENSE_AGENT_PORT', '8765')", dockerfile)
         self.assertIn(
             '"${PBXSENSE_AGENT_PORT:-8765}:${PBXSENSE_AGENT_PORT:-8765}"',
             lan_compose,
         )
         self.assertIn("PBXSENSE_AGENT_PORT=8765", example_env)
+
+    def test_agent_launcher_supports_an_explicit_tls_pair(self) -> None:
+        dockerfile = Path("docker/Dockerfile").read_text(encoding="utf-8")
+        server = Path("pbxsense_agent/server.py").read_text(encoding="utf-8")
+        example_env = Path(".env.example").read_text(encoding="utf-8")
+
+        self.assertIn("PBXSENSE_AGENT_TLS_CERTFILE", server)
+        self.assertIn("PBXSENSE_AGENT_TLS_KEYFILE", server)
+        self.assertIn("ssl_certfile=certificate or None", server)
+        self.assertIn("ssl_keyfile=private_key or None", server)
+        self.assertIn("PBXSENSE_AGENT_TLS_CERTFILE", dockerfile)
+        self.assertIn("PBXSENSE_AGENT_TLS_CERTFILE", example_env)
+        self.assertIn("PBXSENSE_AGENT_PUBLIC_URL", example_env)
 
     def test_connector_mounts_are_kept_out_of_common_compose(self) -> None:
         common = Path("docker/docker-compose.yml").read_text(encoding="utf-8")

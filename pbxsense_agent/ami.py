@@ -89,6 +89,20 @@ class AmiClient:
                 result["loginAccepted"] = response.get("Response") == "Success"
                 result["loginResponse"] = response.get("Response", "")
                 result["loginMessage"] = response.get("Message", "")
+                try:
+                    registrations = self._collect_action_events(
+                        sock,
+                        action="PJSIPShowRegistrationsOutbound",
+                        complete_event="OutboundRegistrationDetailComplete",
+                    )
+                    result["outboundRegistrationActionSupported"] = True
+                    result["outboundRegistrationsReported"] = sum(
+                        event.name == "OutboundRegistrationDetail"
+                        for event in registrations
+                    )
+                except OSError as exc:
+                    result["outboundRegistrationActionSupported"] = False
+                    result["outboundRegistrationWarning"] = str(exc)
                 self._send_action(sock, {"Action": "Logoff"})
         except OSError as exc:
             result["error"] = str(exc)
@@ -122,6 +136,13 @@ class AmiClient:
                     sock,
                     action="PJSIPShowContacts",
                     complete_event="ContactListComplete",
+                )
+            )
+            events.extend(
+                self._collect_optional_action_events(
+                    sock,
+                    action="PJSIPShowRegistrationsOutbound",
+                    complete_event="OutboundRegistrationDetailComplete",
                 )
             )
             events.extend(
@@ -203,6 +224,11 @@ class AmiClient:
             packet = self._read_packet(sock, phase=action)
             if not packet:
                 continue
+            if packet.get("Response") == "Error":
+                raise AmiError(
+                    f"AMI action {action} failed: "
+                    f"{packet.get('Message', 'unsupported action')}"
+                )
             event_name = packet.get("Event", "")
             if event_name == complete_event:
                 return events
@@ -324,6 +350,8 @@ def _endpoints_from_events(
     endpoints: list[AmiEndpoint] = []
     contact_states = _contact_states_from_events(events)
     contact_addresses = _contact_addresses_from_events(events)
+    registration_states = _outbound_registration_states_from_events(events)
+    explicit_trunks_folded = {item.casefold() for item in explicit_trunks}
     for event in events:
         if event.name not in {"EndpointList", "PeerEntry"}:
             continue
@@ -344,7 +372,14 @@ def _endpoints_from_events(
         )
         if event.name == "PeerEntry":
             device_state = _sip_peer_device_state(fields.get("Status", ""))
-        role = "trunk" if extension in explicit_trunks else _endpoint_role(extension, fields)
+        role = (
+            "trunk"
+            if extension.casefold() in explicit_trunks_folded
+            else _endpoint_role(extension, fields)
+        )
+        registration = registration_states.get(extension.casefold())
+        if role == "trunk" and registration:
+            device_state = _outbound_registration_device_state(registration[1])
         endpoints.append(
             AmiEndpoint(
                 extension=extension,
@@ -376,14 +411,45 @@ def _endpoints_from_events(
                         fields.get("Address", ""),
                     )
                 ),
-                health_confidence="high" if role == "trunk" and device_state else "",
+                health_confidence=(
+                    _outbound_registration_confidence(registration[1])
+                    if role == "trunk" and registration
+                    else "high" if role == "trunk" and device_state else ""
+                ),
                 health_evidence=(
-                    (f"PBX endpoint state: {device_state}",) if role == "trunk" and device_state else ()
+                    (f"PBX outbound registration state: {registration[1]}",)
+                    if role == "trunk" and registration
+                    else (f"PBX endpoint state: {device_state}",)
+                    if role == "trunk" and device_state
+                    else ()
                 ),
             )
         )
     existing = {endpoint.extension for endpoint in endpoints}
-    for extension in sorted(explicit_trunks - existing):
+    existing_folded = {endpoint.casefold() for endpoint in existing}
+    for normalized, registration in sorted(registration_states.items()):
+        name, status, server_uri = registration
+        if normalized in existing_folded:
+            continue
+        if (
+            name.casefold() not in explicit_trunks_folded
+            and not _looks_like_trunk(name, {"ServerUri": server_uri})
+        ):
+            continue
+        state = _outbound_registration_device_state(status)
+        endpoints.append(AmiEndpoint(
+            extension=name,
+            device_state=state,
+            role="trunk",
+            connection_type="PJSIP",
+            health_confidence=_outbound_registration_confidence(status),
+            health_evidence=(f"PBX outbound registration state: {status}",),
+        ))
+        existing.add(name)
+        existing_folded.add(normalized)
+    for extension in sorted(explicit_trunks):
+        if extension.casefold() in existing_folded:
+            continue
         endpoints.append(AmiEndpoint(
             extension=extension,
             device_state="Unknown",
@@ -507,6 +573,41 @@ def _contact_states_from_events(events: list[AmiEvent]) -> dict[str, list[str]]:
         if state:
             contacts.setdefault(endpoint, []).append(state)
     return contacts
+
+
+def _outbound_registration_states_from_events(
+    events: list[AmiEvent],
+) -> dict[str, tuple[str, str, str]]:
+    registrations: dict[str, tuple[str, str, str]] = {}
+    for event in events:
+        if event.name != "OutboundRegistrationDetail":
+            continue
+        fields = event.fields
+        name = (
+            fields.get("ObjectName", "")
+            or fields.get("Registration", "")
+        ).strip()
+        status = fields.get("Status", "").strip()
+        server_uri = fields.get("ServerUri", "").strip()
+        if name and status:
+            registrations[name.casefold()] = (name, status, server_uri)
+    return registrations
+
+
+def _outbound_registration_device_state(status: str) -> str:
+    normalized = status.strip().lower().replace("_", "").replace(" ", "")
+    if normalized == "registered":
+        return "Registered"
+    if normalized in {
+        "rejected", "unregistered", "stopped", "failed", "authfailed",
+    }:
+        return "Unregistered"
+    return status or "Unknown"
+
+
+def _outbound_registration_confidence(status: str) -> str:
+    state = _outbound_registration_device_state(status)
+    return "high" if state in {"Registered", "Unregistered"} else "low"
 
 
 def _contact_addresses_from_events(events: list[AmiEvent]) -> dict[str, str]:

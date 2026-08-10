@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta
@@ -50,8 +51,9 @@ from pbxsense_agent.pulse import (
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
     build_home_payload,
+    uncertain_trunks,
 )
-from pbxsense_agent.settings import AgentSettings, _normalize_pbx_type
+from pbxsense_agent.settings import AgentSettings, _normalize_pbx_type, _public_url
 from pbxsense_agent.yeastar import (
     YeastarClient,
     _channels_from_call_response,
@@ -60,6 +62,27 @@ from pbxsense_agent.yeastar import (
 
 
 class PulseMappingTest(unittest.TestCase):
+    def test_public_agent_url_requires_a_canonical_http_origin(self) -> None:
+        self.assertEqual(
+            _public_url("https://agent.example.test/"),
+            "https://agent.example.test",
+        )
+        for invalid in (
+            "ftp://agent.example.test",
+            "https://user:pass@agent.example.test",
+            "https://agent.example.test/pair",
+            "https://agent.example.test?mode=direct",
+            "https://agent.example.test/#fragment",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    _public_url(invalid)
+
+    def test_asterisk_snapshot_requests_outbound_registration_evidence(self) -> None:
+        source = Path("pbxsense_agent/ami.py").read_text(encoding="utf-8")
+        self.assertIn('action="PJSIPShowRegistrationsOutbound"', source)
+        self.assertIn('complete_event="OutboundRegistrationDetailComplete"', source)
+
     def test_ami_packet_reader_treats_peer_close_as_failure_not_busy_loop(self) -> None:
         reader, writer = socket.socketpair()
         writer.close()
@@ -350,6 +373,69 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(_freeswitch_gateway_health("REGED", "UP")[0], "healthy")
         self.assertEqual(_freeswitch_gateway_health("NOREG", "DOWN")[0], "down")
         self.assertEqual(_freeswitch_gateway_health("TRYING", "DOWN")[0], "unknown")
+        self.assertEqual(_freeswitch_gateway_health("UNREGED", "DOWN")[0], "down")
+        self.assertEqual(_freeswitch_gateway_health("REGED", "DOWN")[0], "degraded")
+
+    def test_freeswitch_retains_known_trunk_as_unknown_on_query_failure(self) -> None:
+        settings = replace(
+            AgentSettings.from_env(),
+            mode="freeswitch",
+            pbx_type="freeswitch",
+            freeswitch_cdr_json_path="",
+            freeswitch_voicemail_path="",
+        )
+        client = FreeSwitchClient(settings)
+        known = AmiEndpoint(
+            extension="external::primary", device_state="REGED / UP",
+            role="trunk", health_status="healthy", health_confidence="high",
+        )
+        with (
+            patch.object(client, "_channels", return_value=[]),
+            patch.object(client, "_endpoints", side_effect=[[], []]),
+            patch.object(client, "_queues", return_value=[]),
+            patch.object(client, "_trunks", side_effect=[[known], OSError("temporary")]),
+        ):
+            first = client.snapshot()
+            second = client.snapshot()
+
+        self.assertEqual(first.endpoints[0].health_status, "healthy")
+        self.assertEqual(second.endpoints[0].health_status, "unknown")
+        self.assertIn("temporarily unavailable", second.endpoints[0].health_evidence[-1])
+
+    def test_yeastar_retains_known_trunk_as_unknown_on_query_failure(self) -> None:
+        settings = replace(
+            AgentSettings.from_env(), mode="yeastar", pbx_type="yeastar",
+            yeastar_base_url="https://pbx.example.test",
+        )
+        client = YeastarClient(settings)
+        known = AmiEndpoint(
+            extension="Primary", device_state="Idle", role="trunk",
+            health_status="healthy", health_confidence="high",
+        )
+        with (
+            patch.object(client, "_endpoints", side_effect=[[], []]),
+            patch.object(client, "_channels", return_value=[]),
+            patch.object(client, "_queues", return_value=[]),
+            patch.object(client, "_cdr_calls", return_value=[]),
+            patch.object(client, "_voicemails", return_value=[]),
+            patch.object(client, "_trunks", side_effect=[[known], OSError("temporary")]),
+        ):
+            first = client.snapshot()
+            client._snapshot_refresh_after = 0
+            second = client.snapshot()
+
+        self.assertEqual(first.endpoints[0].health_status, "healthy")
+        self.assertEqual(second.endpoints[0].health_status, "unknown")
+
+    def test_uncertain_trunk_copy_cannot_claim_recovery(self) -> None:
+        known = AmiEndpoint(
+            extension="carrier", device_state="Registered", role="trunk",
+            active_channels=2, health_status="healthy", health_confidence="high",
+        )
+        retained = uncertain_trunks([known], "Evidence unavailable")[0]
+        self.assertEqual(retained.health_status, "unknown")
+        self.assertEqual(retained.active_channels, 0)
+        self.assertEqual(retained.health_confidence, "low")
 
     def test_recording_locator_never_returns_files_outside_the_configured_root(self) -> None:
         with TemporaryDirectory() as directory:
@@ -489,6 +575,57 @@ external::backup gateway sip:user@backup.test NOREG
         )
 
         self.assertEqual(endpoints[0].device_state, "Unreachable")
+
+    def test_outbound_registration_confirms_configured_pjsip_trunk(self) -> None:
+        endpoints = _endpoints_from_events(
+            [AmiEvent(
+                name="OutboundRegistrationDetail",
+                fields={
+                    "ObjectName": "Cosmote",
+                    "ServerUri": "sip:ims.otenet.gr",
+                    "Status": "Registered",
+                },
+            )],
+            explicit_trunks=frozenset({"Cosmote"}),
+        )
+
+        self.assertEqual(len(endpoints), 1)
+        self.assertEqual(endpoints[0].extension, "Cosmote")
+        self.assertEqual(endpoints[0].role, "trunk")
+        self.assertEqual(endpoints[0].device_state, "Registered")
+        self.assertEqual(endpoints[0].health_confidence, "high")
+        self.assertIn("Registered", endpoints[0].health_evidence[0])
+
+    def test_outbound_registration_overrides_ambiguous_endpoint_state(self) -> None:
+        endpoints = _endpoints_from_events(
+            [
+                AmiEvent(
+                    name="EndpointList",
+                    fields={"ObjectName": "cosmote", "DeviceState": "Unknown"},
+                ),
+                AmiEvent(
+                    name="OutboundRegistrationDetail",
+                    fields={"ObjectName": "Cosmote", "Status": "Rejected"},
+                ),
+            ],
+            explicit_trunks=frozenset({"Cosmote"}),
+        )
+
+        self.assertEqual(len(endpoints), 1)
+        self.assertEqual(endpoints[0].device_state, "Unregistered")
+        self.assertIn("Rejected", endpoints[0].health_evidence[0])
+
+    def test_transitional_outbound_registration_remains_uncertain(self) -> None:
+        endpoints = _endpoints_from_events(
+            [AmiEvent(
+                name="OutboundRegistrationDetail",
+                fields={"ObjectName": "Cosmote", "Status": "Trying"},
+            )],
+            explicit_trunks=frozenset({"cosmote"}),
+        )
+
+        self.assertEqual(endpoints[0].device_state, "Trying")
+        self.assertEqual(endpoints[0].health_confidence, "low")
 
     def test_chan_sip_peers_map_to_endpoints(self) -> None:
         endpoints = _endpoints_from_events(
@@ -997,6 +1134,29 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(tracker.observe(down, now), {"trunk-main"})
         self.assertEqual(
             tracker.observe(unknown, now + timedelta(seconds=1)), {"trunk-main"}
+        )
+
+    def test_temporarily_missing_trunk_does_not_clear_confirmed_incident(self) -> None:
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(0),
+            recovery_confirmation=timedelta(seconds=60),
+            role="trunk",
+        )
+        now = datetime(2026, 8, 10, 12, 0)
+        down = AmiSnapshot(
+            reachable=True, agent_version="test",
+            endpoints=[AmiEndpoint(
+                extension="trunk-main", device_state="Unreachable", role="trunk"
+            )],
+        )
+        missing = AmiSnapshot(reachable=True, agent_version="test", endpoints=[])
+
+        self.assertEqual(tracker.observe(down, now), {"trunk-main"})
+        self.assertEqual(
+            tracker.observe(missing, now + timedelta(seconds=5)), {"trunk-main"}
+        )
+        self.assertEqual(
+            tracker.observe(down, now + timedelta(seconds=10)), {"trunk-main"}
         )
 
     def test_explicit_trunk_identity_does_not_depend_on_its_name(self) -> None:

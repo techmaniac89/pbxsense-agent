@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
+from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot, uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -49,13 +49,22 @@ class YeastarClient:
         self._token_expires_at = 0.0
         self._cached_snapshot: AmiSnapshot | None = None
         self._snapshot_refresh_after = 0.0
+        self._known_trunks: list[AmiEndpoint] = []
 
     def snapshot(self) -> AmiSnapshot:
         if self._cached_snapshot and time.monotonic() < self._snapshot_refresh_after:
             return self._cached_snapshot
         try:
             endpoints = self._endpoints()
-            endpoints.extend(self._trunks())
+            try:
+                trunks = self._trunks()
+                self._known_trunks = trunks
+            except OSError:
+                trunks = uncertain_trunks(
+                    self._known_trunks,
+                    "Yeastar trunk evidence is temporarily unavailable",
+                )
+            endpoints.extend(trunks)
             snapshot = AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -172,13 +181,10 @@ class YeastarClient:
         return channels
 
     def _trunks(self) -> list[AmiEndpoint]:
-        try:
-            response = self._api(
-                "trunk/list",
-                {"page": 1, "page_size": 1000, "sort_by": "id", "order_by": "asc"},
-            )
-        except OSError:
-            return []
+        response = self._api(
+            "trunk/list",
+            {"page": 1, "page_size": 1000, "sort_by": "id", "order_by": "asc"},
+        )
         trunks: list[AmiEndpoint] = []
         for row in _rows(response):
             trunk_id = _integer(row.get("id"))
