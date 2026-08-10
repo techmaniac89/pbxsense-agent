@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.5.29-beta` on the **Breeze** channel.
+The current Agent release is `0.5.30-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -33,6 +33,10 @@ out of the user-facing PBXSense experience.
   allowing device details to show when it was last active across Agent restarts.
 - Shows queue pressure when supported: Asterisk/Grandstream wait and member
   state, plus FreeSWITCH `mod_callcenter` and Yeastar waiting counts.
+- Reports SIP trunk health as Healthy, Down, or Unknown with sanitized evidence.
+  Asterisk/Grandstream prefer explicit endpoint identities and reconcile active
+  calls; FreeSWITCH reads Sofia gateway state/status; Yeastar reads native
+  OpenAPI trunk status.
 - Groups recent PBX authentication failures and blocked ACL attempts into
   privacy-preserving Security Signals when the local security log is visible.
 - Polls the PBX once through a central snapshot pipeline, then streams the same
@@ -75,6 +79,17 @@ The app should not talk directly to AMI, ESL, ARI, SIP, SSH, or raw PBX logs.
   CUCM-delivered CDR/CMR history files, and an optional JTAPI live-call bridge.
 - Mock connector for local development and UI testing.
 
+Yeastar also reads voicemail metadata and protects recording download behind
+the Agent recording endpoint. Grandstream can add CDR, voicemail, and recording
+data when the corresponding UCM files are explicitly mounted and configured;
+availability depends on model, firmware, and export layout.
+
+Base CUCM does not provide the four missing operational domains by itself:
+real-time queue state requires UCCX/UCCE, voicemail requires Unity Connection,
+recordings require MediaSense or the deployed recorder, and trustworthy trunk
+health requires additional validated performance/call-processing evidence.
+PBXSense does not infer those states from static CUCM configuration.
+
 GUI PBX distributions are mapped to their underlying PBX engine:
 
 - FreePBX, Issabel, and VitalPBX use the Asterisk connector.
@@ -92,11 +107,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.29-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.5.30-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.5.29-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.5.29-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.5.30-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.5.30-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -516,6 +531,17 @@ Optionally protect the Agent with a shared local token:
 PBXSENSE_AGENT_TOKEN=choose-a-long-random-value
 ```
 
+For Asterisk or Grandstream, declare exact trunk endpoint/profile names when
+possible. This avoids relying on provider-name heuristics:
+
+```text
+PBXSENSE_TRUNK_ENDPOINTS=primary-carrier,backup-carrier
+```
+
+Unknown evidence is displayed as uncertain and does not start a new outage.
+Explicit unavailable/registration failures must remain present for the trunk
+confirmation interval before PBXSense emits a Health Signal.
+
 When this is set, PBXSense must be connected with the same token. Leave it empty
 only for quick local testing on a trusted network.
 
@@ -722,7 +748,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.5.29-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.5.30-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -736,7 +762,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.5.29-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.5.30-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging

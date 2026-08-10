@@ -32,6 +32,7 @@ class AgentSettings:
     endpoint_outage_confirmation_seconds: float = 30
     trunk_outage_confirmation_seconds: float = 5
     endpoint_recovery_confirmation_seconds: float = 60
+    trunk_endpoints: frozenset[str] = frozenset()
     asterisk_recordings_path: str = "/var/spool/asterisk/monitor"
     asterisk_security_log_path: str = "/var/log/asterisk/security"
     freeswitch_recordings_path: str = ""
@@ -140,6 +141,11 @@ class AgentSettings:
             ),
             endpoint_recovery_confirmation_seconds=max(
                 0, _env_float("PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS", 60)
+            ),
+            trunk_endpoints=frozenset(
+                item.strip()
+                for item in os.getenv("PBXSENSE_TRUNK_ENDPOINTS", "").split(",")
+                if item.strip()
             ),
             asterisk_recordings_path=os.getenv(
                 "ASTERISK_RECORDINGS_PATH",

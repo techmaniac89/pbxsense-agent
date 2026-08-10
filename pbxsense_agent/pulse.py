@@ -38,6 +38,9 @@ class AmiEndpoint:
     # from device_state: a phone can be registered while its owner is away.
     presence: str = ""
     ip_address: str = ""
+    health_status: str = ""
+    health_confidence: str = ""
+    health_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class _MomentState:
     voicemail_keys: frozenset[str]
     queue_abandonment_keys: frozenset[str]
     unavailable_trunks: frozenset[str]
+    healthy_trunks: frozenset[str]
     active_trunks: frozenset[str]
 
 
@@ -181,7 +185,7 @@ class ActivityTracker:
                     category="moment",
                 )
 
-        recovered_trunks = previous.unavailable_trunks - current.unavailable_trunks
+        recovered_trunks = previous.unavailable_trunks & current.healthy_trunks
         self._recovered_trunks_waiting_for_call.update(recovered_trunks)
         successful_recoveries = self._recovered_trunks_waiting_for_call & current.active_trunks
         for trunk in sorted(successful_recoveries):
@@ -337,6 +341,13 @@ class EndpointAvailabilitySignalTracker:
             }
             for extension, endpoint in endpoints.items():
                 state = self._states.setdefault(extension, _EndpointSignalState())
+                if self._role == "trunk" and _trunk_health_state(endpoint) == "unknown":
+                    # Missing/ambiguous evidence must not declare recovery or
+                    # start a new outage. Keep an already-confirmed incident
+                    # visible until the PBX supplies a trustworthy state.
+                    if state.signal_visible:
+                        visible.add(extension)
+                    continue
                 if _endpoint_unavailable(endpoint):
                     if state.recovery_started_at is not None:
                         # A brief reachable sample is not a confirmed recovery.
@@ -433,7 +444,11 @@ def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
     )
     unavailable_trunks = frozenset(
         endpoint.extension for endpoint in snapshot.endpoints
-        if endpoint.role == "trunk" and _endpoint_unavailable(endpoint)
+        if endpoint.role == "trunk" and _trunk_health_state(endpoint) == "down"
+    )
+    healthy_trunks = frozenset(
+        endpoint.extension for endpoint in snapshot.endpoints
+        if endpoint.role == "trunk" and _trunk_health_state(endpoint) == "healthy"
     )
     active_trunks = frozenset(
         channel.endpoint or channel.extension for channel in snapshot.channels
@@ -449,6 +464,7 @@ def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
         voicemail_keys=voicemail_keys,
         queue_abandonment_keys=queue_abandonment_keys,
         unavailable_trunks=unavailable_trunks,
+        healthy_trunks=healthy_trunks,
         active_trunks=active_trunks,
     )
 
@@ -698,16 +714,19 @@ def _build_trunks(
         name = _trunk_display_name(
             _extension_name(endpoint.extension, extension_names, endpoint.label)
         )
-        unavailable = _endpoint_unavailable(endpoint)
-        if unavailable:
+        health = _trunk_health_state(endpoint)
+        if health == "down":
             status_text = "Needs attention"
             detail = endpoint.device_state or "Not reachable"
-        elif endpoint.active_channels > 0:
+        elif health == "healthy" and endpoint.active_channels > 0:
             status_text = "Working"
             detail = f"Carrying {endpoint.active_channels} active channel(s)"
-        else:
+        elif health == "healthy":
             status_text = "Working"
             detail = _registered_trunk_detail(endpoint.device_state)
+        else:
+            status_text = "Status unknown"
+            detail = "The PBX did not provide enough live health evidence"
 
         trunk = {
             "name": name,
@@ -715,7 +734,12 @@ def _build_trunks(
             "statusText": status_text,
             "detail": detail,
             "activeChannels": endpoint.active_channels,
-            "available": not unavailable,
+            "available": health == "healthy",
+            "healthStatus": health,
+            "healthConfidence": endpoint.health_confidence or (
+                "high" if health in {"healthy", "down"} else "low"
+            ),
+            "healthEvidence": list(endpoint.health_evidence),
         }
         if endpoint.connection_type:
             trunk["connectionType"] = endpoint.connection_type
@@ -908,9 +932,9 @@ def _build_signals(
         if endpoint.role == "trunk":
             if endpoint.extension in active_trunk_endpoints:
                 continue
-            if (
-                _endpoint_unavailable(endpoint)
-                and trunk_unavailability_signals is not None
+            health = _trunk_health_state(endpoint)
+            if health in {"down", "unknown"} and (
+                trunk_unavailability_signals is not None
                 and endpoint.extension not in trunk_unavailability_signals
             ):
                 continue
@@ -1028,20 +1052,31 @@ def _trunk_signals(
     extension_names: dict[str, str],
 ) -> list[dict]:
     name = _extension_name(endpoint.extension, extension_names, endpoint.label)
-    if _endpoint_unavailable(endpoint):
+    health = _trunk_health_state(endpoint)
+    if health in {"down", "unknown"}:
+        unknown = health == "unknown"
         return [
             {
                 "id": f"sig_trunk_{endpoint.extension}_unavailable",
-                "kind": "trunk_unavailable",
+                "kind": "trunk_health_unknown" if unknown else "trunk_unavailable",
                 "category": "health",
                 "importance": "important",
                 "state": "active",
-                "title": f"{_trunk_display_name(name)} looks unavailable.",
-                "body": "Incoming or outgoing calls through this trunk may be affected.",
+                "title": (
+                    f"{_trunk_display_name(name)} health cannot be confirmed."
+                    if unknown else f"{_trunk_display_name(name)} looks unavailable."
+                ),
+                "body": (
+                    "PBXSense is waiting for trustworthy live trunk evidence."
+                    if unknown else "Incoming or outgoing calls through this trunk may be affected."
+                ),
                 "timeLabel": "Just now",
                 "actionLabel": None,
                 "why": [
-                    "The PBX reported a trunk-like endpoint as unavailable.",
+                    (
+                        "The PBX stopped providing a conclusive state for this trunk."
+                        if unknown else "The PBX explicitly reported the trunk endpoint as unavailable."
+                    ),
                     "PBXSense monitors trunks separately from phones and extensions.",
                 ],
                 "technical": {
@@ -1049,6 +1084,8 @@ def _trunk_signals(
                     "device_state": endpoint.device_state,
                     "active_channels": str(endpoint.active_channels),
                     "role": "trunk",
+                    "health_status": health,
+                    "health_confidence": endpoint.health_confidence or "low",
                 },
             }
         ]
@@ -1382,7 +1419,28 @@ def _is_active_channel(channel: AmiChannel) -> bool:
 
 
 def _endpoint_unavailable(endpoint: AmiEndpoint) -> bool:
+    if endpoint.role == "trunk":
+        return _trunk_health_state(endpoint) == "down"
     return _device_state_is_unavailable(endpoint.device_state)
+
+
+def _trunk_health_state(endpoint: AmiEndpoint) -> str:
+    explicit = endpoint.health_status.strip().lower()
+    if explicit in {"healthy", "down", "unknown"}:
+        return explicit
+    if endpoint.active_channels > 0:
+        return "healthy"
+    state = endpoint.device_state.strip().lower().replace("_", " ").replace("-", " ")
+    if any(marker in state for marker in (
+        "unavailable", "unreachable", "removed", "unregistered",
+        "not registered", "rejected", "failed",
+    )):
+        return "down"
+    if any(marker in state for marker in (
+        "reachable", "registered", "available", "ok", "lagged", "nonqualified",
+    )):
+        return "healthy"
+    return "unknown"
 
 
 def _device_state_is_unavailable(raw: str) -> bool:

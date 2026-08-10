@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,6 +35,7 @@ class FreeSwitchClient:
         try:
             channels = self._channels()
             endpoints = self._endpoints(channels)
+            endpoints.extend(self._trunks())
             return AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -136,6 +138,33 @@ class FreeSwitchClient:
                 ]
         except OSError:
             # mod_callcenter is optional; live calls and presence still work.
+            return []
+
+    def _trunks(self) -> list[AmiEndpoint]:
+        try:
+            with self._connect() as sock:
+                self._authenticate(sock)
+                summary = self._api(sock, "sofia status")
+                trunks: list[AmiEndpoint] = []
+                for name in _sofia_gateway_names(summary):
+                    detail = self._api(sock, f"sofia status gateway {name}")
+                    state = _detail_value(detail, "State")
+                    status = _detail_value(detail, "Status")
+                    health, confidence, evidence = _freeswitch_gateway_health(
+                        state, status
+                    )
+                    trunks.append(AmiEndpoint(
+                        extension=name,
+                        device_state=" / ".join(filter(None, (state, status))),
+                        label=name.split("::", 1)[-1],
+                        role="trunk",
+                        connection_type="SIP",
+                        health_status=health,
+                        health_confidence=confidence,
+                        health_evidence=(evidence,),
+                    ))
+                return trunks
+        except OSError:
             return []
 
     def _connect(self) -> socket.socket:
@@ -276,6 +305,50 @@ def _first_integer(raw: str) -> int:
         except ValueError:
             continue
     return 0
+
+
+def _sofia_gateway_names(raw: str) -> list[str]:
+    names: list[str] = []
+    for line in raw.splitlines():
+        columns = line.split()
+        if len(columns) < 3 or columns[1].lower() != "gateway":
+            continue
+        name = columns[0].strip()
+        if re.fullmatch(r"[A-Za-z0-9_.:@-]+", name):
+            names.append(name)
+    return names
+
+
+def _detail_value(raw: str, key: str) -> str:
+    for line in raw.splitlines():
+        if line.strip().lower().startswith(key.lower()):
+            _, _, value = line.partition("\t")
+            if not value:
+                _, _, value = line.partition(":")
+            if not value:
+                parts = line.split(None, 1)
+                value = parts[1] if len(parts) == 2 else ""
+            return value.strip()
+    return ""
+
+
+def _freeswitch_gateway_health(
+    state: str,
+    status: str,
+) -> tuple[str, str, str]:
+    normalized_state = state.strip().upper()
+    normalized_status = status.strip().upper().split(" ", 1)[0]
+    evidence = (
+        f"FreeSWITCH Sofia gateway state {normalized_state or 'UNKNOWN'}, "
+        f"status {normalized_status or 'UNKNOWN'}"
+    )
+    if normalized_status == "UP" and normalized_state in {"REGED", "NOREG"}:
+        return "healthy", "high", evidence
+    if normalized_state in {"FAILED", "FAIL_WAIT", "EXPIRED", "TIMEOUT", "DOWN"}:
+        return "down", "high", evidence
+    if normalized_status == "DOWN" and normalized_state == "NOREG":
+        return "down", "high", evidence
+    return "unknown", "low", evidence
 
 
 def _channel_from_row(row: dict[str, Any]) -> AmiChannel:

@@ -17,6 +17,7 @@ from pbxsense_agent.ami import (
     _endpoints_from_events,
     _number_from_pjsip_value,
     _queues_from_events,
+    _reconcile_trunk_activity,
 )
 from pbxsense_agent.connectors import connector_for_settings
 from pbxsense_agent.freeswitch import (
@@ -26,6 +27,8 @@ from pbxsense_agent.freeswitch import (
     _pipe_first_column,
     _read_json_cdr_calls,
     _read_voicemails as _read_freeswitch_voicemails,
+    _freeswitch_gateway_health,
+    _sofia_gateway_names,
 )
 from pbxsense_agent.grandstream import GrandstreamUcmClient
 from pbxsense_agent.recordings import find_recording
@@ -49,7 +52,11 @@ from pbxsense_agent.pulse import (
     build_home_payload,
 )
 from pbxsense_agent.settings import AgentSettings, _normalize_pbx_type
-from pbxsense_agent.yeastar import YeastarClient, _channels_from_call_response
+from pbxsense_agent.yeastar import (
+    YeastarClient,
+    _channels_from_call_response,
+    _yeastar_trunk_health,
+)
 
 
 class PulseMappingTest(unittest.TestCase):
@@ -242,6 +249,45 @@ class PulseMappingTest(unittest.TestCase):
 
         self.assertEqual(calls[0].recording_id, "20260709-1000-2105550100.wav")
 
+    def test_yeastar_voicemail_api_maps_messages_for_known_extensions(self) -> None:
+        settings = AgentSettings(
+            mode="yeastar", pbx_type="yeastar", host="", port=0,
+            username="", password="", freeswitch_host="", freeswitch_port=0,
+            freeswitch_password="", freeswitch_cdr_json_path="",
+            freeswitch_voicemail_path="", display_name="Yeastar",
+            timeout_seconds=3, extension_names={}, cdr_csv_path="",
+            voicemail_path="", timezone="UTC", token="",
+        )
+        client = YeastarClient(settings)
+        endpoints = [
+            AmiEndpoint(extension="1000", device_state="Reachable"),
+            AmiEndpoint(extension="1001", device_state="Reachable"),
+        ]
+        with patch.object(
+            client,
+            "_api",
+            return_value={
+                "voicemail_list": [
+                    {
+                        "number": "1000",
+                        "data": [
+                            {
+                                "name": "Maria",
+                                "number": "2105550100",
+                                "time": "2026-07-09 13:30:00",
+                            }
+                        ],
+                    }
+                ]
+            },
+        ) as api:
+            messages = client._voicemails(endpoints)
+
+        api.assert_called_once_with("vm/query", {"number": "1000,1001"})
+        self.assertEqual(messages[0].mailbox, "1000")
+        self.assertEqual(messages[0].caller, "Maria")
+        self.assertEqual(messages[0].created_at, datetime(2026, 7, 9, 13, 30))
+
     def test_yeastar_queue_status_maps_waiting_callers_and_longest_wait(self) -> None:
         settings = AgentSettings(
             mode="yeastar", pbx_type="yeastar", host="", port=0,
@@ -267,6 +313,43 @@ class PulseMappingTest(unittest.TestCase):
         self.assertEqual(queues[0].name, "6400")
         self.assertEqual(queues[0].waiting_callers, 2)
         self.assertEqual(queues[0].longest_wait_seconds, 42)
+
+    def test_yeastar_trunk_list_maps_vendor_health_states(self) -> None:
+        settings = AgentSettings(
+            mode="yeastar", pbx_type="yeastar", host="", port=0,
+            username="", password="", freeswitch_host="", freeswitch_port=0,
+            freeswitch_password="", freeswitch_cdr_json_path="",
+            freeswitch_voicemail_path="", display_name="Yeastar",
+            timeout_seconds=3, extension_names={}, cdr_csv_path="",
+            voicemail_path="", timezone="UTC", token="",
+        )
+        client = YeastarClient(settings)
+        with patch.object(client, "_api", return_value={"data": [
+            {"id": 8, "status": 1, "name": "Primary", "type": "register"},
+            {"id": 9, "status": 42, "name": "Backup", "type": "peer_did"},
+            {"id": 10, "status": 3, "name": "Unmonitored", "type": "peer_did"},
+        ]}):
+            trunks = client._trunks()
+
+        self.assertEqual([item.health_status for item in trunks], [
+            "healthy", "down", "unknown",
+        ])
+        self.assertTrue(all(item.role == "trunk" for item in trunks))
+        self.assertEqual(_yeastar_trunk_health(44)[0], "unknown")
+
+    def test_freeswitch_sofia_gateway_health_uses_state_and_status(self) -> None:
+        summary = """
+external profile sip:mod_sofia@127.0.0.1:5080 RUNNING
+external::primary gateway sip:user@example.test REGED
+external::backup gateway sip:user@backup.test NOREG
+"""
+        self.assertEqual(
+            _sofia_gateway_names(summary),
+            ["external::primary", "external::backup"],
+        )
+        self.assertEqual(_freeswitch_gateway_health("REGED", "UP")[0], "healthy")
+        self.assertEqual(_freeswitch_gateway_health("NOREG", "DOWN")[0], "down")
+        self.assertEqual(_freeswitch_gateway_health("TRYING", "DOWN")[0], "unknown")
 
     def test_recording_locator_never_returns_files_outside_the_configured_root(self) -> None:
         with TemporaryDirectory() as directory:
@@ -886,6 +969,66 @@ class PulseMappingTest(unittest.TestCase):
             tracker.observe(unavailable, now + timedelta(seconds=5)),
             {"trunk-main"},
         )
+
+    def test_unknown_trunk_evidence_does_not_start_or_clear_an_outage(self) -> None:
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(0),
+            recovery_confirmation=timedelta(0),
+            role="trunk",
+        )
+        now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
+        down = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(
+                extension="trunk-main", device_state="Unreachable", role="trunk"
+            )],
+        )
+        unknown = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(
+                extension="trunk-main", device_state="Unknown", role="trunk",
+                health_status="unknown",
+            )],
+        )
+
+        self.assertEqual(tracker.observe(unknown, now), set())
+        self.assertEqual(tracker.observe(down, now), {"trunk-main"})
+        self.assertEqual(
+            tracker.observe(unknown, now + timedelta(seconds=1)), {"trunk-main"}
+        )
+
+    def test_explicit_trunk_identity_does_not_depend_on_its_name(self) -> None:
+        endpoints = _endpoints_from_events(
+            [AmiEvent("EndpointList", {
+                "ObjectName": "edge-01", "DeviceState": "Available",
+            })],
+            explicit_trunks=frozenset({"edge-01", "backup-01"}),
+        )
+
+        by_id = {endpoint.extension: endpoint for endpoint in endpoints}
+        self.assertEqual(by_id["edge-01"].role, "trunk")
+        self.assertEqual(by_id["backup-01"].health_status, "unknown")
+
+    def test_remote_named_phone_is_not_misclassified_as_ote_trunk(self) -> None:
+        self.assertEqual(_endpoint_role("remote-office", {}), "extension")
+
+    def test_active_channel_confirms_health_and_updates_trunk_count(self) -> None:
+        endpoints = [AmiEndpoint(
+            extension="edge-01", device_state="Unknown", role="trunk"
+        )]
+        channels = [AmiChannel(
+            channel="PJSIP/edge-01-0001", extension="2105550100",
+            caller="100", connected="2105550100", state="Up",
+            endpoint="edge-01",
+        )]
+
+        trunk = _reconcile_trunk_activity(endpoints, channels)[0]
+
+        self.assertEqual(trunk.active_channels, 1)
+        self.assertEqual(trunk.health_status, "healthy")
+        self.assertIn("Active call observed", trunk.health_evidence)
 
     def test_endpoint_label_is_used_before_manual_extension_name(self) -> None:
         payload = build_home_payload(

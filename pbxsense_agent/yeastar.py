@@ -35,6 +35,7 @@ class YeastarClient:
             return self._cached_snapshot
         try:
             endpoints = self._endpoints()
+            endpoints.extend(self._trunks())
             snapshot = AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
@@ -131,6 +132,36 @@ class YeastarClient:
             response = self._api("call/query", {"type": call_type})
             channels.extend(_channels_from_call_response(response))
         return channels
+
+    def _trunks(self) -> list[AmiEndpoint]:
+        try:
+            response = self._api(
+                "trunk/list",
+                {"page": 1, "page_size": 1000, "sort_by": "id", "order_by": "asc"},
+            )
+        except OSError:
+            return []
+        trunks: list[AmiEndpoint] = []
+        for row in _rows(response):
+            trunk_id = _integer(row.get("id"))
+            name = _string(row, "name")
+            if trunk_id <= 0 and not name:
+                continue
+            status = _integer(row.get("status"))
+            health, confidence, evidence = _yeastar_trunk_health(status)
+            trunks.append(AmiEndpoint(
+                extension=name or f"trunk-{trunk_id}",
+                number=_string(row, "def_outbound_cid", "username"),
+                label=name,
+                role="trunk",
+                connection_type="SIP",
+                device_state=evidence,
+                active_channels=1 if status == 2 else 0,
+                health_status=health,
+                health_confidence=confidence,
+                health_evidence=(evidence,),
+            ))
+        return trunks
 
     def _queues(self) -> list[AmiQueue]:
         try:
@@ -334,3 +365,25 @@ def _parse_datetime(value: str) -> datetime | None:
             except ValueError:
                 continue
     return None
+
+
+def _yeastar_trunk_health(status: int) -> tuple[str, str, str]:
+    labels = {
+        0: "Unknown status",
+        1: "Idle",
+        2: "Busy",
+        3: "Idle and unmonitored",
+        4: "Registering",
+        41: "Registration failed",
+        42: "Unreachable",
+        43: "Unavailable",
+        44: "Disabled",
+        45: "Authentication failed",
+    }
+    evidence = f"Yeastar trunk status {status}: {labels.get(status, 'Unrecognized')}"
+    if status in {1, 2}:
+        return "healthy", "high", evidence
+    if status in {41, 42, 43, 45}:
+        return "down", "high", evidence
+    # Disabled, registering, unmonitored, and unknown are not outages.
+    return "unknown", "low", evidence

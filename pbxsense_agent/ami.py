@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .settings import AgentSettings
@@ -26,15 +26,36 @@ class AmiClient:
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
+        self._known_trunks: dict[str, AmiEndpoint] = {}
 
     def snapshot(self) -> AmiSnapshot:
         try:
             events = self._read_events()
+            channels = _channels_from_events(events)
+            endpoints = _endpoints_from_events(
+                events,
+                explicit_trunks=self._settings.trunk_endpoints,
+            )
+            endpoints = _reconcile_trunk_activity(endpoints, channels)
+            current_ids = {endpoint.extension for endpoint in endpoints}
+            for endpoint in endpoints:
+                if endpoint.role == "trunk":
+                    self._known_trunks[endpoint.extension] = endpoint
+            for extension, endpoint in self._known_trunks.items():
+                if extension not in current_ids:
+                    endpoints.append(replace(
+                        endpoint,
+                        device_state="Unknown",
+                        active_channels=0,
+                        health_status="unknown",
+                        health_confidence="low",
+                        health_evidence=("Missing from the current endpoint snapshot",),
+                    ))
             return AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
-                channels=_channels_from_events(events),
-                endpoints=_endpoints_from_events(events),
+                channels=channels,
+                endpoints=endpoints,
                 queues=_queues_from_events(events),
             )
         except OSError as exc:
@@ -296,7 +317,10 @@ def _channels_from_events(events: list[AmiEvent]) -> list[AmiChannel]:
     return channels
 
 
-def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
+def _endpoints_from_events(
+    events: list[AmiEvent],
+    explicit_trunks: frozenset[str] = frozenset(),
+) -> list[AmiEndpoint]:
     endpoints: list[AmiEndpoint] = []
     contact_states = _contact_states_from_events(events)
     contact_addresses = _contact_addresses_from_events(events)
@@ -320,6 +344,7 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
         )
         if event.name == "PeerEntry":
             device_state = _sip_peer_device_state(fields.get("Status", ""))
+        role = "trunk" if extension in explicit_trunks else _endpoint_role(extension, fields)
         endpoints.append(
             AmiEndpoint(
                 extension=extension,
@@ -334,7 +359,7 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
                     "DeviceName",
                     "ObjectName",
                 ),
-                role=_endpoint_role(extension, fields),
+                role=role,
                 connection_type="SIP" if event.name == "PeerEntry" else "PJSIP",
                 number=_endpoint_number(fields),
                 presence=_first_value(
@@ -351,9 +376,50 @@ def _endpoints_from_events(events: list[AmiEvent]) -> list[AmiEndpoint]:
                         fields.get("Address", ""),
                     )
                 ),
+                health_confidence="high" if role == "trunk" and device_state else "",
+                health_evidence=(
+                    (f"PBX endpoint state: {device_state}",) if role == "trunk" and device_state else ()
+                ),
             )
         )
+    existing = {endpoint.extension for endpoint in endpoints}
+    for extension in sorted(explicit_trunks - existing):
+        endpoints.append(AmiEndpoint(
+            extension=extension,
+            device_state="Unknown",
+            role="trunk",
+            connection_type="SIP",
+            health_status="unknown",
+            health_confidence="low",
+            health_evidence=("Configured trunk was absent from the endpoint snapshot",),
+        ))
     return endpoints
+
+
+def _reconcile_trunk_activity(
+    endpoints: list[AmiEndpoint],
+    channels: list[AmiChannel],
+) -> list[AmiEndpoint]:
+    trunk_ids = {endpoint.extension for endpoint in endpoints if endpoint.role == "trunk"}
+    active_counts: dict[str, int] = {}
+    for channel in channels:
+        endpoint = channel.endpoint or channel.extension
+        if endpoint in trunk_ids:
+            active_counts[endpoint] = active_counts.get(endpoint, 0) + 1
+    return [
+        replace(
+            endpoint,
+            active_channels=max(endpoint.active_channels, active_counts.get(endpoint.extension, 0)),
+            health_status=("healthy" if active_counts.get(endpoint.extension, 0) else endpoint.health_status),
+            health_confidence=("high" if active_counts.get(endpoint.extension, 0) else endpoint.health_confidence),
+            health_evidence=(
+                (*endpoint.health_evidence, "Active call observed")
+                if active_counts.get(endpoint.extension, 0)
+                else endpoint.health_evidence
+            ),
+        )
+        for endpoint in endpoints
+    ]
 
 
 def _queues_from_events(events: list[AmiEvent]) -> list[AmiQueue]:
@@ -600,7 +666,6 @@ def _looks_like_trunk(name: str, fields: dict[str, str]) -> bool:
         "pstn",
         "itsp",
         "cosmote",
-        "ote",
         "vodafone",
         "nova",
         "wind",
