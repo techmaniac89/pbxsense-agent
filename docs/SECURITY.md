@@ -95,6 +95,23 @@ release CI consume the generated `requirements.lock` files with
 `--require-hashes`; edit the input `requirements.txt` files and regenerate both
 locks together when updating dependencies.
 
+Every push and pull request runs an exact-commit-pinned dependency audit,
+GitHub CodeQL extended security analysis, and a hardened-container build that
+confirms the non-root runtime user. Dependabot monitors GitHub Actions, Python
+dependencies, and both Docker build contexts. Release jobs generate a CycloneDX
+SBOM before checksums, then use GitHub's OIDC-backed Sigstore service to attach
+both SLSA build provenance and an SBOM attestation to the installer. Release
+consumers can verify provenance with:
+
+```bash
+gh attestation verify \
+  PBXSenseAgent-0.6.0-beta-linux-source-installer.tar.gz \
+  --repo techmaniac89/pbxsense-agent
+```
+
+All third-party workflow actions are pinned to immutable commits. Review and
+merge Dependabot updates rather than allowing unattended security-tool changes.
+
 Generate a token:
 
 ```bash

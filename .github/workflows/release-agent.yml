@@ -65,6 +65,15 @@ jobs:
             -Version "${{ steps.version.outputs.version }}" `
             -OutputDir "$PWD/dist"
 
+      - name: Generate CycloneDX dependency SBOM
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266
+        with:
+          inputs: requirements.lock
+          require-hashes: true
+          internal-be-careful-extra-flags: >-
+            --format cyclonedx-json
+            --output dist/PBXSenseAgent-${{ steps.version.outputs.version }}.cdx.json
+
       - name: Create SHA-256 checksums
         shell: pwsh
         run: |
@@ -93,6 +102,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Download verified build assets
@@ -115,6 +127,17 @@ jobs:
             echo "Tag $RELEASE_TAG already exists. Bump AGENT_VERSION before publishing again." >&2
             exit 1
           fi
+
+      - name: Attest release provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
+
+      - name: Attest release SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/PBXSenseAgent-${{ needs.build.outputs.version }}-linux-source-installer.tar.gz
+          sbom-path: dist/PBXSenseAgent-${{ needs.build.outputs.version }}.cdx.json
 
       - name: Publish GitHub Release
         shell: bash

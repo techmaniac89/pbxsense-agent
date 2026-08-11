@@ -188,3 +188,10 @@ to `main`. Keep the default in `packaging/linux/build_release.ps1` and the
 release examples in `README.md` synchronized with it. Breeze beta versions are
 published as normal GitHub Releases so server installers remain easy to find.
 The workflow also supports a manual retry through `workflow_dispatch`.
+
+Release CI also publishes a CycloneDX dependency SBOM and creates GitHub
+artifact attestations for installer provenance and the SBOM. The separate
+security workflow audits both hashed dependency locks, runs CodeQL's extended
+Python queries, builds the production container, and verifies its configured
+runtime user is non-root. Keep every action pinned to a full commit SHA; accept
+Dependabot action updates only after reviewing the upstream release and commit.

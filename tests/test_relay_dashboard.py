@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import html
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ class RelayDashboardTest(unittest.TestCase):
             "_percent_text",
             "_latency_text",
             "_usage_css",
+            "_usage_identity",
         }
         functions = [
             node
@@ -151,8 +153,23 @@ class RelayDashboardTest(unittest.TestCase):
         self.assertIn("Cost model", rendered)
         self.assertIn("abcdef123456", rendered)
         self.assertNotIn("inactive99999", rendered)
+        self.assertNotIn("currently inactive", rendered)
         self.assertIn("Metric notes", rendered)
         self.assertNotIn("FCM token", rendered)
+
+    def test_usage_identity_is_stable_and_separates_agents_from_apps(self) -> None:
+        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        module = ast.parse(source)
+        function = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_usage_identity"
+        )
+        namespace = {"hashlib": hashlib}
+        exec(compile(ast.Module([function], type_ignores=[]), "identity", "exec"), namespace)
+
+        self.assertEqual(namespace["_usage_identity"]("agent", "abc"), namespace["_usage_identity"]("agent", "abc"))
+        self.assertNotEqual(namespace["_usage_identity"]("agent", "abc"), namespace["_usage_identity"]("app", "abc"))
 
     def test_cost_estimate_scales_with_measured_agent_workload(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")

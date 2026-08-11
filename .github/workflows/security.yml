@@ -1,0 +1,75 @@
+name: PBXSense security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: Audit locked dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Audit Agent and Relay locks
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266
+        with:
+          inputs: requirements.lock push_relay/requirements.lock
+          require-hashes: true
+
+  codeql:
+    name: CodeQL Python analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c7eb380a2dc368f2d129e4c65e51d172983a1e
+        with:
+          languages: python
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c7eb380a2dc368f2d129e4c65e51d172983a1e
+
+  container-smoke:
+    name: Build hardened container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Build Agent image
+        run: docker build --pull=false --tag pbxsense-agent:security -f docker/Dockerfile .
+
+      - name: Build Relay image
+        run: docker build --pull=false --tag pbxsense-relay:security -f push_relay/Dockerfile push_relay
+
+      - name: Confirm non-root runtime
+        run: |
+          test "$(docker image inspect pbxsense-agent:security --format '{{.Config.User}}')" = "pbxsense"
+          test "$(docker image inspect pbxsense-relay:security --format '{{.Config.User}}')" = "pbxsense-relay"

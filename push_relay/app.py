@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.10"
+RELAY_VERSION = "0.5.15"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -1341,6 +1341,12 @@ def _verify_enrollment_ticket(ticket: str) -> dict[str, object]:
     }
 
 
+def _usage_identity(entity_kind: str, entity_id: str) -> str:
+    return hashlib.sha256(
+        f"{entity_kind}:{entity_id}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
 def _delete_device_registration(
     agent_id: str,
     device_id: str,
@@ -1707,9 +1713,7 @@ def _archive_usage(
     usage = _current_usage(document, usage_date)
     if not usage:
         return
-    identity = hashlib.sha256(
-        f"{entity_kind}:{entity_id}".encode("utf-8")
-    ).hexdigest()[:24]
+    identity = _usage_identity(entity_kind, entity_id)
     archive_ref = (
         db.collection("usageDaily")
         .document(usage_date)
@@ -2116,12 +2120,8 @@ def _usage_dashboard_page(report: dict[str, object]) -> str:
     )
 
     alerts: list[str] = []
-    inactive_agents = int(report["registeredAgents"]) - int(report["activeAgents"])
     if not scheduler["healthy"]:
         alerts.append("Heartbeat sweep has not completed in the expected three-minute window.")
-    if inactive_agents:
-        verb = "are" if inactive_agents != 1 else "is"
-        alerts.append(f"{inactive_agents} registered Agent{'s' if inactive_agents != 1 else ''} {verb} currently inactive.")
     if report["expiredApps"]:
         alerts.append(f"{report['expiredApps']} app registration(s) have expired and should be cleaned up.")
     if report["appsExpiringSoon"]:
