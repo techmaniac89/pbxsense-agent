@@ -4,4 +4,4 @@ websockets>=15,<18
 qrcode>=8,<9
 cryptography>=50,<51
 defusedxml>=0.7.1,<1
-tzdata>=2026.1
+tzdata>=2026.3
