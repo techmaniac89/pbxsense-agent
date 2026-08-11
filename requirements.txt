@@ -1,7 +1,7 @@
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
 websockets>=15,<18
-qrcode>=8,<9
+qrcode>=8.2,<9
 cryptography>=50,<51
 defusedxml>=0.7.1,<1
 tzdata>=2026.1
