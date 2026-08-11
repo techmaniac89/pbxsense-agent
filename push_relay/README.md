@@ -153,7 +153,7 @@ authentication state and rate-limit documents are short-lived quota counters;
 both are safe to delete after their enforcement windows.
 
 Deploy compatibility note: Agent `0.5.37-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.6`,
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.10`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -208,7 +208,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.6` provides the encrypted Internet Relay data path and
+Relay service `0.5.10` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -228,7 +228,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.6 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.10 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the
@@ -241,9 +241,50 @@ heartbeat, so cost tuning never weakens Agent-down detection.
 
 Open `/admin/usage` and enter the Relay administrator token for the private
 operator dashboard. It shows current fleet presence, the remotely delivered
-policy, per-day counters, and hashed Agent activity. Its secure, HTTP-only
-session expires after eight hours and the dashboard refreshes every five
-minutes.
+policy, per-day counters, and hashed Agent activity. Relay `0.5.10` also shows
+Firebase acceptance/failure and latency, notification-quota pressure,
+heartbeat-scheduler freshness, remote-snapshot availability, encrypted-data
+coverage, expiring registrations, retention expectations, and a seven-day
+workload trend. Its secure, HTTP-only session expires after eight hours and the
+dashboard refreshes every five minutes.
+
+The workload figure is deliberately labeled as a proxy. It combines protocol
+operations and encrypted bytes but is not a Google Cloud invoice. Use Cloud
+Run, Firestore, Firebase, and Cloud Billing metrics as the authoritative source
+for platform latency and cost. Firebase acceptance means FCM accepted a send;
+it does not prove Android displayed the notification.
+
+The portal allocates a gross estimated Relay cost to each hashed Agent for the
+current UTC day and projects that workload over 30 days. The model covers Cloud
+Run requests, estimated request CPU/memory time, estimated Firestore
+reads/writes/deletes, and encrypted-snapshot egress. It intentionally excludes
+free-tier allocation, discounts, taxes, stored data, shared scheduler/dashboard
+overhead, and unobserved platform work. It is suitable for capacity planning,
+not customer invoicing.
+The projection annualizes the current UTC day's observed workload with a
+one-hour minimum denominator, so it can move noticeably early in the day.
+
+The compiled defaults use the public
+[Cloud Run](https://cloud.google.com/run/pricing) and
+[Firestore](https://cloud.google.com/firestore/pricing) reference list prices
+and a 50 ms average request duration. Firebase documents
+[Cloud Messaging as a no-cost product](https://firebase.google.com/docs/projects/billing/firebase-pricing-plans).
+Calibrate these Relay service variables from the deployed project's Cloud
+Billing export:
+
+```env
+PBXSENSE_RELAY_COST_CURRENCY=USD
+PBXSENSE_RELAY_COST_CLOUD_RUN_REQUEST_USD=0.0000004
+PBXSENSE_RELAY_COST_CLOUD_RUN_VCPU_SECOND_USD=0.000024
+PBXSENSE_RELAY_COST_CLOUD_RUN_GIB_SECOND_USD=0.0000025
+PBXSENSE_RELAY_COST_AVERAGE_REQUEST_SECONDS=0.05
+PBXSENSE_RELAY_COST_AVERAGE_REQUEST_VCPU=1
+PBXSENSE_RELAY_COST_AVERAGE_REQUEST_MEMORY_GIB=0.5
+PBXSENSE_RELAY_COST_FIRESTORE_READ_USD=0.0000003
+PBXSENSE_RELAY_COST_FIRESTORE_WRITE_USD=0.0000009
+PBXSENSE_RELAY_COST_FIRESTORE_DELETE_USD=0.0000001
+PBXSENSE_RELAY_COST_EGRESS_GIB_USD=0.12
+```
 
 The authenticated `GET /v1/internal/usage` endpoint exposes the same data as
 JSON. It reports current UTC-day totals for heartbeats, control exchanges,

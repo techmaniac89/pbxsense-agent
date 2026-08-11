@@ -160,6 +160,23 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS", source)
         self.assertIn('"privacy": "Agent identifiers are one-way hashes;', source)
 
+    def test_relay_operations_dashboard_exposes_actionable_safe_metrics(self) -> None:
+        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _record_notification_usage", source)
+        self.assertIn("notificationAccepted", source)
+        self.assertIn("notificationFailed", source)
+        self.assertIn("notificationLatencyMs", source)
+        self.assertIn("remoteSnapshotUnavailable", source)
+        self.assertIn('db.collection("relayOperations")', source)
+        self.assertIn("lastHeartbeatSweepAt", source)
+        self.assertIn("quotaWarningAgents", source)
+        self.assertIn("appsExpiringSoon", source)
+        self.assertIn("snapshotCapableApps", source)
+        self.assertIn("Workload proxy", source)
+        self.assertIn("before free tier, discounts, taxes", source)
+        self.assertIn("Push acceptance is Firebase acceptance", source)
+
     def test_relay_mutations_are_atomic_replay_safe_and_secret_separated(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
         agent = Path("pbxsense_agent/relay.py").read_text(encoding="utf-8")

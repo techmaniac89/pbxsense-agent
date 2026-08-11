@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.6"
+RELAY_VERSION = "0.5.10"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -75,6 +75,49 @@ REMOTE_APP_POLL_SECONDS = max(
 )
 CONTROL_EXCHANGE_SECONDS = max(
     60, min(900, int(os.getenv("PBXSENSE_RELAY_CONTROL_EXCHANGE_SECONDS", "300")))
+)
+
+
+def _bounded_cost_rate(name: str, default: float) -> float:
+    try:
+        return max(0.0, min(1000.0, float(os.getenv(name, str(default)))))
+    except ValueError:
+        return default
+
+
+# Reference list-price inputs for a gross estimate before free tiers, discounts,
+# taxes, storage, and shared dashboard/scheduler overhead. Operators can replace
+# every rate from their actual billing export without changing application code.
+COST_CURRENCY = os.getenv("PBXSENSE_RELAY_COST_CURRENCY", "USD").strip() or "USD"
+CLOUD_RUN_REQUEST_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_CLOUD_RUN_REQUEST_USD", 0.40 / 1_000_000
+)
+CLOUD_RUN_VCPU_SECOND_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_CLOUD_RUN_VCPU_SECOND_USD", 0.000024
+)
+CLOUD_RUN_GIB_SECOND_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_CLOUD_RUN_GIB_SECOND_USD", 0.0000025
+)
+AVERAGE_REQUEST_SECONDS = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_AVERAGE_REQUEST_SECONDS", 0.05
+)
+AVERAGE_REQUEST_VCPU = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_AVERAGE_REQUEST_VCPU", 1.0
+)
+AVERAGE_REQUEST_MEMORY_GIB = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_AVERAGE_REQUEST_MEMORY_GIB", 0.5
+)
+FIRESTORE_READ_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_FIRESTORE_READ_USD", 0.03 / 100_000
+)
+FIRESTORE_WRITE_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_FIRESTORE_WRITE_USD", 0.09 / 100_000
+)
+FIRESTORE_DELETE_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_FIRESTORE_DELETE_USD", 0.01 / 100_000
+)
+EGRESS_GIB_USD = _bounded_cost_rate(
+    "PBXSENSE_RELAY_COST_EGRESS_GIB_USD", 0.12
 )
 _request_windows: dict[str, deque[float]] = defaultdict(deque)
 _event_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -748,14 +791,17 @@ async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str,
         }
         devices_ref.document(device_id).collection("secureSnapshots").document("latest").set(safe_envelope)
         devices_ref.document(device_id).update(
-            _usage_update(
-                devices_ref.document(device_id),
-                device,
-                "app",
-                f"{agent_id}/{device_id}",
-                encryptedSnapshotsPublished=1,
-                encryptedSnapshotBytes=len(ciphertext),
-            )
+            {
+                "secureSnapshotUpdatedAt": firestore.SERVER_TIMESTAMP,
+                **_usage_update(
+                    devices_ref.document(device_id),
+                    device,
+                    "app",
+                    f"{agent_id}/{device_id}",
+                    encryptedSnapshotsPublished=1,
+                    encryptedSnapshotBytes=len(ciphertext),
+                ),
+            }
         )
         stored += 1
     return {"stored": stored}
@@ -764,6 +810,39 @@ async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str,
 @app.post("/v1/agents/{agent_id}/devices/{device_id}/secure-snapshot")
 async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) -> dict[str, object]:
     device_ref, device = _authenticate_relay_device(agent_id, device_id, request)
+    agent_snapshot = db.collection("agents").document(agent_id).get()
+    agent = agent_snapshot.to_dict() if agent_snapshot.exists else None
+    last_seen_at = agent.get("lastSeenAt") if agent else None
+    if (
+        not isinstance(last_seen_at, datetime)
+        or last_seen_at < datetime.now(timezone.utc) - timedelta(seconds=AGENT_LOSS_TIMEOUT_SECONDS)
+    ):
+        device_ref.update({
+            "lastConnectedAt": firestore.SERVER_TIMESTAMP,
+            **_usage_update(
+                device_ref,
+                device,
+                "app",
+                f"{agent_id}/{device_id}",
+                remoteSnapshotReads=1,
+                remoteSnapshotUnavailable=1,
+            ),
+        })
+        return {"available": False, "reason": "agentOffline"}
+    snapshot = device_ref.collection("secureSnapshots").document("latest").get()
+    if not snapshot.exists:
+        device_ref.update({
+            "lastConnectedAt": firestore.SERVER_TIMESTAMP,
+            **_usage_update(
+                device_ref,
+                device,
+                "app",
+                f"{agent_id}/{device_id}",
+                remoteSnapshotReads=1,
+                remoteSnapshotUnavailable=1,
+            ),
+        })
+        return {"available": False}
     device_ref.update({
         "lastConnectedAt": firestore.SERVER_TIMESTAMP,
         **_usage_update(
@@ -774,17 +853,6 @@ async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) 
             remoteSnapshotReads=1,
         ),
     })
-    agent_snapshot = db.collection("agents").document(agent_id).get()
-    agent = agent_snapshot.to_dict() if agent_snapshot.exists else None
-    last_seen_at = agent.get("lastSeenAt") if agent else None
-    if (
-        not isinstance(last_seen_at, datetime)
-        or last_seen_at < datetime.now(timezone.utc) - timedelta(seconds=AGENT_LOSS_TIMEOUT_SECONDS)
-    ):
-        return {"available": False, "reason": "agentOffline"}
-    snapshot = device_ref.collection("secureSnapshots").document("latest").get()
-    if not snapshot.exists:
-        return {"available": False}
     envelope = snapshot.to_dict() or {}
     envelope.pop("updatedAt", None)
     return {
@@ -884,6 +952,13 @@ async def sweep_agent_heartbeats(request: Request) -> dict[str, int]:
         )
         snapshot.reference.update({"lostAt": firestore.SERVER_TIMESTAMP})
         lost += 1
+    db.collection("relayOperations").document("current").set(
+        {
+            "lastHeartbeatSweepAt": firestore.SERVER_TIMESTAMP,
+            "lastHeartbeatSweepLost": lost,
+        },
+        merge=True,
+    )
     return {"lost": lost}
 
 
@@ -932,7 +1007,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         return {"status": "duplicate", "sent": 0}
 
     try:
-        _consume_durable_event_quota(agent_id)
+        quota_count = _consume_durable_event_quota(agent_id)
     except Exception:
         # A rejected request must remain retryable after the quota window
         # changes or Firestore recovers.
@@ -951,6 +1026,17 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     ])
     tokens = [str(device["fcmToken"]) for device in eligible_devices]
     if not tokens:
+        _record_notification_usage(
+            agent_id,
+            agent,
+            eligible=0,
+            accepted=0,
+            failed=0,
+            invalid=0,
+            latency_ms=0,
+            no_recipients=1,
+            quota_count=quota_count,
+        )
         return {"status": "accepted", "sent": 0}
 
     message = messaging.MulticastMessage(
@@ -968,14 +1054,37 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
             notification=messaging.AndroidNotification(tag=notification_tag),
         ),
     )
+    started = time.monotonic()
     try:
         response = messaging.send_each_for_multicast(message)
     except Exception:
+        _record_notification_usage(
+            agent_id,
+            agent,
+            eligible=len(tokens),
+            accepted=0,
+            failed=len(tokens),
+            invalid=0,
+            latency_ms=max(0, round((time.monotonic() - started) * 1000)),
+            transport_errors=1,
+            quota_count=quota_count,
+        )
         # Do not let the idempotency record turn a temporary FCM outage into a
         # permanently dropped event. The Agent's durable outbox will retry it.
         event_ref.delete()
         raise
     invalid_tokens = _remove_invalid_tokens(agent_id, eligible_devices, response.responses)
+    latency_ms = max(0, round((time.monotonic() - started) * 1000))
+    _record_notification_usage(
+        agent_id,
+        agent,
+        eligible=len(eligible_devices),
+        accepted=response.success_count,
+        failed=response.failure_count,
+        invalid=invalid_tokens,
+        latency_ms=latency_ms,
+        quota_count=quota_count,
+    )
     logger.info(
         "fcm_signal agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
         agent_id,
@@ -1297,7 +1406,56 @@ def _device_wants_event(device: dict[str, Any], category: str, importance: str) 
     return importance in {"attention", "important"}
 
 
+def _record_notification_usage(
+    agent_id: str,
+    agent: dict[str, object],
+    *,
+    eligible: int,
+    accepted: int,
+    failed: int,
+    invalid: int,
+    latency_ms: int,
+    no_recipients: int = 0,
+    transport_errors: int = 0,
+    quota_count: int | None = None,
+) -> None:
+    """Persist privacy-safe FCM outcomes for operator reliability monitoring."""
+    agent_ref = db.collection("agents").document(agent_id)
+    quota_fields = (
+        {
+            "currentEventQuotaHour": datetime.now(timezone.utc).strftime("%Y%m%d%H"),
+            "currentEventQuotaCount": max(0, quota_count),
+        }
+        if quota_count is not None
+        else {}
+    )
+    agent_ref.update({
+        "lastFcmAttemptAt": firestore.SERVER_TIMESTAMP,
+        "lastFcmLatencyMs": max(0, latency_ms),
+        "lastFcmAccepted": max(0, accepted),
+        "lastFcmFailed": max(0, failed),
+        **quota_fields,
+        **_usage_update(
+            agent_ref,
+            agent,
+            "agent",
+            agent_id,
+            notificationAttempts=1,
+            notificationFcmAttempts=1 if eligible > 0 else 0,
+            notificationEligible=max(0, eligible),
+            notificationAccepted=max(0, accepted),
+            notificationFailed=max(0, failed),
+            notificationInvalidTokens=max(0, invalid),
+            notificationLatencyMs=max(0, latency_ms),
+            notificationNoRecipients=max(0, no_recipients),
+            notificationTransportErrors=max(0, transport_errors),
+        ),
+    })
+
+
 def _send_agent_status(agent_id: str, title: str, body: str) -> None:
+    agent_snapshot = db.collection("agents").document(agent_id).get()
+    agent = agent_snapshot.to_dict() if agent_snapshot.exists else {}
     now = datetime.now(timezone.utc)
     devices = [_device_record(document) for document in
         db.collection("agents").document(agent_id).collection("devices").stream()]
@@ -1313,17 +1471,50 @@ def _send_agent_status(agent_id: str, title: str, body: str) -> None:
         for device in eligible_devices
     ]
     if not tokens:
+        _record_notification_usage(
+            agent_id,
+            agent or {},
+            eligible=0,
+            accepted=0,
+            failed=0,
+            invalid=0,
+            latency_ms=0,
+            no_recipients=1,
+        )
         logger.info("fcm_agent_status agent_id=%s eligible=0 accepted=0 failed=0 invalid_removed=0", agent_id)
         return
-    response = messaging.send_each_for_multicast(
-        messaging.MulticastMessage(
-            tokens=tokens,
-            notification=messaging.Notification(title=title, body=body),
-            data={"kind": "agent_connection", "agentId": agent_id},
-            android=messaging.AndroidConfig(priority="high"),
+    started = time.monotonic()
+    try:
+        response = messaging.send_each_for_multicast(
+            messaging.MulticastMessage(
+                tokens=tokens,
+                notification=messaging.Notification(title=title, body=body),
+                data={"kind": "agent_connection", "agentId": agent_id},
+                android=messaging.AndroidConfig(priority="high"),
+            )
         )
-    )
+    except Exception:
+        _record_notification_usage(
+            agent_id,
+            agent or {},
+            eligible=len(tokens),
+            accepted=0,
+            failed=len(tokens),
+            invalid=0,
+            latency_ms=max(0, round((time.monotonic() - started) * 1000)),
+            transport_errors=1,
+        )
+        raise
     invalid_tokens = _remove_invalid_tokens(agent_id, eligible_devices, response.responses)
+    _record_notification_usage(
+        agent_id,
+        agent or {},
+        eligible=len(eligible_devices),
+        accepted=response.success_count,
+        failed=response.failure_count,
+        invalid=invalid_tokens,
+        latency_ms=max(0, round((time.monotonic() - started) * 1000)),
+    )
     logger.info(
         "fcm_agent_status agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
         agent_id,
@@ -1426,14 +1617,14 @@ def _relay_policy() -> dict[str, int]:
     }
 
 
-def _consume_durable_event_quota(agent_id: str) -> None:
+def _consume_durable_event_quota(agent_id: str) -> int:
     """Enforce notification limits across Cloud Run instances and restarts."""
     now = datetime.now(timezone.utc)
     quota_ref = (
         db.collection("agents").document(agent_id)
         .collection("rateLimits").document(f"events_{now:%Y%m%d%H}")
     )
-    _increment_durable_quota(
+    return _increment_durable_quota(
         db.transaction(), quota_ref, MAX_EVENTS_PER_AGENT_PER_HOUR, now
     )
 
@@ -1441,7 +1632,7 @@ def _consume_durable_event_quota(agent_id: str) -> None:
 @firestore.transactional
 def _increment_durable_quota(
     transaction: Any, quota_ref: Any, limit: int, now: datetime
-) -> None:
+) -> int:
     snapshot = quota_ref.get(transaction=transaction)
     count = int((snapshot.to_dict() or {}).get("count", 0)) if snapshot.exists else 0
     if count >= limit:
@@ -1457,6 +1648,7 @@ def _increment_durable_quota(
             "expiresAt": now + timedelta(hours=2),
         },
     )
+    return count + 1
 
 
 def _usage_update(
@@ -1535,9 +1727,72 @@ def _archive_usage(
     reference.update({"usageArchivedDate": usage_date})
 
 
+def _estimated_relay_cost(usage: dict[str, int]) -> dict[str, float | int]:
+    """Allocate gross list-price workload to one Agent; never claim invoice accuracy."""
+    heartbeats = int(usage.get("heartbeats", 0))
+    controls = int(usage.get("controlExchanges", 0))
+    remote_reads = int(usage.get("remoteSnapshotReads", 0))
+    snapshots = int(usage.get("encryptedSnapshotsPublished", 0))
+    notifications = int(usage.get("notificationAttempts", 0))
+    eligible = int(usage.get("notificationEligible", 0))
+    invalid_tokens = int(usage.get("notificationInvalidTokens", 0))
+    requests = heartbeats + controls + remote_reads + snapshots + notifications
+    firestore_reads = (
+        heartbeats * 2
+        + controls * 3
+        + remote_reads * 4
+        + snapshots * 3
+        + notifications * 3
+        + eligible
+    )
+    firestore_writes = (
+        heartbeats * 2
+        + controls * 2
+        + remote_reads * 2
+        + snapshots * 2
+        + notifications * 3
+    )
+    firestore_deletes = invalid_tokens * 2 + notifications
+    published_bytes = int(usage.get("encryptedSnapshotBytes", 0))
+    average_snapshot_bytes = published_bytes / snapshots if snapshots else 0
+    estimated_egress_bytes = round(average_snapshot_bytes * remote_reads)
+    cloud_run_cost = requests * (
+        CLOUD_RUN_REQUEST_USD
+        + AVERAGE_REQUEST_SECONDS
+        * (
+            AVERAGE_REQUEST_VCPU * CLOUD_RUN_VCPU_SECOND_USD
+            + AVERAGE_REQUEST_MEMORY_GIB * CLOUD_RUN_GIB_SECOND_USD
+        )
+    )
+    firestore_cost = (
+        firestore_reads * FIRESTORE_READ_USD
+        + firestore_writes * FIRESTORE_WRITE_USD
+        + firestore_deletes * FIRESTORE_DELETE_USD
+    )
+    egress_cost = estimated_egress_bytes / (1024 ** 3) * EGRESS_GIB_USD
+    total = cloud_run_cost + firestore_cost + egress_cost
+    return {
+        "requests": requests,
+        "firestoreReads": firestore_reads,
+        "firestoreWrites": firestore_writes,
+        "firestoreDeletes": firestore_deletes,
+        "estimatedEgressBytes": estimated_egress_bytes,
+        "cloudRun": cloud_run_cost,
+        "firestore": firestore_cost,
+        "egress": egress_cost,
+        "total": total,
+    }
+
+
 def _usage_report(days: int = 7) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     today = now.date().isoformat()
+    elapsed_day_hours = max(
+        1.0,
+        (now - datetime.combine(now.date(), datetime.min.time(), timezone.utc)).total_seconds()
+        / 3600,
+    )
+    monthly_projection_factor = 30 * 24 / elapsed_day_hours
     active_cutoff = now - timedelta(seconds=AGENT_LOSS_TIMEOUT_SECONDS)
     connected_cutoff = now - timedelta(seconds=120)
     totals: dict[str, int] = defaultdict(int)
@@ -1547,17 +1802,28 @@ def _usage_report(days: int = 7) -> dict[str, object]:
     active_agents = 0
     usage_agents = 0
     usage_apps = 0
+    expired_apps = 0
+    apps_expiring_soon = 0
+    snapshot_capable_apps = 0
+    quota_warning_agents = 0
+    highest_quota_percent = 0
     agents = list(db.collection("agents").limit(1000).stream())
     for snapshot in agents:
         agent = snapshot.to_dict() or {}
         _archive_usage(snapshot.reference, agent, "agent", snapshot.id, today)
         usage = _current_usage(agent, today)
+        agent_usage: dict[str, int] = dict(usage)
         if usage:
             usage_agents += 1
         for key, value in usage.items():
             totals[key] += value
         last_seen_at = agent.get("lastSeenAt")
         active = isinstance(last_seen_at, datetime) and last_seen_at >= active_cutoff
+        last_seen_seconds = (
+            max(0, int((now - last_seen_at).total_seconds()))
+            if isinstance(last_seen_at, datetime)
+            else None
+        )
         if active:
             active_agents += 1
         apps = 0
@@ -1572,11 +1838,20 @@ def _usage_report(days: int = 7) -> dict[str, object]:
                 today,
             )
             apps += 1
+            expires_at = device.get("expiresAt")
+            if isinstance(expires_at, datetime):
+                if expires_at < now:
+                    expired_apps += 1
+                elif expires_at <= now + timedelta(days=7):
+                    apps_expiring_soon += 1
+            if isinstance(device.get("secureSnapshotUpdatedAt"), datetime):
+                snapshot_capable_apps += 1
             device_usage = _current_usage(device, today)
             if device_usage:
                 usage_apps += 1
             for key, value in device_usage.items():
                 totals[key] += value
+                agent_usage[key] = agent_usage.get(key, 0) + value
             last_connected_at = device.get("lastConnectedAt")
             if (
                 isinstance(last_connected_at, datetime)
@@ -1585,12 +1860,38 @@ def _usage_report(days: int = 7) -> dict[str, object]:
                 connected += 1
         registered_apps += apps
         connected_apps += connected
+        quota_count = (
+            int(agent.get("currentEventQuotaCount", 0))
+            if agent.get("currentEventQuotaHour") == f"{now:%Y%m%d%H}"
+            else 0
+        )
+        quota_percent = min(
+            100,
+            round(100 * quota_count / max(1, MAX_EVENTS_PER_AGENT_PER_HOUR)),
+        )
+        highest_quota_percent = max(highest_quota_percent, quota_percent)
+        if quota_percent >= 80:
+            quota_warning_agents += 1
+        accepted = int(agent_usage.get("notificationAccepted", 0))
+        failed = int(agent_usage.get("notificationFailed", 0))
+        delivery_total = accepted + failed
+        estimated_cost = _estimated_relay_cost(agent_usage)
         agent_rows.append({
             "agent": hashlib.sha256(snapshot.id.encode("utf-8")).hexdigest()[:12],
             "active": active,
+            "lastSeenSeconds": last_seen_seconds,
             "registeredApps": apps,
             "connectedApps": connected,
-            "usage": usage,
+            "quotaCount": quota_count,
+            "quotaPercent": quota_percent,
+            "deliveryPercent": (
+                round(100 * accepted / delivery_total, 1)
+                if delivery_total else None
+            ),
+            "lastFcmLatencyMs": agent.get("lastFcmLatencyMs"),
+            "estimatedCostToday": estimated_cost,
+            "estimatedCost30Days": estimated_cost["total"] * monthly_projection_factor,
+            "usage": agent_usage,
         })
     agent_rows.sort(
         key=lambda row: sum(int(value) for value in row["usage"].values()),
@@ -1604,6 +1905,29 @@ def _usage_report(days: int = 7) -> dict[str, object]:
         usage_agents,
         usage_apps,
     )
+    notification_accepted = totals.get("notificationAccepted", 0)
+    notification_failed = totals.get("notificationFailed", 0)
+    notification_total = notification_accepted + notification_failed
+    notification_attempts = totals.get("notificationFcmAttempts", 0)
+    fleet_cost = _estimated_relay_cost(totals)
+    workload_operations = sum(
+        totals.get(key, 0)
+        for key in (
+            "heartbeats",
+            "controlExchanges",
+            "remoteSnapshotReads",
+            "encryptedSnapshotsPublished",
+            "notificationAttempts",
+        )
+    )
+    operations_snapshot = db.collection("relayOperations").document("current").get()
+    operations = operations_snapshot.to_dict() if operations_snapshot.exists else {}
+    last_sweep_at = operations.get("lastHeartbeatSweepAt") if operations else None
+    sweep_age_seconds = (
+        max(0, int((now - last_sweep_at).total_seconds()))
+        if isinstance(last_sweep_at, datetime)
+        else None
+    )
     return {
         "generatedAt": now.isoformat(),
         "usageDate": today,
@@ -1611,6 +1935,35 @@ def _usage_report(days: int = 7) -> dict[str, object]:
         "activeAgents": active_agents,
         "registeredApps": registered_apps,
         "connectedApps": connected_apps,
+        "expiredApps": expired_apps,
+        "appsExpiringSoon": apps_expiring_soon,
+        "snapshotCapableApps": snapshot_capable_apps,
+        "notificationDeliveryPercent": (
+            round(100 * notification_accepted / notification_total, 1)
+            if notification_total else None
+        ),
+        "averageNotificationLatencyMs": (
+            round(totals.get("notificationLatencyMs", 0) / notification_attempts)
+            if notification_attempts else None
+        ),
+        "quotaWarningAgents": quota_warning_agents,
+        "highestQuotaPercent": highest_quota_percent,
+        "workloadOperations": workload_operations,
+        "estimatedCostToday": fleet_cost,
+        "estimatedCost30Days": fleet_cost["total"] * monthly_projection_factor,
+        "costModel": {
+            "currency": COST_CURRENCY,
+            "basis": "Gross reference list price before free tier, discounts, taxes, storage, and shared overhead.",
+            "averageRequestSeconds": AVERAGE_REQUEST_SECONDS,
+            "projectionBasisHours": round(elapsed_day_hours, 1),
+            "ratesConfigurable": True,
+        },
+        "scheduler": {
+            "lastSweepAt": last_sweep_at.isoformat() if isinstance(last_sweep_at, datetime) else None,
+            "ageSeconds": sweep_age_seconds,
+            "healthy": sweep_age_seconds is not None and sweep_age_seconds <= 180,
+            "lastLost": int((operations or {}).get("lastHeartbeatSweepLost", 0)),
+        },
         "totals": dict(sorted(totals.items())),
         "daily": daily,
         "policy": _relay_policy(),
@@ -1699,9 +2052,90 @@ def _admin_page_headers() -> dict[str, str]:
     }
 
 
+def _human_age(seconds: object) -> str:
+    if not isinstance(seconds, int):
+        return "Never"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _human_bytes(value: object) -> str:
+    amount = float(max(0, int(value or 0)))
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < 1024 or unit == "GiB":
+            return f"{int(amount)} B" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return "0 B"
+
+
+def _daily_workload(row: dict[str, object]) -> int:
+    totals = row["totals"]
+    return sum(
+        int(totals.get(key, 0))
+        for key in (
+            "heartbeats",
+            "controlExchanges",
+            "remoteSnapshotReads",
+            "encryptedSnapshotsPublished",
+            "notificationAttempts",
+        )
+    )
+
+
+def _money(value: object, currency: str) -> str:
+    amount = max(0.0, float(value or 0))
+    if amount < 0.01:
+        return f"{currency} {amount:.4f}"
+    return f"{currency} {amount:.2f}"
+
+
 def _usage_dashboard_page(report: dict[str, object]) -> str:
     policy = report["policy"]
     totals = report["totals"]
+    scheduler = report["scheduler"]
+    currency = html.escape(str(report["costModel"]["currency"]))
+    delivery_percent = report["notificationDeliveryPercent"]
+    delivery_text = (
+        f"{delivery_percent:.1f}%"
+        if isinstance(delivery_percent, (int, float))
+        else "No sends"
+    )
+    latency = report["averageNotificationLatencyMs"]
+    latency_text = f"{latency:,} ms" if isinstance(latency, int) else "No samples"
+    remote_reads = int(totals.get("remoteSnapshotReads", 0))
+    remote_unavailable = int(totals.get("remoteSnapshotUnavailable", 0))
+    unavailable_percent = (
+        min(100, round(100 * remote_unavailable / remote_reads, 1))
+        if remote_reads
+        else 0
+    )
+
+    alerts: list[str] = []
+    inactive_agents = int(report["registeredAgents"]) - int(report["activeAgents"])
+    if not scheduler["healthy"]:
+        alerts.append("Heartbeat sweep has not completed in the expected three-minute window.")
+    if inactive_agents:
+        verb = "are" if inactive_agents != 1 else "is"
+        alerts.append(f"{inactive_agents} registered Agent{'s' if inactive_agents != 1 else ''} {verb} currently inactive.")
+    if report["expiredApps"]:
+        alerts.append(f"{report['expiredApps']} app registration(s) have expired and should be cleaned up.")
+    if report["appsExpiringSoon"]:
+        alerts.append(f"{report['appsExpiringSoon']} app registration(s) expire within seven days unless refreshed.")
+    if report["quotaWarningAgents"]:
+        alerts.append(f"{report['quotaWarningAgents']} Agent(s) are at or above 80% of the hourly notification quota.")
+    if isinstance(delivery_percent, (int, float)) and delivery_percent < 95:
+        alerts.append(f"Push acceptance is {delivery_percent:.1f}% today, below the 95% operator threshold.")
+    if unavailable_percent >= 10 and remote_reads >= 10:
+        alerts.append(f"{unavailable_percent:.1f}% of remote snapshot reads were unavailable today.")
+    alert_html = "".join(f"<li>{html.escape(item)}</li>" for item in alerts)
+    if not alert_html:
+        alert_html = '<li class="ok">No operational threshold needs attention.</li>'
+
     daily_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(row['date']))}{'' if row['complete'] else ' (today)'}</td>"
@@ -1709,41 +2143,76 @@ def _usage_dashboard_page(report: dict[str, object]) -> str:
         f"<td>{row['totals'].get('heartbeats', 0):,}</td>"
         f"<td>{row['totals'].get('controlExchanges', 0):,}</td>"
         f"<td>{row['totals'].get('remoteSnapshotReads', 0):,}</td>"
+        f"<td>{row['totals'].get('remoteSnapshotUnavailable', 0):,}</td>"
         f"<td>{row['totals'].get('encryptedSnapshotsPublished', 0):,}</td>"
-        f"<td>{row['totals'].get('encryptedSnapshotBytes', 0):,}</td>"
+        f"<td>{_human_bytes(row['totals'].get('encryptedSnapshotBytes', 0))}</td>"
+        f"<td>{row['totals'].get('notificationAccepted', 0):,}</td>"
+        f"<td>{row['totals'].get('notificationFailed', 0):,}</td>"
+        f"<td>{_money(_estimated_relay_cost(row['totals'])['total'], currency)}</td>"
         "</tr>"
         for row in report["daily"]
+    )
+    max_daily_workload = max(1, *(_daily_workload(row) for row in report["daily"]))
+    trend_rows = "".join(
+        '<div class="trend-row">'
+        f"<span>{html.escape(str(row['date'])[5:])}</span>"
+        f'<div class="bar-track"><i style="width:{max(2, round(100 * _daily_workload(row) / max_daily_workload))}%"></i></div>'
+        f"<b>{_daily_workload(row):,}</b></div>"
+        for row in reversed(report["daily"])
     )
     agent_rows = "".join(
         "<tr>"
         f"<td><code>{html.escape(str(row['agent']))}</code></td>"
         f"<td>{'Active' if row['active'] else 'Inactive'}</td>"
+        f"<td>{_human_age(row['lastSeenSeconds'])}</td>"
         f"<td>{row['registeredApps']}</td><td>{row['connectedApps']}</td>"
+        f"<td>{_percent_text(row['deliveryPercent'])}</td>"
+        f"<td><span class=\"meter {'warn' if row['quotaPercent'] >= 80 else ''}\">{row['quotaCount']}/{policy['maxEventsPerAgentHour']} ({row['quotaPercent']}%)</span></td>"
+        f"<td>{_latency_text(row['lastFcmLatencyMs'])}</td>"
+        f"<td>{_money(row['estimatedCostToday']['total'], currency)}</td>"
+        f"<td>{_money(row['estimatedCost30Days'], currency)}</td>"
         f"<td>{sum(int(value) for value in row['usage'].values()):,}</td>"
         "</tr>"
         for row in report["agents"]
+        if row["active"]
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="300"><title>PBXSense Relay usage</title>
+<meta http-equiv="refresh" content="300"><title>PBXSense Relay operations</title>
 <style>{_usage_css()}</style></head><body><main><header><div><p class="eyebrow">PBXSense Relay {RELAY_VERSION}</p>
-<h1>Usage dashboard</h1><p>Updated {html.escape(str(report['generatedAt']))}; refreshes every five minutes.</p></div>
-<span class="status">Privacy-safe</span></header>
+<h1>Operations dashboard</h1><p>Updated {html.escape(str(report['generatedAt']))}; refreshes every five minutes.</p></div>
+<span class="status {'attention' if alerts else ''}">{'Attention' if alerts else 'Operational'} · privacy-safe</span></header>
 <section class="cards"><article><span>Active Agents</span><strong>{report['activeAgents']}</strong><small>{report['registeredAgents']} registered</small></article>
 <article><span>Connected apps</span><strong>{report['connectedApps']}</strong><small>{report['registeredApps']} registered</small></article>
-<article><span>Heartbeats today</span><strong>{totals.get('heartbeats', 0):,}</strong><small>30/{policy['agentLossSeconds']} sec presence</small></article>
-<article><span>Remote reads today</span><strong>{totals.get('remoteSnapshotReads', 0):,}</strong><small>{policy['remotePollSeconds']} sec app policy</small></article></section>
+<article><span>Push acceptance</span><strong>{delivery_text}</strong><small>{totals.get('notificationAccepted', 0):,} accepted · {totals.get('notificationFailed', 0):,} failed</small></article>
+<article><span>FCM latency</span><strong>{latency_text}</strong><small>Average across today’s attempts</small></article>
+<article><span>Heartbeat scheduler</span><strong>{'Healthy' if scheduler['healthy'] else 'Stale'}</strong><small>{_human_age(scheduler['ageSeconds'])} · last sweep lost {scheduler['lastLost']}</small></article>
+<article><span>Quota pressure</span><strong>{report['highestQuotaPercent']}%</strong><small>{report['quotaWarningAgents']} Agents at ≥80%</small></article>
+<article><span>Remote availability</span><strong>{100 - unavailable_percent:.1f}%</strong><small>{remote_unavailable:,} unavailable of {remote_reads:,} reads</small></article>
+<article><span>Estimated Relay cost</span><strong>{_money(report['estimatedCostToday']['total'], currency)}</strong><small>{_money(report['estimatedCost30Days'], currency)} projected from {report['costModel']['projectionBasisHours']:.1f}h observed</small></article></section>
+<section class="alerts"><h2>Operational attention</h2><ul>{alert_html}</ul></section>
 <section><h2>Remotely delivered policy</h2><div class="policy">
-<span>Presence <b>{policy['agentPresenceSeconds']} sec</b></span>
-<span>Lost after <b>{policy['agentLossSeconds']} sec</b></span>
-<span>App poll <b>{policy['remotePollSeconds']} sec</b></span>
-<span>Control exchange <b>{policy['controlExchangeSeconds']} sec</b></span></div>
-<p class="note">Presence is fixed for reliable Agent-down detection. App polling and control exchange are bounded server settings delivered in Relay responses.</p></section>
-<section><h2>Daily rollups</h2><div class="table"><table><thead><tr><th>UTC date</th><th>Agents</th><th>Apps</th><th>Heartbeats</th><th>Control</th><th>Remote reads</th><th>Snapshots</th><th>Encrypted bytes</th></tr></thead>
-<tbody>{daily_rows}</tbody></table></div></section>
-<section><h2>Agent activity today</h2><div class="table"><table><thead><tr><th>Hashed Agent</th><th>Status</th><th>Apps</th><th>Connected</th><th>Operations</th></tr></thead>
-<tbody>{agent_rows}</tbody></table></div><p class="note">{html.escape(str(report['privacy']))}</p></section>
+<span>Presence <b>{policy['agentPresenceSeconds']} sec</b></span><span>Lost after <b>{policy['agentLossSeconds']} sec</b></span>
+<span>App poll <b>{policy['remotePollSeconds']} sec</b></span><span>Control exchange <b>{policy['controlExchangeSeconds']} sec</b></span>
+<span>Apps per Agent <b>{policy['maxAppsPerAgent']}</b></span><span>Events per hour <b>{policy['maxEventsPerAgentHour']}</b></span></div></section>
+<section class="split"><div><h2>Seven-day workload movement</h2><p class="section-summary"><strong>{report['workloadOperations']:,}</strong> protocol operations today</p><div class="trends">{trend_rows}</div></div>
+<div><h2>Capacity and retention</h2><dl class="facts"><div><dt>Encrypted snapshot coverage</dt><dd>{report['snapshotCapableApps']} / {report['registeredApps']} apps</dd></div>
+<div><dt>Encrypted bytes today</dt><dd>{_human_bytes(totals.get('encryptedSnapshotBytes', 0))}</dd></div>
+<div><dt>Registrations expiring in 7 days</dt><dd>{report['appsExpiringSoon']}</dd></div><div><dt>Expired registrations</dt><dd>{report['expiredApps']}</dd></div>
+<div><dt>Usage rollup retention</dt><dd>90 days (TTL required)</dd></div><div><dt>Event retention</dt><dd>2 days</dd></div></dl></div></section>
+<section><h2>Daily rollups</h2><div class="table"><table><thead><tr><th>UTC date</th><th>Agents</th><th>Apps</th><th>Heartbeats</th><th>Control</th><th>Remote reads</th><th>Unavailable</th><th>Snapshots</th><th>Encrypted bytes</th><th>Push accepted</th><th>Push failed</th><th>Estimated cost</th></tr></thead><tbody>{daily_rows}</tbody></table></div></section>
+<section><h2>Active Agent activity today</h2><div class="table"><table><thead><tr><th>Hashed Agent</th><th>Status</th><th>Last contact</th><th>Apps</th><th>Connected</th><th>Push acceptance</th><th>Hourly quota</th><th>Last FCM latency</th><th>Est. today</th><th>Est. 30 days</th><th>Operations</th></tr></thead><tbody>{agent_rows}</tbody></table></div><p class="note">Inactive Agents are excluded from this activity list. {html.escape(str(report['privacy']))}</p></section>
+<section><h2>Cost model</h2><p class="note">{html.escape(str(report['costModel']['basis']))} The model attributes measured requests, estimated Firestore reads/writes/deletes, Cloud Run request-based CPU and memory, and estimated encrypted-snapshot egress to each hashed Agent. The 30-day projection annualizes today’s workload after at least one observed UTC hour; it is volatile early in the day. Average request duration is {report['costModel']['averageRequestSeconds']:.3f} seconds. Every unit rate is configurable with <code>PBXSENSE_RELAY_COST_*</code> environment variables. Reconcile these estimates against a Cloud Billing export before using them for pricing or customer billing.</p></section>
+<section><h2>Metric notes</h2><p class="note">Push acceptance is Firebase acceptance, not proof that Android displayed a notification. FCM itself is a no-cost Firebase product; the estimate covers Relay infrastructure around it. Workload proxy combines heartbeats, control exchanges, remote reads, snapshot publications, and notification attempts. Cloud Run, Firestore, Firebase, and Billing remain authoritative for cost and platform latency. Expired-record counts verify application state, while TTL enablement must still be checked in Google Cloud.</p></section>
 </main></body></html>"""
+
+
+def _percent_text(value: object) -> str:
+    return f"{value:.1f}%" if isinstance(value, (int, float)) else "—"
+
+
+def _latency_text(value: object) -> str:
+    return f"{value:,} ms" if isinstance(value, int) else "—"
 
 
 def _usage_css() -> str:
@@ -1752,14 +2221,16 @@ def _usage_css() -> str:
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#17362e 0,#07110f 42%);min-height:100vh}
 main{width:min(1180px,calc(100% - 32px));margin:0 auto;padding:42px 0 80px}header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}
 h1{font-size:clamp(32px,5vw,54px);margin:4px 0 8px}h2{margin:0 0 18px;font-size:22px}.eyebrow{color:#f1bd70;text-transform:uppercase;letter-spacing:.14em;font-size:12px;font-weight:800}
-p{color:#a9bdb5}.status{background:#193f35;color:#8ce0c2;border:1px solid #285b4e;border-radius:999px;padding:8px 13px}
+p{color:#a9bdb5}.status{background:#193f35;color:#8ce0c2;border:1px solid #285b4e;border-radius:999px;padding:8px 13px;white-space:nowrap}.status.attention{background:#3c241c;color:#ffb4a4;border-color:#704032}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:34px 0}article,section{background:#0e1d19;border:1px solid #203c34;border-radius:18px;padding:22px}
+.section-summary{margin:-8px 0 18px;color:#9ebbb1}.section-summary strong{color:#f5fff9;font-size:1.15rem}
 section{margin:16px 0}article span,article small{display:block;color:#99afa6}article strong{display:block;font-size:34px;margin:10px 0 5px}
 .policy{display:flex;flex-wrap:wrap;gap:10px}.policy span{background:#152a24;border-radius:10px;padding:10px 13px;color:#a9bdb5}.policy b{color:#edf7f2}
-.table{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:12px;border-bottom:1px solid #203c34;font-variant-numeric:tabular-nums}th{color:#8ce0c2;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
-code{color:#f1bd70}.note{font-size:13px}.login{display:grid;place-items:center;min-height:100vh;padding:20px}.login section{width:min(460px,100%)}label{display:grid;gap:8px;color:#a9bdb5}
+.alerts ul{margin:0;padding-left:22px;color:#ffb4a4;display:grid;gap:9px}.alerts .ok{color:#8ce0c2}.split{display:grid;grid-template-columns:1.15fr 1fr;gap:28px}.trends{display:grid;gap:10px}.trend-row{display:grid;grid-template-columns:48px 1fr 72px;gap:10px;align-items:center;color:#99afa6;font-variant-numeric:tabular-nums}.trend-row b{text-align:right;color:#edf7f2}.bar-track{height:10px;background:#152a24;border-radius:99px;overflow:hidden}.bar-track i{display:block;height:100%;background:linear-gradient(90deg,#2e8f73,#8ce0c2);border-radius:inherit}.facts{margin:0;display:grid;gap:0}.facts div{display:flex;justify-content:space-between;gap:20px;padding:10px 0;border-bottom:1px solid #203c34}.facts dt{color:#99afa6}.facts dd{margin:0;text-align:right;font-weight:700}.meter{display:inline-block;background:#193f35;color:#8ce0c2;border-radius:99px;padding:5px 8px}.meter.warn{background:#3c241c;color:#ffb4a4}
+.table{overflow:auto}table{width:100%;border-collapse:collapse;min-width:980px}th,td{text-align:left;padding:12px;border-bottom:1px solid #203c34;font-variant-numeric:tabular-nums;white-space:nowrap}th{color:#8ce0c2;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+code{color:#f1bd70}.note{font-size:13px;line-height:1.55}.login{display:grid;place-items:center;min-height:100vh;padding:20px}.login section{width:min(460px,100%)}label{display:grid;gap:8px;color:#a9bdb5}
 input{width:100%;padding:13px;border-radius:10px;border:1px solid #36554c;background:#07110f;color:#fff}button{margin-top:14px;border:0;border-radius:10px;padding:12px 16px;background:#e9ad5c;color:#191107;font-weight:800;cursor:pointer}.error{color:#ffaaa0}
-@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}header{display:block}.status{display:inline-block;margin-top:12px}}
+@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}header{display:block}.status{display:inline-block;margin-top:12px}.split{grid-template-columns:1fr}}
 @media(max-width:480px){.cards{grid-template-columns:1fr}}
 """
 
