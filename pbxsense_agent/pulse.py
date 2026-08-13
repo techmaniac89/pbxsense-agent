@@ -300,6 +300,7 @@ class _EndpointSignalState:
     signal_visible: bool = False
     notification_id: str = ""
     missing_started_at: datetime | None = None
+    last_unavailable_endpoint: AmiEndpoint | None = None
 
 
 class EndpointAvailabilitySignalTracker:
@@ -348,11 +349,20 @@ class EndpointAvailabilitySignalTracker:
                     else:
                         self._states.pop(extension, None)
             else:
-                self._states = {
-                    extension: state
-                    for extension, state in self._states.items()
-                    if extension in endpoints
-                }
+                for extension in list(self._states):
+                    if extension in endpoints:
+                        continue
+                    state = self._states[extension]
+                    if not state.episode_notified:
+                        self._states.pop(extension, None)
+                        continue
+                    # A partial endpoint inventory is ambiguous, not proof of
+                    # recovery. Preserve the visible incident and its original
+                    # notification occurrence until this phone is explicitly
+                    # reachable for the full recovery confirmation window.
+                    state.recovery_started_at = None
+                    state.signal_visible = True
+                    visible.add(extension)
             for extension, endpoint in endpoints.items():
                 state = self._states.setdefault(extension, _EndpointSignalState())
                 state.missing_started_at = None
@@ -364,6 +374,7 @@ class EndpointAvailabilitySignalTracker:
                         visible.add(extension)
                     continue
                 if _endpoint_unavailable(endpoint):
+                    state.last_unavailable_endpoint = endpoint
                     if state.recovery_started_at is not None:
                         # A brief reachable sample is not a confirmed recovery.
                         # Restore the existing outage without creating another
@@ -389,14 +400,21 @@ class EndpointAvailabilitySignalTracker:
                     continue
 
                 state.outage_started_at = None
-                state.signal_visible = False
                 if not state.episode_notified:
+                    state.signal_visible = False
                     self._states.pop(extension, None)
                     continue
                 if state.recovery_started_at is None:
                     state.recovery_started_at = now
+                    state.signal_visible = True
+                    visible.add(extension)
                 elif now - state.recovery_started_at >= self._recovery_confirmation:
                     self._states.pop(extension, None)
+                else:
+                    # Do not let Relay infer an early recovery from a Signal
+                    # disappearing while confirmation is still in progress.
+                    state.signal_visible = True
+                    visible.add(extension)
 
         return visible
 
@@ -407,6 +425,15 @@ class EndpointAvailabilitySignalTracker:
                 extension: state.notification_id
                 for extension, state in self._states.items()
                 if state.signal_visible and state.notification_id
+            }
+
+    def signal_endpoints(self) -> dict[str, AmiEndpoint]:
+        """Return stable evidence for visible incidents, including inventory gaps."""
+        with self._lock:
+            return {
+                extension: state.last_unavailable_endpoint
+                for extension, state in self._states.items()
+                if state.signal_visible and state.last_unavailable_endpoint is not None
             }
 
 
@@ -532,6 +559,7 @@ def build_home_payload(
     moment_hours: int = 24,
     moment_events: list[dict] | None = None,
     endpoint_unavailability_signals: set[str] | None = None,
+    endpoint_unavailability_evidence: dict[str, AmiEndpoint] | None = None,
     trunk_unavailability_signals: set[str] | None = None,
     endpoint_notification_ids: dict[str, str] | None = None,
     endpoint_last_active: dict[str, datetime] | None = None,
@@ -593,6 +621,7 @@ def build_home_payload(
         moment_hours,
         moment_events or [],
         endpoint_unavailability_signals,
+        endpoint_unavailability_evidence or {},
         endpoint_notification_ids or {},
         trunk_unavailability_signals,
     )
@@ -858,10 +887,12 @@ def _build_signals(
     moment_hours: int,
     moment_events: list[dict],
     endpoint_unavailability_signals: set[str] | None,
+    endpoint_unavailability_evidence: dict[str, AmiEndpoint],
     endpoint_notification_ids: dict[str, str],
     trunk_unavailability_signals: set[str] | None,
 ) -> list[dict]:
     signals: list[dict] = []
+    emitted_unavailable_endpoints: set[str] = set()
 
     if not snapshot.reachable:
         return [
@@ -980,6 +1011,7 @@ def _build_signals(
             endpoint_unavailability_signals is None
             or endpoint.extension in endpoint_unavailability_signals
         ):
+            emitted_unavailable_endpoints.add(endpoint.extension)
             name = _extension_name(endpoint.extension, extension_names, endpoint.label)
             signals.append(
                 {
@@ -1006,6 +1038,40 @@ def _build_signals(
                     },
                 }
             )
+
+    for extension in sorted(
+        set(endpoint_unavailability_signals or ())
+        - emitted_unavailable_endpoints
+    ):
+        endpoint = endpoint_unavailability_evidence.get(extension)
+        if endpoint is None:
+            continue
+        name = _extension_name(extension, extension_names, endpoint.label)
+        signals.append(
+            {
+                "id": f"sig_endpoint_{extension}_unavailable",
+                "notificationId": endpoint_notification_ids.get(
+                    extension,
+                    f"sig_endpoint_{extension}_unavailable",
+                ),
+                "kind": "endpoint_unavailable",
+                "category": "health",
+                "importance": "attention",
+                "state": "active",
+                "title": f"{name} looks unavailable.",
+                "body": "The phone is not currently reachable through the PBX.",
+                "timeLabel": "Just now",
+                "actionLabel": "Open person",
+                "why": [
+                    "The PBX reported the endpoint as unavailable.",
+                    "PBXSense treats device availability as an office health signal.",
+                ],
+                "technical": {
+                    "extension": extension,
+                    "device_state": endpoint.device_state,
+                },
+            }
+        )
 
     signals.extend(
         _activity_signals(snapshot, active_channels, now, moment_hours, moment_events)

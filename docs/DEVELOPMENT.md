@@ -124,6 +124,9 @@ a large PBX does not generate dozens of notifications:
 - require 15 continuous healthy seconds before sending one grouped recovery;
 - keep the completed incident in a two-minute cooldown before starting a new
   episode.
+- preserve the same phone-outage occurrence through incomplete endpoint
+  inventories and throughout the recovery-confirmation window; only sustained,
+  explicit reachable evidence can rearm it.
 
 Message wording follows the current affected count. Shared network/PBX wording
 is valid only while at least three phones remain unavailable. When the incident

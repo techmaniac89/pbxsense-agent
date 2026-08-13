@@ -1035,6 +1035,7 @@ def _refresh_home_state_locked() -> tuple:
         observed_at,
     )
     endpoint_notification_ids = endpoint_availability_tracker.notification_ids()
+    endpoint_unavailability_evidence = endpoint_availability_tracker.signal_endpoints()
     trunk_unavailability_signals = trunk_availability_tracker.observe(
         snapshot,
         observed_at,
@@ -1047,6 +1048,7 @@ def _refresh_home_state_locked() -> tuple:
         moment_events,
         endpoint_unavailability_signals,
         endpoint_notification_ids,
+        endpoint_unavailability_evidence,
         trunk_unavailability_signals,
         show_aggregate_tip,
         endpoint_last_active,
@@ -1055,7 +1057,7 @@ def _refresh_home_state_locked() -> tuple:
 
 
 def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
-    snapshot, observed_at, moment_events, endpoint_signals, endpoint_notification_ids, trunk_signals, show_aggregate_tip, endpoint_last_active = state
+    snapshot, observed_at, moment_events, endpoint_signals, endpoint_notification_ids, endpoint_unavailability_evidence, trunk_signals, show_aggregate_tip, endpoint_last_active = state
     payload = build_home_payload(
         snapshot,
         display_name=settings.display_name,
@@ -1069,6 +1071,7 @@ def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
         moment_events=moment_events,
         endpoint_unavailability_signals=endpoint_signals,
         endpoint_notification_ids=endpoint_notification_ids,
+        endpoint_unavailability_evidence=endpoint_unavailability_evidence,
         trunk_unavailability_signals=trunk_signals,
         endpoint_last_active=endpoint_last_active,
     )

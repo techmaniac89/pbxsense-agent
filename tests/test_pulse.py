@@ -1000,12 +1000,18 @@ external::backup gateway sip:user@backup.test NOREG
         )
         first_notification_id = tracker.notification_ids().get("200")
 
-        self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=1, seconds=1)), set())
+        self.assertEqual(
+            tracker.observe(reachable, now + timedelta(minutes=1, seconds=1)),
+            {"200"},
+        )
         self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=1, seconds=2)), {"200"})
         self.assertEqual(tracker.notification_ids().get("200"), first_notification_id)
         self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=3)), {"200"})
 
-        self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=3, seconds=1)), set())
+        self.assertEqual(
+            tracker.observe(reachable, now + timedelta(minutes=3, seconds=1)),
+            {"200"},
+        )
         self.assertEqual(tracker.observe(reachable, now + timedelta(minutes=5, seconds=1)), set())
         self.assertEqual(tracker.observe(unavailable, now + timedelta(minutes=5, seconds=2)), set())
         self.assertEqual(
@@ -1031,11 +1037,75 @@ external::backup gateway sip:user@backup.test NOREG
 
         self.assertEqual(tracker.observe(unavailable, now), {"200"})
         first_notification_id = tracker.notification_ids()["200"]
-        self.assertEqual(tracker.observe(reachable, now + timedelta(seconds=1)), set())
+        self.assertEqual(
+            tracker.observe(reachable, now + timedelta(seconds=1)), {"200"}
+        )
         self.assertEqual(tracker.observe(unavailable, now + timedelta(seconds=2)), {"200"})
         self.assertEqual(
             tracker.notification_ids()["200"],
             first_notification_id,
+        )
+
+    def test_missing_phone_inventory_preserves_one_outage_episode(self) -> None:
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(0),
+            recovery_confirmation=timedelta(seconds=60),
+        )
+        now = datetime(2026, 8, 13, 10, tzinfo=ZoneInfo("Europe/Athens"))
+        unavailable = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="200", device_state="Unavailable")],
+        )
+        missing = AmiSnapshot(reachable=True, agent_version="test", endpoints=[])
+
+        self.assertEqual(tracker.observe(unavailable, now), {"200"})
+        notification_id = tracker.notification_ids()["200"]
+        evidence = tracker.signal_endpoints()
+
+        self.assertEqual(
+            tracker.observe(missing, now + timedelta(minutes=30)), {"200"}
+        )
+        self.assertEqual(tracker.notification_ids()["200"], notification_id)
+        self.assertEqual(tracker.signal_endpoints()["200"], evidence["200"])
+        self.assertEqual(
+            tracker.observe(unavailable, now + timedelta(hours=2)), {"200"}
+        )
+        self.assertEqual(tracker.notification_ids()["200"], notification_id)
+
+    def test_missing_phone_signal_stays_in_home_payload(self) -> None:
+        tracker = EndpointAvailabilitySignalTracker(
+            outage_confirmation=timedelta(0),
+        )
+        now = datetime(2026, 8, 13, 10, tzinfo=ZoneInfo("Europe/Athens"))
+        unavailable = AmiSnapshot(
+            reachable=True,
+            agent_version="test",
+            endpoints=[AmiEndpoint(extension="200", device_state="Unavailable")],
+        )
+        missing = AmiSnapshot(reachable=True, agent_version="test", endpoints=[])
+        tracker.observe(unavailable, now)
+        visible = tracker.observe(missing, now + timedelta(seconds=5))
+
+        payload = build_home_payload(
+            missing,
+            display_name="Office PBX",
+            extension_names={"200": "Warehouse"},
+            now=now + timedelta(seconds=5),
+            endpoint_unavailability_signals=visible,
+            endpoint_unavailability_evidence=tracker.signal_endpoints(),
+            endpoint_notification_ids=tracker.notification_ids(),
+        )
+
+        signals = [
+            signal
+            for signal in payload["signals"]
+            if signal["kind"] == "endpoint_unavailable"
+        ]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0]["title"], "Warehouse looks unavailable.")
+        self.assertEqual(
+            signals[0]["notificationId"], tracker.notification_ids()["200"]
         )
 
     def test_unavailable_signal_exposes_episode_notification_id(self) -> None:

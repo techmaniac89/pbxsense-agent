@@ -29,6 +29,12 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_ENDPOINT_ACTIVITY_PATH` | `/var/lib/pbxsense-agent/endpoint_activity.json` | Persistent last-active timestamps captured when monitored devices transition offline. Keep this inside the Agent data volume. |
 | `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS` | `30` | Continuous unavailable period required before a per-device Health Signal and notification. |
 | `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS` | `60` | Continuous reachable period required before recovery and a later outage notification can be armed. |
+
+A temporarily incomplete endpoint inventory is not recovery evidence. Once an
+unavailable-phone incident is confirmed, the Agent retains its Signal and
+notification occurrence through missing/ambiguous snapshots. Only an explicit
+reachable state sustained for the configured recovery period closes the
+incident and permits a later notification.
 | `PBXSENSE_TRUNK_OUTAGE_CONFIRMATION_SECONDS` | `5` | Continuous unavailable period required before a trunk Health Signal and notification. |
 | `PBXSENSE_QUALITY_FREQUENCY_SECONDS` | `180` | Evidence window before aggregate availability Tips are emitted. |
 | `PBXSENSE_RELAY_URL` | hosted PBXSense URL in `.env.example` | Shared notification/encrypted-data relay URL. Production URLs must use HTTPS; plain HTTP is accepted only for localhost development. Leave empty only for deliberately local-only installs. |
