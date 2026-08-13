@@ -14,6 +14,10 @@ from .settings import AgentSettings
 from .version import AGENT_VERSION
 
 
+MAX_ESL_HEADER_BYTES = 64 * 1024
+MAX_ESL_BODY_BYTES = 16 * 1024 * 1024
+
+
 class FreeSwitchError(OSError):
     pass
 
@@ -216,7 +220,12 @@ class FreeSwitchClient:
     def _read_reply(self, sock: socket.socket, *, phase: str) -> FreeSwitchReply:
         raw_headers = self._read_until(sock, b"\n\n", phase=phase)
         headers = _parse_headers(raw_headers.decode("utf-8", errors="replace"))
-        length = int(headers.get("content-length", "0") or "0")
+        try:
+            length = int(headers.get("content-length", "0") or "0")
+        except ValueError as exc:
+            raise FreeSwitchError(f"{phase} returned an invalid content length") from exc
+        if length < 0 or length > MAX_ESL_BODY_BYTES:
+            raise FreeSwitchError(f"{phase} response body exceeded the size limit")
         body = self._read_exact(sock, length, phase=phase) if length else b""
         return FreeSwitchReply(
             headers=headers,
@@ -224,18 +233,20 @@ class FreeSwitchClient:
         )
 
     def _read_until(self, sock: socket.socket, marker: bytes, *, phase: str) -> bytes:
-        chunks: list[bytes] = []
+        chunks = bytearray()
         try:
             while True:
                 chunk = sock.recv(1)
                 if not chunk:
                     break
-                chunks.append(chunk)
-                if b"".join(chunks).endswith(marker):
+                chunks.extend(chunk)
+                if len(chunks) > MAX_ESL_HEADER_BYTES:
+                    raise FreeSwitchError(f"{phase} response headers exceeded the size limit")
+                if chunks.endswith(marker):
                     break
         except TimeoutError as exc:
             raise FreeSwitchError(f"{phase} timed out") from exc
-        return b"".join(chunks)
+        return bytes(chunks)
 
     def _read_exact(self, sock: socket.socket, length: int, *, phase: str) -> bytes:
         chunks: list[bytes] = []

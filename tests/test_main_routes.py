@@ -1,13 +1,69 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from fastapi import HTTPException, Request, WebSocket
+from starlette.responses import Response
+
+from pbxsense_agent import main as agent_main
 from pbxsense_agent.diagnostics import (
     ami_diagnostic_statuses,
     connector_diagnostic_statuses,
 )
+
+
+def _request(
+    *,
+    method: str = "GET",
+    path: str = "/",
+    query: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+    client: tuple[str, int] = ("127.0.0.1", 50000),
+    scheme: str = "http",
+) -> Request:
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": scheme,
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": query,
+        "headers": headers or [],
+        "client": client,
+        "server": ("agent.test", 8765),
+    }
+    return Request(scope)
+
+
+def _websocket(
+    *,
+    query: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+    client: tuple[str, int] = ("127.0.0.1", 50000),
+) -> WebSocket:
+    async def receive() -> dict[str, object]:
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(_: dict[str, object]) -> None:
+        return None
+
+    return WebSocket({
+        "type": "websocket",
+        "scheme": "ws",
+        "path": "/live",
+        "raw_path": b"/live",
+        "query_string": query,
+        "headers": headers or [],
+        "client": client,
+        "server": ("agent.test", 8765),
+        "subprotocols": [],
+    }, receive, send)
 
 
 class MainRouteStructureTest(unittest.TestCase):
@@ -239,26 +295,120 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn("Remove app</button>", source)
 
     def test_cookie_authenticated_writes_require_same_origin(self) -> None:
-        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+        original = agent_main.settings
+        agent_main.settings = replace(original, token="test-token", public_url="")
+        try:
+            cookie = agent_main._local_web_cookie_value()
+            headers = [
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"http://attacker.test"),
+            ]
+            with self.assertRaises(HTTPException) as raised:
+                agent_main._require_safe_cookie_mutation(
+                    _request(method="POST", path="/apps/remove", headers=headers)
+                )
+            self.assertEqual(raised.exception.status_code, 403)
 
-        self.assertIn("def _require_safe_cookie_mutation", source)
-        self.assertIn("Same-origin request required", source)
+            same_origin = [
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"http://agent.test:8765"),
+            ]
+            agent_main._require_safe_cookie_mutation(
+                _request(method="POST", path="/apps/remove", headers=same_origin)
+            )
+        finally:
+            agent_main.settings = original
 
     def test_browser_cookie_transport_is_scoped_to_its_security_boundary(self) -> None:
-        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+        original = agent_main.settings
+        agent_main.settings = replace(original, token="test-token", public_url="")
+        try:
+            self.assertTrue(
+                agent_main._browser_session_transport_allowed(_request())
+            )
+            self.assertFalse(agent_main._browser_session_transport_allowed(
+                _request(client=("192.168.1.25", 50000), scheme="http")
+            ))
+            self.assertTrue(agent_main._browser_session_transport_allowed(
+                _request(client=("192.168.1.25", 50000), scheme="https")
+            ))
 
-        self.assertGreaterEqual(source.count("secure=_local_web_cookie_secure(request)"), 2)
-        self.assertIn("def _local_web_cookie_secure", source)
-        self.assertIn("urlparse(settings.public_url).scheme", source)
-        websocket_auth = source[source.index("def _websocket_authorized") :]
-        self.assertIn("is_private_or_loopback_host(client_host)", websocket_auth)
-        self.assertGreaterEqual(source.count("_require_safe_cookie_mutation(request)"), 3)
+            cookie = agent_main._local_web_cookie_value()
+            self.assertTrue(agent_main._websocket_authorized(_websocket(headers=[
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode())
+            ])))
+            self.assertFalse(agent_main._websocket_authorized(_websocket(
+                query=b"token=test-token",
+                client=("8.8.8.8", 50000),
+            )))
+        finally:
+            agent_main.settings = original
 
     def test_admin_browser_session_is_long_lived_and_renews(self) -> None:
-        source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
+        original = agent_main.settings
+        agent_main.settings = replace(original, token="test-token", public_url="")
+        try:
+            request = _request(headers=[
+                (b"accept", b"text/html"),
+                (b"cookie", (
+                    f"{agent_main.LOCAL_WEB_COOKIE}="
+                    f"{agent_main._local_web_cookie_value()}"
+                ).encode())
+            ])
 
-        self.assertIn("LOCAL_WEB_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 10", source)
-        self.assertIn("async def renew_local_admin_session", source)
+            async def call_next(_: Request) -> Response:
+                return Response("ok")
+
+            response = asyncio.run(agent_main.protect_agent_responses(request, call_next))
+            self.assertIn(agent_main.LOCAL_WEB_COOKIE, response.headers["set-cookie"])
+            self.assertEqual(response.headers["cache-control"], "no-store, private")
+            self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+            self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            self.assertEqual(response.headers["x-frame-options"], "DENY")
+            self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
+        finally:
+            agent_main.settings = original
+
+    def test_query_tokens_are_rejected_but_bearer_tokens_are_accepted(self) -> None:
+        original = agent_main.settings
+        agent_main.settings = replace(original, token="test-token")
+        try:
+            with self.assertRaises(HTTPException) as raised:
+                agent_main._require_token(_request(query=b"token=test-token"))
+            self.assertEqual(raised.exception.status_code, 401)
+
+            agent_main._require_token(_request(headers=[
+                (b"authorization", b"Bearer test-token")
+            ]))
+            self.assertTrue(agent_main._websocket_authorized(_websocket(headers=[
+                (b"authorization", b"Bearer test-token")
+            ])))
+        finally:
+            agent_main.settings = original
+
+    def test_browser_setup_credential_is_single_use(self) -> None:
+        original = agent_main.settings
+        with TemporaryDirectory() as directory:
+            agent_main.settings = replace(
+                original,
+                token="test-token",
+                browser_bootstrap_token="setup-token",
+                browser_bootstrap_expires_at=int(agent_main.time.time()) + 60,
+                browser_bootstrap_state_path=str(Path(directory) / "used"),
+            )
+            request = _request(
+                method="POST",
+                path="/session",
+                headers=[(b"authorization", b"Bearer setup-token")],
+            )
+            try:
+                response = asyncio.run(agent_main.authorize_browser_session(request))
+                self.assertIn(agent_main.LOCAL_WEB_COOKIE, response.headers["set-cookie"])
+                with self.assertRaises(HTTPException) as raised:
+                    asyncio.run(agent_main.authorize_browser_session(request))
+                self.assertEqual(raised.exception.status_code, 401)
+            finally:
+                agent_main.settings = original
 
     def test_agent_page_hides_relay_version_and_offers_discord(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")

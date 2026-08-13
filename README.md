@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.6.1-beta` on the **Breeze** channel.
+The current Agent release is `0.6.2-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -108,11 +108,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.1-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.2-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -164,15 +164,16 @@ http://127.0.0.1:8765/pair
 ```
 
 If `PBXSENSE_AGENT_TOKEN` is configured, every protected HTTP and WebSocket
-request must present it. Native and Docker installers print the complete
-authenticated URL at the end, so the administrator does not transcribe the
-token. Opening it authorizes that PC browser with a long-lived HttpOnly cookie
-that renews on use. The authorization remains until browser site data is cleared
-or the Agent token changes. Set `PBXSENSE_ACCESS_HOST=<LAN-IP-or-hostname>` when
-running the installer if automatic address detection would print the wrong host.
+request must present it. Native and Docker installers print a separate,
+single-use browser-setup credential that expires after 15 minutes; the durable
+Agent token is never printed. The setup credential is placed in the URL fragment,
+removed from browser history, and exchanged for a long-lived HttpOnly cookie.
+Query-string token authentication is not accepted. Without TLS, setup is
+restricted to the Agent host's loopback address; configure native/reverse-proxy
+HTTPS for setup from another private LAN or VPN device.
 
 ```text
-http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
+http://127.0.0.1:8765/session#token=<BROWSER_BOOTSTRAP_TOKEN>
 ```
 
 ## Configuration
@@ -319,10 +320,11 @@ http://<agent-host>:8765/
 To pair the app, open:
 
 ```text
-http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
+http://<agent-host>:8765/pair
 ```
 
-The token lives in `/etc/pbxsense-agent.env`.
+Authorize the browser with the fragment-based setup link printed by the
+installer first. The token lives in `/etc/pbxsense-agent.env`.
 
 ### Installer Defaults
 
@@ -729,15 +731,16 @@ http://127.0.0.1:8765/pair
 ```
 
 If `PBXSENSE_AGENT_TOKEN` is set, localhost and private LAN/VPN addresses do
-not bypass authentication. Supply the token explicitly on the first HTML visit
-or through the app pairing QR. A valid HTML visit receives an HTTP-only cookie,
-and the real token is then removed from normal page links.
+not bypass authentication. Open the installer-generated `/session#token=...`
+link first; the fragment is removed before the browser sends the token in a
+Bearer-authenticated session exchange. Normal HTTP and WebSocket endpoints do
+not accept the Agent token in their query string.
 
-The pairing page still embeds the token in the QR payload so the app can store
-it for non-LAN or stricter future access:
+The protected pairing page embeds the token only in its custom-scheme QR payload
+so the app can store it for authenticated Agent requests:
 
 ```text
-http://<agent-host>:8765/pair?token=your-token
+pbxsense://pair?agent=https%3A%2F%2Fagent.example%3A8765&token=your-token
 ```
 
 The QR contains a `pbxsense://pair?...` payload with the Agent URL and token.
@@ -755,7 +758,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -769,7 +772,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.6.1-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.6.2-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging

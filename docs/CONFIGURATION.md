@@ -18,6 +18,9 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_DISPLAY_NAME` | connector name | Friendly PBX name shown by the Agent. |
 | `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
 | `PBXSENSE_AGENT_TOKEN` | empty | Shared token for local/VPN/direct-Agent pairing and protected endpoints; it is not sent to the hosted relay. |
+| `PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` | generated | Installer-rotated, single-use credential printed only in the browser setup URL; it does not grant API access and expires after 15 minutes. |
+| `PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT` | generated | Unix expiry for the browser bootstrap credential. |
+| `PBXSENSE_BROWSER_BOOTSTRAP_STATE_PATH` | `/var/lib/pbxsense-agent/browser_bootstrap_used` | Durable consumed-credential marker that prevents reuse after an Agent restart. |
 | `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP/login timeout in seconds. |
 | `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP or HTTPS port used by the Linux service and Docker container, including its health check and LAN port mapping. |
 | `PBXSENSE_AGENT_TLS_CERTFILE` | empty | PEM certificate chain for native Agent HTTPS/WSS. Configure together with `PBXSENSE_AGENT_TLS_KEYFILE`; release apps require TLS for direct LAN/VPN access. |
@@ -271,8 +274,12 @@ should set a long random token. Internet Relay uses a separate per-app device
 credential and does not reuse this token.
 
 Localhost, private LAN, and VPN clients must authenticate just like other
-clients. The installer prints an authenticated browser URL at completion; a
-valid HTML visit creates a long-lived, renewable HTTP-only, same-site cookie.
+clients. The installer prints a fragment-based browser setup URL containing a
+separate, single-use 15-minute credential; it does not print the Agent token.
+The browser removes the fragment before exchanging the credential for a
+long-lived, renewable HTTP-only, same-site cookie. Plain HTTP setup is accepted
+only from loopback; private LAN and VPN browser setup requires HTTPS. Normal
+HTTP and WebSocket routes reject query-string token authentication.
 The pairing page embeds the token in its QR payload so the app can authenticate
 `/home`, `/live`, diagnostics, recordings, and push-device registration:
 

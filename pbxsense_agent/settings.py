@@ -26,6 +26,9 @@ class AgentSettings:
     timezone: str
     token: str
     public_url: str = ""
+    browser_bootstrap_token: str = ""
+    browser_bootstrap_expires_at: int = 0
+    browser_bootstrap_state_path: str = "/var/lib/pbxsense-agent/browser_bootstrap_used"
     relay_url: str = ""
     relay_identity_path: str = "/var/lib/pbxsense-agent/relay_identity.json"
     relay_timeout_seconds: float = 5
@@ -130,6 +133,16 @@ class AgentSettings:
             public_url=_public_url(
                 os.getenv("PBXSENSE_AGENT_PUBLIC_URL", "")
             ),
+            browser_bootstrap_token=os.getenv(
+                "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN", ""
+            ).strip(),
+            browser_bootstrap_expires_at=_env_int(
+                "PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT", 0
+            ),
+            browser_bootstrap_state_path=os.getenv(
+                "PBXSENSE_BROWSER_BOOTSTRAP_STATE_PATH",
+                "/var/lib/pbxsense-agent/browser_bootstrap_used",
+            ).strip(),
             relay_url=os.getenv("PBXSENSE_RELAY_URL", "").strip().rstrip("/"),
             relay_identity_path=os.getenv(
                 "PBXSENSE_RELAY_IDENTITY_PATH",

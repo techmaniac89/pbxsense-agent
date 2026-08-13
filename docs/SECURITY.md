@@ -51,20 +51,27 @@ operator `ping`/`pong` smoke test.
 refuses to start without it; the native and Docker setup wizards generate it
 automatically.
 
-Native and Docker installers print a complete authenticated admin URL instead
-of asking the administrator to transcribe the token. Successful access removes
-the token from the address bar and creates a long-lived, renewable HttpOnly,
-SameSite=Strict cookie for that browser. HTTPS Agent origins additionally mark
-the cookie `Secure`, including when TLS terminates at the canonical HTTPS origin
-configured through `PBXSENSE_AGENT_PUBLIC_URL`. It remains authorized until site data
-is cleared or the Agent token changes. Treat the printed installation URL like
-a password and open it only on the intended trusted PC.
+Native and Docker installers print a browser setup URL containing a separate,
+single-use credential that expires after 15 minutes; they never print the
+installation-wide Agent token. The credential is carried in the URL fragment,
+which is never sent in the HTTP request and is removed from browser history
+before a Bearer-authenticated session exchange. Its consumed hash is persisted
+under the Agent data directory so an Agent restart cannot reuse it. Plain HTTP
+setup is restricted to loopback; private LAN and VPN setup requires HTTPS.
+Successful access creates a long-lived, renewable HttpOnly, SameSite=Strict
+cookie. HTTPS Agent origins also mark the cookie `Secure`.
 
 When a token is set, every protected HTTP and `/live` request must authenticate,
-including requests from localhost, a private LAN, or a VPN. A valid token on an
-HTML request creates an HTTP-only, same-site cookie for later Agent-page links.
-The Agent does not enable cross-origin browser access. `GET /health` is the only
-unauthenticated route and returns only a basic service status.
+including requests from localhost, a private LAN, or a VPN. Tokens are accepted
+through Bearer or `X-PBXSense-Token` headers; query-string credentials are
+rejected. The Agent does not enable cross-origin browser access. `GET /health`,
+the favicon, and the token-free `/session` bootstrap page are the only
+unauthenticated routes and disclose no PBX state.
+
+All Agent responses use `Cache-Control: no-store, private`, `Referrer-Policy:
+no-referrer`, MIME-sniffing and frame protections, and a restrictive Content
+Security Policy so protected PBX data and recordings are not retained by normal
+browser caches.
 
 State-changing Agent routes accept native-app Bearer/header authentication.
 When the protected Agent page uses its local HTTP-only admin cookie instead,
@@ -105,7 +112,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

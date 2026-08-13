@@ -9,6 +9,12 @@ from .settings import AgentSettings
 from .version import AGENT_VERSION
 
 
+MAX_AMI_PACKET_BYTES = 256 * 1024
+MAX_AMI_ACTION_BYTES = 32 * 1024 * 1024
+MAX_AMI_EVENTS_PER_ACTION = 20_000
+MAX_AMI_RESPONSE_PACKETS = 100
+
+
 @dataclass(frozen=True)
 class AmiEvent:
     name: str
@@ -219,9 +225,16 @@ class AmiClient:
     ) -> list[AmiEvent]:
         self._send_action(sock, {"Action": action})
         events: list[AmiEvent] = []
+        received_bytes = 0
 
         while True:
             packet = self._read_packet(sock, phase=action)
+            received_bytes += sum(
+                len(key.encode("utf-8")) + len(value.encode("utf-8")) + 4
+                for key, value in packet.items()
+            )
+            if received_bytes > MAX_AMI_ACTION_BYTES:
+                raise AmiError(f"AMI action {action} exceeded the response size limit")
             if not packet:
                 continue
             if packet.get("Response") == "Error":
@@ -233,6 +246,8 @@ class AmiClient:
             if event_name == complete_event:
                 return events
             if event_name:
+                if len(events) >= MAX_AMI_EVENTS_PER_ACTION:
+                    raise AmiError(f"AMI action {action} returned too many events")
                 events.append(AmiEvent(name=event_name, fields=packet))
 
     def _collect_optional_action_events(
@@ -252,10 +267,11 @@ class AmiClient:
             return []
 
     def _read_until_response(self, sock: socket.socket, *, phase: str) -> dict[str, str]:
-        while True:
+        for _ in range(MAX_AMI_RESPONSE_PACKETS):
             packet = self._read_packet(sock, phase=phase)
             if "Response" in packet:
                 return packet
+        raise AmiError(f"{phase} returned too many packets before its response")
 
     def _send_action(self, sock: socket.socket, fields: dict[str, str]) -> None:
         payload = "".join(f"{key}: {value}\r\n" for key, value in fields.items())
@@ -291,7 +307,13 @@ class AmiClient:
         return fields
 
 
-def _recv_through(sock: socket.socket, marker: bytes, *, chunk_size: int = 4096) -> bytes:
+def _recv_through(
+    sock: socket.socket,
+    marker: bytes,
+    *,
+    chunk_size: int = 4096,
+    max_bytes: int = MAX_AMI_PACKET_BYTES,
+) -> bytes:
     """Read through a delimiter without consuming the following AMI packet.
 
     MSG_PEEK lets us use buffered socket reads while preserving the packet
@@ -314,6 +336,8 @@ def _recv_through(sock: socket.socket, marker: bytes, *, chunk_size: int = 4096)
         if not chunk:
             return bytes(chunks)
         chunks.extend(chunk)
+        if len(chunks) > max_bytes:
+            raise AmiError("AMI response frame exceeded the size limit")
         if marker_index >= 0:
             return bytes(chunks)
 

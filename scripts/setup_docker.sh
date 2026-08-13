@@ -59,14 +59,27 @@ else
   echo "Configuration saved. Start later with: docker compose $compose_files up -d --build"
 fi
 
-token="$(awk -F= '$1 == "PBXSENSE_AGENT_TOKEN" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+bootstrap_token="$(awk -F= '$1 == "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
 port="$(awk -F= '$1 == "PBXSENSE_AGENT_PORT" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
 [ -n "$port" ] || port="8765"
-host="${PBXSENSE_ACCESS_HOST:-}"
-if [ -z "$host" ]; then
-  host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+public_url="$(awk -F= '$1 == "PBXSENSE_AGENT_PUBLIC_URL" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+certificate="$(awk -F= '$1 == "PBXSENSE_AGENT_TLS_CERTFILE" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+if [ -n "$public_url" ]; then
+  admin_origin="${public_url%/}"
+elif [ -n "$certificate" ]; then
+  host="${PBXSENSE_ACCESS_HOST:-}"
+  if [ -z "$host" ]; then
+    host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  [ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
+  admin_origin="https://$host:$port"
+else
+  admin_origin="http://127.0.0.1:$port"
 fi
-[ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
 echo "Open PBXSense Agent on this PC:"
-echo "http://$host:$port/?token=$token"
+echo "$admin_origin/session#token=$bootstrap_token"
+if [ -z "$certificate" ] && [ -z "$public_url" ]; then
+  echo "Because TLS is not configured, open this loopback setup link on the Agent host."
+fi
+echo "This setup credential is single-use and expires after 15 minutes."
 echo "The browser remains authorized until its site data is cleared or the Agent token changes."

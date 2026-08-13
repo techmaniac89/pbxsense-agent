@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import threading
 import time
 from datetime import timedelta
 from html import escape
+from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -29,7 +31,7 @@ from .history import (
 from .internet_relay import SecureInternetRelay
 from .live import home_live_events
 from .mock import mock_snapshot
-from .network import is_private_or_loopback_host
+from .network import is_loopback_host, is_private_or_loopback_host
 from .pulse import (
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
@@ -102,13 +104,14 @@ _relay_publish_task: asyncio.Task[None] | None = None
 _relay_heartbeat_task: asyncio.Task[None] | None = None
 _internet_relay_task: asyncio.Task[None] | None = None
 _snapshot_lock = threading.Lock()
+_browser_bootstrap_lock = threading.Lock()
 _cached_home_state: tuple | None = None
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
 
 
 @app.middleware("http")
-async def renew_local_admin_session(request: Request, call_next):
+async def protect_agent_responses(request: Request, call_next):
     response = await call_next(request)
     if (
         request.method == "GET"
@@ -123,6 +126,16 @@ async def renew_local_admin_session(request: Request, call_next):
             secure=_local_web_cookie_secure(request),
             samesite="strict",
         )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; form-action 'self'; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
     return response
 
 
@@ -213,8 +226,6 @@ async def _internet_relay_loop() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    if redirect := _localhost_cookie_redirect(request):
-        return redirect
     _require_token(request)
     diagnostics = _agent_status()
     ok = diagnostics["ok"]
@@ -250,6 +261,45 @@ def index(request: Request):
             {_agent_navigation_html(request, current="home", primary="pair")}
             {diagnostic_html}
             {_agent_footer_html()}
+          </section>
+        """,
+    )
+
+
+def _browser_session_page() -> str:
+    return _page(
+        title="Authorize PBXSense Agent",
+        body="""
+          <section class="hero-card">
+            <div class="brand">
+              <div>
+                <h1>Authorize this browser</h1>
+                <p class="subtitle" id="session-status">Checking the secure setup link...</p>
+              </div>
+            </div>
+            <p>This page exchanges the setup link for a protected browser session. The short-lived setup credential is removed from browser history before it is sent.</p>
+            <script>
+              (() => {
+                const status = document.getElementById("session-status");
+                const fragment = new URLSearchParams(window.location.hash.slice(1));
+                const token = fragment.get("token") || "";
+                window.history.replaceState(null, "", window.location.pathname);
+                if (!token) {
+                  status.textContent = "This setup link is incomplete. Run the installer again to print a fresh link.";
+                  return;
+                }
+                fetch("/session", {
+                  method: "POST",
+                  credentials: "same-origin",
+                  headers: {Authorization: `Bearer ${token}`},
+                }).then((response) => {
+                  if (!response.ok) throw new Error("not authorized");
+                  window.location.replace("/");
+                }).catch(() => {
+                  status.textContent = "The setup credential was not accepted. Run the installer again to print a fresh link.";
+                });
+              })();
+            </script>
           </section>
         """,
     )
@@ -579,10 +629,59 @@ def favicon() -> Response:
     return Response(_beacon_svg(), media_type="image/svg+xml")
 
 
+@app.get("/session", response_class=HTMLResponse, include_in_schema=False)
+def browser_session(request: Request):
+    """Render a token-free browser bootstrap page on a protected transport."""
+    if not settings.token:
+        return RedirectResponse("/", status_code=303)
+    if not _browser_session_transport_allowed(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Browser setup requires loopback HTTP or private HTTPS",
+        )
+    return HTMLResponse(_browser_session_page())
+
+
+@app.post("/session", include_in_schema=False)
+async def authorize_browser_session(request: Request) -> JSONResponse:
+    """Exchange a fragment-supplied bearer token for the local admin cookie."""
+    if not settings.token:
+        return JSONResponse({"authorized": True})
+    if not _browser_session_transport_allowed(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Browser setup requires loopback HTTP or private HTTPS",
+        )
+    authorization = request.headers.get("authorization", "")
+    bootstrap_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else ""
+    )
+    try:
+        authorized = _consume_browser_bootstrap(bootstrap_token)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503, detail="Browser setup state could not be saved"
+        ) from exc
+    if not authorized:
+        raise HTTPException(
+            status_code=401, detail="Browser setup credential is invalid or expired"
+        )
+    response = JSONResponse({"authorized": True})
+    response.set_cookie(
+        LOCAL_WEB_COOKIE,
+        _local_web_cookie_value(),
+        max_age=LOCAL_WEB_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_local_web_cookie_secure(request),
+        samesite="strict",
+    )
+    return response
+
+
 @app.get("/home")
 def home(request: Request):
-    if redirect := _localhost_cookie_redirect(request):
-        return redirect
     _require_token(request)
     payload = _home_payload(moment_hours=_moment_hours(request))
     if _wants_html(request):
@@ -592,8 +691,6 @@ def home(request: Request):
 
 @app.get("/pair", response_class=HTMLResponse)
 def pair(request: Request):
-    if redirect := _localhost_cookie_redirect(request):
-        return redirect
     _require_token(request)
     payload = _pairing_payload(request)
     qr_svg = _qr_svg(payload)
@@ -604,8 +701,6 @@ def pair(request: Request):
     registration_revision = int(relay_status.get("deviceRegistrationRevision", 0))
     initial_device_revision = _registered_device_revision(push_relay.devices())
     apps_query = {"waitForDevice": "1"}
-    if request.query_params.get("token", "").strip():
-        apps_query["token"] = request.query_params["token"].strip()
     paired_apps_url = "/apps?" + urlencode(apps_query)
     relay_degraded = (
         relay_status.get("configured") is True
@@ -685,7 +780,7 @@ def pair(request: Request):
                 const initialRevision = {registration_revision};
                 const initialAttemptRevision = {registration_attempt_revision};
                 const initialDeviceRevision = {json.dumps(initial_device_revision)};
-                const statusUrl = {json.dumps('/push/devices/status' + _link_token_suffix(request))};
+                const statusUrl = "/push/devices/status";
                 const appsUrl = {json.dumps(paired_apps_url)};
                 const poll = async () => {{
                   try {{
@@ -722,8 +817,6 @@ def pair(request: Request):
 
 @app.get("/apps", response_class=HTMLResponse)
 def paired_apps(request: Request):
-    if redirect := _localhost_cookie_redirect(request):
-        return redirect
     _require_token(request)
     result = push_relay.devices()
     devices = result.get("devices", [])
@@ -804,9 +897,6 @@ def remove_paired_app(request: Request):
         fcm_token="", relay_device_id=device_id
     )
     query = {"removal": "removed" if removed else "failed"}
-    token = request.query_params.get("token", "").strip()
-    if token:
-        query["token"] = token
     return RedirectResponse("/apps?" + urlencode(query), status_code=303)
 
 
@@ -844,9 +934,6 @@ def _device_card(device: dict[str, object], request: Request) -> str:
     }
     revoke_id = str(device.get("revokeId") or "").strip()
     remove_query = {"deviceId": revoke_id}
-    query_token = request.query_params.get("token", "").strip()
-    if query_token:
-        remove_query["token"] = query_token
     remove_action = (
         f'<form class="device-actions" method="post" action="/apps/remove?{urlencode(remove_query)}" '
         'onsubmit="return confirm(\'Remove this app? It will stop receiving notifications from this Agent.\')">'
@@ -875,8 +962,6 @@ def ami_diagnostics(request: Request):
 
 @app.get("/diagnostics")
 def diagnostics(request: Request):
-    if redirect := _localhost_cookie_redirect(request):
-        return redirect
     _require_token(request)
     return _diagnostics_response(request)
 
@@ -1277,13 +1362,12 @@ def _agent_navigation_html(
     label_overrides: dict[str, str] | None = None,
     extra_links: tuple[tuple[str, str, bool], ...] = (),
 ) -> str:
-    suffix = _link_token_suffix(request)
     labels = label_overrides or {}
     links = (
-        ("pair", "Pair app", f"/pair{suffix}"),
-        ("apps", "Paired apps", f"/apps{suffix}"),
-        ("home", "Agent status", f"/{suffix}"),
-        ("diagnostics", "Diagnostics", f"/diagnostics{suffix}"),
+        ("pair", "Pair app", "/pair"),
+        ("apps", "Paired apps", "/apps"),
+        ("home", "Agent status", "/"),
+        ("diagnostics", "Diagnostics", "/diagnostics"),
     )
     rendered = "".join(
         f'<a class="button{" primary" if is_primary else ""}" '
@@ -1346,11 +1430,7 @@ def _json_page(
     include_agent_footer: bool = False,
 ) -> str:
     formatted = escape(json.dumps(payload, indent=2, ensure_ascii=False))
-    token_suffix = _link_token_suffix(request)
     raw_json_query = {"format": "json"}
-    query_token = request.query_params.get("token", "").strip()
-    if query_token:
-        raw_json_query["token"] = query_token
     moment_hours = request.query_params.get("momentHours", "").strip()
     if moment_hours:
         raw_json_query["momentHours"] = moment_hours
@@ -1371,7 +1451,7 @@ def _json_page(
         if navigation_current
         else f"""
             <div class="actions">
-              <a class="button" href="/{token_suffix}">Agent status</a>
+              <a class="button" href="/">Agent status</a>
               <a class="button primary" href="?{urlencode(raw_json_query)}">Raw JSON</a>
             </div>
         """
@@ -1467,31 +1547,54 @@ def _require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="PBXSense Agent token required")
 
 
-def _localhost_cookie_redirect(request: Request) -> RedirectResponse | None:
-    if not settings.token or not _wants_html(request) or not _is_trusted_request(request):
-        return None
-    query_token = request.query_params.get("token", "").strip()
-    if query_token and hmac.compare_digest(query_token, settings.token):
-        query = [(key, value) for key, value in request.query_params.multi_items() if key != "token"]
-        target = str(request.url.replace(query=urlencode(query)))
-        response = RedirectResponse(target)
-        response.set_cookie(
-            LOCAL_WEB_COOKIE,
-            _local_web_cookie_value(),
-            max_age=LOCAL_WEB_COOKIE_MAX_AGE_SECONDS,
-            httponly=True,
-            secure=_local_web_cookie_secure(request),
-            samesite="strict",
-        )
-        return response
-    if _has_valid_local_web_cookie(request):
-        return None
-    return None
-
-
 def _is_trusted_request(request: Request) -> bool:
     client_host = request.client.host if request.client else ""
     return is_private_or_loopback_host(client_host)
+
+
+def _browser_session_transport_allowed(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    return _is_trusted_request(request) and (
+        is_loopback_host(client_host) or _local_web_cookie_secure(request)
+    )
+
+
+def _consume_browser_bootstrap(supplied: str) -> bool:
+    configured = settings.browser_bootstrap_token
+    if (
+        not configured
+        or not supplied
+        or settings.browser_bootstrap_expires_at < int(time.time())
+        or not hmac.compare_digest(supplied, configured)
+    ):
+        return False
+    digest = hashlib.sha256(configured.encode("utf-8")).hexdigest()
+    path = Path(settings.browser_bootstrap_state_path)
+    with _browser_bootstrap_lock:
+        try:
+            if path.read_text(encoding="ascii").strip() == digest:
+                return False
+        except FileNotFoundError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(digest + "\n", encoding="ascii")
+            try:
+                temporary.chmod(0o600)
+            except OSError:
+                pass
+            os.replace(temporary, path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return True
 
 
 def _local_web_cookie_secure(request: Request) -> bool:
@@ -1520,9 +1623,6 @@ def _request_token(request: Request) -> str:
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
-    query_token = request.query_params.get("token", "").strip()
-    if query_token:
-        return query_token
     if _has_valid_local_web_cookie(request):
         return settings.token
     return request.headers.get("x-pbxsense-token", "").strip()
@@ -1533,7 +1633,6 @@ def _require_safe_cookie_mutation(request: Request) -> None:
     authorization = request.headers.get("authorization", "")
     if (
         authorization.lower().startswith("bearer ")
-        or request.query_params.get("token", "").strip()
         or request.headers.get("x-pbxsense-token", "").strip()
         or not _has_valid_local_web_cookie(request)
     ):
@@ -1558,23 +1657,15 @@ def _websocket_authorized(websocket: WebSocket) -> bool:
     if authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
     else:
-        token = websocket.query_params.get("token", "").strip()
-        if not token:
-            cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
-            client_host = websocket.client.host if websocket.client else ""
-            if (
-                is_private_or_loopback_host(client_host)
-                and hmac.compare_digest(cookie, _local_web_cookie_value())
-            ):
-                token = settings.token
+        token = ""
+        cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
+        client_host = websocket.client.host if websocket.client else ""
+        if (
+            is_private_or_loopback_host(client_host)
+            and hmac.compare_digest(cookie, _local_web_cookie_value())
+        ):
+            token = settings.token
     return hmac.compare_digest(token, settings.token)
-
-
-def _link_token_suffix(request: Request) -> str:
-    query_token = request.query_params.get("token", "").strip()
-    if not query_token:
-        return ""
-    return "?" + urlencode({"token": query_token})
 
 
 def _pairing_payload(request: Request) -> str:

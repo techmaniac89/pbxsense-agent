@@ -278,16 +278,29 @@ configure_freeswitch_env() {
 }
 
 print_admin_link() {
-  token="$(env_value PBXSENSE_AGENT_TOKEN)"
+  bootstrap_token="$(env_value PBXSENSE_BROWSER_BOOTSTRAP_TOKEN)"
   port="$(env_value PBXSENSE_AGENT_PORT)"
   [ -n "$port" ] || port="8765"
-  host="${PBXSENSE_ACCESS_HOST:-}"
-  if [ -z "$host" ] && command -v hostname >/dev/null 2>&1; then
-    host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  public_url="$(env_value PBXSENSE_AGENT_PUBLIC_URL)"
+  certificate="$(env_value PBXSENSE_AGENT_TLS_CERTFILE)"
+  if [ -n "$public_url" ]; then
+    admin_origin="${public_url%/}"
+  elif [ -n "$certificate" ]; then
+    host="${PBXSENSE_ACCESS_HOST:-}"
+    if [ -z "$host" ] && command -v hostname >/dev/null 2>&1; then
+      host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    fi
+    [ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
+    admin_origin="https://$host:$port"
+  else
+    admin_origin="http://127.0.0.1:$port"
   fi
-  [ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
   echo "Open PBXSense Agent on this PC:"
-  echo "http://$host:$port/?token=$token"
+  echo "$admin_origin/session#token=$bootstrap_token"
+  if [ -z "$certificate" ] && [ -z "$public_url" ]; then
+    echo "Because TLS is not configured, open this loopback setup link on the Agent host."
+  fi
+  echo "This setup credential is single-use and expires after 15 minutes."
   echo "The browser remains authorized until its site data is cleared or the Agent token changes."
 }
 
@@ -379,6 +392,9 @@ if [ "${PBXSENSE_CONFIGURE_ONLY:-false}" = "true" ]; then
   fi
   python3 "$SOURCE_DIR/scripts/ensure_token.py" "$ENV_FILE"
   configure_agent_env
+  # Prompts can take longer than the bootstrap lifetime; rotate immediately
+  # before returning the link to the administrator.
+  python3 "$SOURCE_DIR/scripts/ensure_token.py" "$ENV_FILE"
   chmod 600 "$ENV_FILE" 2>/dev/null || true
   echo "PBXSense Docker environment saved to $ENV_FILE"
   exit 0
@@ -473,6 +489,9 @@ fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --require-hashes -r "$INSTALL_DIR/requirements.lock"
+# Dependency installation can outlast the bootstrap lifetime. Refresh only the
+# short-lived setup credential immediately before the service is restarted.
+python3 "$INSTALL_DIR/scripts/ensure_token.py" "$ENV_FILE"
 
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"

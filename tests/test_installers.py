@@ -1,10 +1,39 @@
 from __future__ import annotations
 
 import unittest
+import subprocess
+import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 class InstallerStructureTest(unittest.TestCase):
+    def test_setup_credential_rotates_without_rotating_agent_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / "agent.env"
+            env_file.write_text("PBXSENSE_AGENT_TOKEN=durable-token\n", encoding="utf-8")
+            command = [sys.executable, "scripts/ensure_token.py", str(env_file)]
+
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            first = dict(
+                line.split("=", 1)
+                for line in env_file.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            second = dict(
+                line.split("=", 1)
+                for line in env_file.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+
+            self.assertEqual(first["PBXSENSE_AGENT_TOKEN"], "durable-token")
+            self.assertEqual(second["PBXSENSE_AGENT_TOKEN"], "durable-token")
+            self.assertNotEqual(
+                first["PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"],
+                second["PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"],
+            )
+
     def test_docker_setup_reuses_connector_configuration(self) -> None:
         common = Path("scripts/install_common.sh").read_text(encoding="utf-8")
         setup = Path("scripts/setup_docker.sh").read_text(encoding="utf-8")
@@ -24,8 +53,15 @@ class InstallerStructureTest(unittest.TestCase):
         docker = Path("scripts/setup_docker.sh").read_text(encoding="utf-8")
 
         self.assertIn("print_admin_link", common)
-        self.assertIn("/?token=$token", common)
-        self.assertIn("/?token=$token", docker)
+        self.assertIn("/session#token=$bootstrap_token", common)
+        self.assertIn("/session#token=$bootstrap_token", docker)
+        self.assertIn("http://127.0.0.1:$port", common)
+        self.assertIn("http://127.0.0.1:$port", docker)
+        self.assertNotIn("/?token=$token", common)
+        self.assertNotIn("/?token=$token", docker)
+        self.assertNotIn('token="$(env_value PBXSENSE_AGENT_TOKEN)"', common)
+        self.assertNotIn("'$1 == \"PBXSENSE_AGENT_TOKEN\"", docker)
+        self.assertIn("single-use and expires after 15 minutes", common)
 
     def test_connector_prompt_uses_product_order(self) -> None:
         common = Path("scripts/install_common.sh").read_text(encoding="utf-8")

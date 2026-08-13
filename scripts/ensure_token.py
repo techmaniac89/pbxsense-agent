@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import secrets
 import sys
+import time
 from pathlib import Path
 
 
 TOKEN_KEY = "PBXSENSE_AGENT_TOKEN"
+BOOTSTRAP_TOKEN_KEY = "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"
+BOOTSTRAP_EXPIRY_KEY = "PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT"
+BOOTSTRAP_LIFETIME_SECONDS = 15 * 60
 
 
 def main() -> int:
@@ -40,6 +44,22 @@ def main() -> int:
             updated.append("")
         updated.append(f"{TOKEN_KEY}={token}")
         changed = True
+
+    bootstrap_token = secrets.token_urlsafe(24)
+    bootstrap_expires_at = int(time.time()) + BOOTSTRAP_LIFETIME_SECONDS
+    updated = [
+        line for line in updated
+        if not line.startswith(f"{BOOTSTRAP_TOKEN_KEY}=")
+        and not line.startswith(f"{BOOTSTRAP_EXPIRY_KEY}=")
+    ]
+    if updated and updated[-1].strip():
+        updated.append("")
+    updated.extend((
+        f"{BOOTSTRAP_TOKEN_KEY}={bootstrap_token}",
+        f"{BOOTSTRAP_EXPIRY_KEY}={bootstrap_expires_at}",
+    ))
+    print("Generated a single-use browser setup credential valid for 15 minutes.")
+    changed = True
 
     if changed:
         env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")

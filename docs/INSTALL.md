@@ -15,11 +15,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.1-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.1-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.2-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -84,12 +84,13 @@ systemctl status pbxsense-agent
 journalctl -u pbxsense-agent -f
 ```
 
-Open the authenticated link printed at the end of installation on the
-administrator's PC. The browser receives a long-lived HttpOnly authorization
-that renews on use and remains until browser site data is cleared or the Agent
-token changes. If automatic host detection is unsuitable, run the installer as
-`sudo PBXSENSE_ACCESS_HOST=<LAN-IP-or-hostname> sh ./scripts/install_debian.sh`
-(or use `install_fedora.sh`).
+Open the setup link printed at the end of installation. It contains a separate,
+single-use browser credential that expires after 15 minutes; the durable Agent
+token is not printed. The credential is carried in a URL fragment, removed from
+browser history, and exchanged for a long-lived HttpOnly authorization. Without
+TLS the link uses `127.0.0.1` and must be opened on the Agent host. For setup from
+another private LAN or VPN device, configure native or reverse-proxy HTTPS and
+`PBXSENSE_AGENT_PUBLIC_URL` first.
 
 The underlying Agent address is:
 
@@ -97,11 +98,15 @@ The underlying Agent address is:
 http://<agent-host>:8765/
 ```
 
-The explicit token-bearing pairing URL remains available for troubleshooting:
+After browser authorization, open the pairing page without a query credential:
 
 ```text
-http://<agent-host>:8765/pair?token=<PBXSENSE_AGENT_TOKEN>
+http://<agent-host>:8765/pair
 ```
+
+Normal Agent HTTP and WebSocket routes reject query-string tokens. Native apps
+authenticate with the Bearer or `X-PBXSense-Token` header obtained from the
+custom-scheme pairing QR.
 
 Those HTTP examples are for debug-app LAN development. Production/release apps
 require HTTPS/WSS for direct LAN or VPN access. Provide a certificate and key

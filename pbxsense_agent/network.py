@@ -9,3 +9,10 @@ def is_private_or_loopback_host(host: str) -> bool:
     except ValueError:
         return host.lower() == "localhost"
     return address.is_private or address.is_loopback or address.is_link_local
+
+
+def is_loopback_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"

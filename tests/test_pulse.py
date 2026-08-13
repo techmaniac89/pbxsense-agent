@@ -14,6 +14,7 @@ from pbxsense_agent.ami import (
     AmiClient,
     AmiError,
     AmiEvent,
+    _recv_through,
     _endpoint_role,
     _endpoints_from_events,
     _number_from_pjsip_value,
@@ -23,6 +24,7 @@ from pbxsense_agent.ami import (
 from pbxsense_agent.connectors import connector_for_settings
 from pbxsense_agent.freeswitch import (
     FreeSwitchClient,
+    FreeSwitchError,
     _channel_from_row,
     _first_integer,
     _pipe_first_column,
@@ -102,6 +104,34 @@ class PulseMappingTest(unittest.TestCase):
             client = AmiClient.__new__(AmiClient)
             self.assertEqual(client._read_packet(reader, phase="one")["Message"], "one")
             self.assertEqual(client._read_packet(reader, phase="two")["Message"], "two")
+        finally:
+            writer.close()
+            reader.close()
+
+    def test_ami_packet_reader_rejects_an_oversized_frame(self) -> None:
+        class OversizedSocket:
+            def __init__(self) -> None:
+                self.position = 0
+                self.data = b"Response: " + b"x" * 64
+
+            def recv(self, size: int, flags: int = 0) -> bytes:
+                available = self.data[self.position : self.position + size]
+                if flags:
+                    return available
+                self.position += len(available)
+                return available
+
+        with self.assertRaisesRegex(AmiError, "size limit"):
+            _recv_through(OversizedSocket(), b"\r\n\r\n", max_bytes=16)
+
+    def test_freeswitch_reader_rejects_an_oversized_declared_body(self) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            writer.sendall(b"Content-Length: 999999999\n\n")
+            with self.assertRaisesRegex(FreeSwitchError, "size limit"):
+                FreeSwitchClient.__new__(FreeSwitchClient)._read_reply(
+                    reader, phase="FreeSWITCH test"
+                )
         finally:
             writer.close()
             reader.close()
