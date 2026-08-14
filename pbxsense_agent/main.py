@@ -1054,7 +1054,10 @@ def _device_card(device: dict[str, object], request: Request) -> str:
         "Registration ID": str(device.get("id") or "Unknown"),
     }
     revoke_id = str(device.get("revokeId") or "").strip()
-    remove_query = {"deviceId": revoke_id}
+    remove_query = {
+        "deviceId": revoke_id,
+        "csrf": _local_web_csrf_value(),
+    }
     remove_action = (
         f'<form class="device-actions" method="post" action="/apps/remove?{urlencode(remove_query)}" '
         'onsubmit="return confirm(\'Remove this app? It will stop receiving notifications from this Agent.\')">'
@@ -1760,6 +1763,14 @@ def _local_web_cookie_value() -> str:
     ).hexdigest()
 
 
+def _local_web_csrf_value() -> str:
+    return hmac.new(
+        settings.token.encode("utf-8"),
+        b"pbxsense-local-web-csrf",
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _request_token(request: Request) -> str:
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
@@ -1776,6 +1787,12 @@ def _require_safe_cookie_mutation(request: Request) -> None:
         authorization.lower().startswith("bearer ")
         or request.headers.get("x-pbxsense-token", "").strip()
         or not _has_valid_local_web_cookie(request)
+    ):
+        return
+    supplied_csrf = request.query_params.get("csrf", "").strip()
+    if supplied_csrf and hmac.compare_digest(
+        supplied_csrf,
+        _local_web_csrf_value(),
     ):
         return
     expected = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")

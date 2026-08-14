@@ -76,9 +76,10 @@ browser caches.
 
 State-changing Agent routes accept native-app Bearer/header authentication.
 When the protected Agent page uses its local HTTP-only admin cookie instead,
-the Agent also requires an exact matching browser Origin or Referer. This
-prevents another web service on the same host but a different port from using
-that cookie for push registration or paired-app removal.
+the Agent also requires either an exact matching browser Origin/Referer or the
+HMAC-bound CSRF value embedded in its own mutation form. The form token supports
+browsers and reverse proxies that legitimately omit those headers without
+allowing another origin to manufacture a paired-app removal request.
 
 Push registration bodies and relay text fields have explicit size limits.
 Oversized request bodies are rejected before they can be persisted to the

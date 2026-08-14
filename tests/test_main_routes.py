@@ -341,6 +341,7 @@ class MainRouteStructureTest(unittest.TestCase):
 
         self.assertIn('@app.post("/apps/remove")', source)
         self.assertIn('device.get("revokeId")', source)
+        self.assertIn('"csrf": _local_web_csrf_value()', source)
         self.assertIn("Remove this app?", source)
         self.assertIn("Remove app</button>", source)
 
@@ -365,6 +366,19 @@ class MainRouteStructureTest(unittest.TestCase):
             ]
             agent_main._require_safe_cookie_mutation(
                 _request(method="POST", path="/apps/remove", headers=same_origin)
+            )
+
+            csrf_headers = [
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+            ]
+            csrf = agent_main._local_web_csrf_value().encode("ascii")
+            agent_main._require_safe_cookie_mutation(
+                _request(
+                    method="POST",
+                    path="/apps/remove",
+                    query=b"deviceId=device_1&csrf=" + csrf,
+                    headers=csrf_headers,
+                )
             )
         finally:
             agent_main.settings = original
