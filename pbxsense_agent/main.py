@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -36,6 +37,7 @@ from .pulse import (
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
     EndpointAggregateTipTracker,
+    SignalNotificationEpisodeTracker,
     _now,
     build_home_payload,
 )
@@ -47,6 +49,7 @@ from .settings import AgentSettings
 from .version import AGENT_RELEASE_CHANNEL, AGENT_VERSION
 
 settings = AgentSettings.from_env()
+logger = logging.getLogger("pbxsense_agent.runtime")
 connector = connector_for_settings(settings)
 activity_tracker = ActivityTracker(
     phone_outage_confirmation=timedelta(
@@ -75,6 +78,7 @@ endpoint_aggregate_tip_tracker = EndpointAggregateTipTracker(
     timedelta(seconds=max(0, settings.quality_frequency_seconds))
 )
 endpoint_last_active_tracker = EndpointLastActiveTracker(settings.endpoint_activity_path)
+signal_notification_episode_tracker = SignalNotificationEpisodeTracker()
 push_relay = AgentRelay(
     url=settings.relay_url,
     identity_path=settings.relay_identity_path,
@@ -103,11 +107,16 @@ _snapshot_task: asyncio.Task[None] | None = None
 _relay_publish_task: asyncio.Task[None] | None = None
 _relay_heartbeat_task: asyncio.Task[None] | None = None
 _internet_relay_task: asyncio.Task[None] | None = None
+_watchdog_task: asyncio.Task[None] | None = None
 _snapshot_lock = threading.Lock()
 _browser_bootstrap_lock = threading.Lock()
 _cached_home_state: tuple | None = None
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
+_runtime_lock = threading.Lock()
+_runtime_state: dict[str, dict[str, object]] = {}
+RUNTIME_ERROR_LOG_INTERVAL_SECONDS = 60
+WATCHDOG_INTERVAL_SECONDS = 5
 
 
 @app.middleware("http")
@@ -141,7 +150,7 @@ async def protect_agent_responses(request: Request, call_next):
 
 @app.on_event("startup")
 async def start_relay_publisher() -> None:
-    global _internet_relay_task, _relay_heartbeat_task, _relay_publish_task, _snapshot_task
+    global _internet_relay_task, _relay_heartbeat_task, _relay_publish_task, _snapshot_task, _watchdog_task
     if settings.mode != "mock" and not settings.token:
         raise RuntimeError(
             "PBXSENSE_AGENT_TOKEN is required outside mock mode; run the installer "
@@ -153,6 +162,7 @@ async def start_relay_publisher() -> None:
         _relay_heartbeat_task = asyncio.create_task(_relay_heartbeat_loop())
         if settings.internet_relay_enabled:
             _internet_relay_task = asyncio.create_task(_internet_relay_loop())
+    _watchdog_task = asyncio.create_task(_background_task_watchdog())
 
 
 @app.on_event("shutdown")
@@ -164,6 +174,7 @@ async def stop_relay_publisher() -> None:
             _relay_publish_task,
             _relay_heartbeat_task,
             _internet_relay_task,
+            _watchdog_task,
         )
         if task is not None
     ]
@@ -179,11 +190,17 @@ async def stop_relay_publisher() -> None:
 async def _snapshot_loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(_refresh_home_state)
-        except Exception:
+            state = await asyncio.to_thread(_refresh_home_state)
+            snapshot = state[0]
+            _record_runtime_result(
+                "snapshot",
+                ok=bool(snapshot.reachable),
+                error=str(snapshot.error or "") if not snapshot.reachable else "",
+            )
+        except Exception as exc:
             # Connector failures normally produce an unreachable snapshot. An
             # unexpected parser/filesystem failure must not stop later polls.
-            pass
+            _record_runtime_result("snapshot", ok=False, error=str(exc), log_exception=True)
         await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_SECONDS)
 
 
@@ -202,8 +219,9 @@ async def _relay_publish_loop() -> None:
                     and connection.get("kind") != "reconnecting"
                 ),
             )
-        except Exception:
-            pass
+            _record_runtime_result("pushRelayPublisher", ok=True)
+        except Exception as exc:
+            _record_runtime_result("pushRelayPublisher", ok=False, error=str(exc), log_exception=True)
         await asyncio.sleep(RELAY_PUBLISH_INTERVAL_SECONDS)
 
 
@@ -211,17 +229,104 @@ async def _relay_heartbeat_loop() -> None:
     """Keep presence independent from PBX polling and signal generation."""
     while True:
         try:
-            await asyncio.to_thread(push_relay.heartbeat)
-        except Exception:
+            heartbeat_ok = await asyncio.to_thread(push_relay.heartbeat)
+            _record_runtime_result(
+                "pushRelayHeartbeat",
+                ok=heartbeat_ok is not False,
+                error="Relay heartbeat was not accepted." if heartbeat_ok is False else "",
+            )
+        except Exception as exc:
             # Network and enrollment failures are retried on the next cadence.
-            pass
+            _record_runtime_result("pushRelayHeartbeat", ok=False, error=str(exc), log_exception=True)
         await asyncio.sleep(PRESENCE_HEARTBEAT_INTERVAL_SECONDS)
 
 
 async def _internet_relay_loop() -> None:
     while True:
-        await asyncio.to_thread(internet_relay.poll)
+        try:
+            await asyncio.to_thread(internet_relay.poll)
+            _record_runtime_result("internetRelay", ok=True)
+        except Exception as exc:
+            _record_runtime_result("internetRelay", ok=False, error=str(exc), log_exception=True)
         await asyncio.sleep(settings.internet_relay_poll_seconds)
+
+
+async def _background_task_watchdog() -> None:
+    global _internet_relay_task, _relay_heartbeat_task, _relay_publish_task, _snapshot_task
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+        tasks: list[tuple[str, str, object]] = [
+            ("snapshot", "_snapshot_task", _snapshot_loop),
+        ]
+        if settings.relay_url:
+            tasks.extend([
+                ("pushRelayPublisher", "_relay_publish_task", _relay_publish_loop),
+                ("pushRelayHeartbeat", "_relay_heartbeat_task", _relay_heartbeat_loop),
+            ])
+            if settings.internet_relay_enabled:
+                tasks.append(("internetRelay", "_internet_relay_task", _internet_relay_loop))
+        for name, variable, factory in tasks:
+            task = globals().get(variable)
+            if isinstance(task, asyncio.Task) and not task.done():
+                continue
+            error = "Background task stopped unexpectedly and was restarted."
+            if isinstance(task, asyncio.Task) and not task.cancelled():
+                try:
+                    exception = task.exception()
+                    if exception:
+                        error = f"{error} {exception}"
+                except (asyncio.CancelledError, asyncio.InvalidStateError):
+                    pass
+            _record_runtime_result(name, ok=False, error=error, log_exception=True)
+            globals()[variable] = asyncio.create_task(factory())
+
+
+def _record_runtime_result(
+    name: str,
+    *,
+    ok: bool,
+    error: str = "",
+    log_exception: bool = False,
+) -> None:
+    now_wall = time.time()
+    now_monotonic = time.monotonic()
+    should_log = False
+    with _runtime_lock:
+        state = _runtime_state.setdefault(name, {})
+        state["lastCompletedAt"] = now_wall
+        if ok:
+            state["lastSuccessAt"] = now_wall
+            state["consecutiveFailures"] = 0
+            state["lastError"] = ""
+        else:
+            state["lastFailureAt"] = now_wall
+            state["consecutiveFailures"] = int(state.get("consecutiveFailures", 0)) + 1
+            state["lastError"] = error[:500] or "Unknown background-task failure."
+            last_log_at = float(state.get("lastLogAtMonotonic", 0.0))
+            should_log = now_monotonic - last_log_at >= RUNTIME_ERROR_LOG_INTERVAL_SECONDS
+            if should_log:
+                state["lastLogAtMonotonic"] = now_monotonic
+    if should_log:
+        logger.error("%s loop failure: %s", name, error or "unknown error", exc_info=log_exception)
+
+
+def _runtime_diagnostics() -> dict[str, object]:
+    with _runtime_lock:
+        return {name: dict(value) for name, value in _runtime_state.items()}
+
+
+def _readiness() -> tuple[bool, str]:
+    with _runtime_lock:
+        snapshot = dict(_runtime_state.get("snapshot", {}))
+    last_completed = float(snapshot.get("lastCompletedAt", 0.0))
+    stale_after = max(10.0, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds)
+    if last_completed <= 0:
+        return False, "The first PBX snapshot has not completed."
+    if time.time() - last_completed > stale_after:
+        return False, "The PBX snapshot loop is stale."
+    if int(snapshot.get("consecutiveFailures", 0)) > 0:
+        return False, str(snapshot.get("lastError") or "The PBX connector is unavailable.")
+    return True, "The Agent is polling the PBX normally."
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -617,11 +722,27 @@ def _page(*, title: str, body: str) -> str:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Minimal unauthenticated probe; operational details remain protected."""
+    """Backward-compatible process liveness probe."""
     return {
         "status": "ok",
         "service": "pbxsense-agent",
     }
+
+
+@app.get("/health/live")
+def health_live() -> dict[str, str]:
+    """Unauthenticated process liveness probe without operational details."""
+    return {"status": "ok", "service": "pbxsense-agent"}
+
+
+@app.get("/health/ready")
+def health_ready() -> JSONResponse:
+    """Report whether the PBX polling path is current and usable."""
+    ready, detail = _readiness()
+    return JSONResponse(
+        {"status": "ready" if ready else "not_ready", "service": "pbxsense-agent", "detail": detail},
+        status_code=200 if ready else 503,
+    )
 
 
 @app.get("/favicon.svg", include_in_schema=False)
@@ -991,6 +1112,12 @@ def recording(recording_id: str, request: Request):
 def _diagnostics_response(request: Request):
     payload = connector.diagnostics()
     payload["internetRelay"] = internet_relay.status()
+    ready, readiness_detail = _readiness()
+    payload["runtime"] = {
+        "ready": ready,
+        "detail": readiness_detail,
+        "loops": _runtime_diagnostics(),
+    }
     if settings.pbx_type in {"asterisk", "grandstream"}:
         cdr_path, voicemail_path = _history_paths()
         payload["history"] = history_diagnostics(
@@ -1121,6 +1248,7 @@ def _refresh_home_state_locked() -> tuple:
     )
     endpoint_notification_ids = endpoint_availability_tracker.notification_ids()
     endpoint_unavailability_evidence = endpoint_availability_tracker.signal_endpoints()
+    endpoint_signal_lifecycle = endpoint_availability_tracker.signal_lifecycle()
     trunk_unavailability_signals = trunk_availability_tracker.observe(
         snapshot,
         observed_at,
@@ -1134,6 +1262,7 @@ def _refresh_home_state_locked() -> tuple:
         endpoint_unavailability_signals,
         endpoint_notification_ids,
         endpoint_unavailability_evidence,
+        endpoint_signal_lifecycle,
         trunk_unavailability_signals,
         show_aggregate_tip,
         endpoint_last_active,
@@ -1142,7 +1271,7 @@ def _refresh_home_state_locked() -> tuple:
 
 
 def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
-    snapshot, observed_at, moment_events, endpoint_signals, endpoint_notification_ids, endpoint_unavailability_evidence, trunk_signals, show_aggregate_tip, endpoint_last_active = state
+    snapshot, observed_at, moment_events, endpoint_signals, endpoint_notification_ids, endpoint_unavailability_evidence, endpoint_signal_lifecycle, trunk_signals, show_aggregate_tip, endpoint_last_active = state
     payload = build_home_payload(
         snapshot,
         display_name=settings.display_name,
@@ -1157,6 +1286,7 @@ def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
         endpoint_unavailability_signals=endpoint_signals,
         endpoint_notification_ids=endpoint_notification_ids,
         endpoint_unavailability_evidence=endpoint_unavailability_evidence,
+        endpoint_signal_lifecycle=endpoint_signal_lifecycle,
         trunk_unavailability_signals=trunk_signals,
         endpoint_last_active=endpoint_last_active,
     )
@@ -1165,6 +1295,7 @@ def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
             signal for signal in payload["signals"]
             if signal.get("id") != "sig_tip_multiple_endpoints_unavailable"
         ]
+    signal_notification_episode_tracker.observe(payload["signals"])
     payload["connection"]["releaseChannel"] = AGENT_RELEASE_CHANNEL
     payload["connection"]["pushRelayAgentId"] = str(
         push_relay.status().get("agentId", "")
@@ -1193,11 +1324,21 @@ async def register_push_device(request: Request) -> dict[str, object]:
         value = str(payload.get(field, "")).strip()
         if value:
             _require_bounded_text(value, field, limit)
+    muted_signal_ids = payload.get("mutedSignalIds", [])
+    if not isinstance(muted_signal_ids, list) or len(muted_signal_ids) > 100:
+        raise HTTPException(status_code=400, detail="mutedSignalIds must be a bounded list")
+    normalized_muted_signal_ids: list[str] = []
+    for value in muted_signal_ids:
+        item = str(value).strip()
+        _require_bounded_text(item, "mutedSignalIds", 160)
+        if item:
+            normalized_muted_signal_ids.append(item)
     return await asyncio.to_thread(
         push_relay.register_device,
         fcm_token=fcm_token,
         meaningful=bool(payload.get("meaningfulEnabled", True)),
         activity=bool(payload.get("activityEnabled", True)),
+        muted_signal_ids=normalized_muted_signal_ids,
         platform=str(payload.get("platform", "android")),
         app_version=str(payload.get("appVersion", "")),
         device_model=str(payload.get("deviceModel", "")),

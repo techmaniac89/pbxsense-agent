@@ -428,6 +428,19 @@ class RelayTest(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["title"], "Phone 101 looks unavailable")
 
+    def test_single_monitored_phone_waits_ten_seconds_before_push(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            phone = _offline_phone("101")
+
+            relay.observe([phone], total_phones=1, observed_at=100)
+            relay.observe([phone], total_phones=1, observed_at=109)
+            self.assertEqual(relay.requests, [])
+            relay.observe([phone], total_phones=1, observed_at=110)
+
+            events = [payload for path, payload, _ in relay.requests if path.endswith("/events")]
+            self.assertEqual(len(events), 1)
+
     def test_two_phones_are_grouped_after_the_correlation_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _RecordingRelay(str(Path(directory) / "identity.json"))
@@ -537,6 +550,7 @@ class RelayTest(unittest.TestCase):
                 fcm_token="token-123",
                 meaningful=False,
                 activity=False,
+                muted_signal_ids=["sig_endpoint_200_unavailable"],
             )
 
             self.assertEqual(
@@ -555,6 +569,7 @@ class RelayTest(unittest.TestCase):
                     "fcmToken": "token-123",
                     "meaningfulEnabled": False,
                     "activityEnabled": False,
+                    "mutedSignalIds": ["sig_endpoint_200_unavailable"],
                     "platform": "android",
                     "appVersion": "",
                     "deviceModel": "",

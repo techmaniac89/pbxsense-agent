@@ -192,6 +192,10 @@ release examples in `README.md` synchronized with it. Breeze beta versions are
 published as normal GitHub Releases so server installers remain easy to find.
 The workflow also supports a manual retry through `workflow_dispatch`.
 
+Run `python scripts/check_contract.py` before packaging. Release and security CI
+also run it automatically; it rejects mismatched Agent/Relay versions, installer
+filenames, documented environment defaults, and release documentation.
+
 Release CI also publishes a CycloneDX dependency SBOM and creates GitHub
 artifact attestations for installer provenance and the SBOM. The separate
 security workflow audits both hashed dependency locks, runs CodeQL's extended

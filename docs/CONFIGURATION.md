@@ -30,14 +30,20 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_SNAPSHOT_POLL_SECONDS` | `1` | Central live PBX polling cadence, clamped to at least 0.5 seconds. |
 | `PBXSENSE_HISTORY_POLL_SECONDS` | `30` | CDR, voicemail, recording, and security-history refresh cadence, clamped to at least 5 seconds. |
 | `PBXSENSE_ENDPOINT_ACTIVITY_PATH` | `/var/lib/pbxsense-agent/endpoint_activity.json` | Persistent last-active timestamps captured when monitored devices transition offline. Keep this inside the Agent data volume. |
-| `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS` | `30` | Continuous unavailable period required before a per-device Health Signal and notification. |
-| `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS` | `60` | Continuous reachable period required before recovery and a later outage notification can be armed. |
+| `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS` | `5` | Continuous unavailable period required before a per-device Health Signal. A lone-phone push is held for another 10 seconds; multi-phone incidents use the 15-second correlation window. |
+| `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS` | `15` | Continuous reachable period required before recovery and a later outage notification can be armed. |
 
 A temporarily incomplete endpoint inventory is not recovery evidence. Once an
 unavailable-phone incident is confirmed, the Agent retains its Signal and
 notification occurrence through missing/ambiguous snapshots. Only an explicit
 reachable state sustained for the configured recovery period closes the
 incident and permits a later notification.
+
+Registered apps may send up to 100 device-scoped `mutedSignalIds`. The Agent
+forwards them to Relay so muting one Signal affects only that installation.
+Endpoint outage evidence includes `firstDetectedAt`, `lastCheckedAt`, and
+`recoveryStatus`; no caller or credential data is added to these fields.
+
 | `PBXSENSE_TRUNK_OUTAGE_CONFIRMATION_SECONDS` | `5` | Continuous unavailable period required before a trunk Health Signal and notification. |
 | `PBXSENSE_QUALITY_FREQUENCY_SECONDS` | `180` | Evidence window before aggregate availability Tips are emitted. |
 | `PBXSENSE_RELAY_URL` | hosted PBXSense URL in `.env.example` | Shared notification/encrypted-data relay URL. Production URLs must use HTTPS; plain HTTP is accepted only for localhost development. Leave empty only for deliberately local-only installs. |
@@ -286,8 +292,13 @@ The pairing page embeds the token in its QR payload so the app can authenticate
 Use `PBXSENSE_ACCESS_HOST=<agent-host>` when invoking an installer if automatic
 host detection would print an unsuitable address.
 
-`GET /health` is intentionally unauthenticated for container/service probes and
-returns no connector, PBX, or relay details.
+`GET /health` and `GET /health/live` are intentionally unauthenticated process
+liveness probes and return no connector, PBX, or relay details.
+`GET /health/ready` returns HTTP 200 only after a recent successful PBX snapshot;
+it returns HTTP 503 while the first snapshot is pending, the connector is
+unavailable, or the polling loop is stale. Protected diagnostics include the
+last completion, success, failure, consecutive-failure count, and bounded error
+for each background subsystem. Repeated loop errors are log-rate-limited.
 
 ## Upgrade Behavior
 

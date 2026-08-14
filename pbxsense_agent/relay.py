@@ -30,6 +30,7 @@ except ImportError:  # Existing Agents remain usable before the optional relay i
 # two missed requests without turning a brief network hiccup into a false alarm.
 PRESENCE_HEARTBEAT_INTERVAL_SECONDS = 30
 ENDPOINT_INCIDENT_MINIMUM_PHONES = 2
+ENDPOINT_SINGLE_NOTIFICATION_DELAY_SECONDS = 10
 ENDPOINT_SHARED_CAUSE_MINIMUM_PHONES = 3
 ENDPOINT_INCIDENT_CORRELATION_SECONDS = 15
 ENDPOINT_INCIDENT_UPDATE_SECONDS = 30
@@ -199,6 +200,7 @@ class AgentRelay:
         fcm_token: str,
         meaningful: bool,
         activity: bool,
+        muted_signal_ids: list[str] | None = None,
         platform: str = "android",
         app_version: str = "",
         device_model: str = "",
@@ -220,6 +222,10 @@ class AgentRelay:
                     "fcmToken": token,
                     "meaningfulEnabled": meaningful,
                     "activityEnabled": activity,
+                    **(
+                        {"mutedSignalIds": list(muted_signal_ids)}
+                        if muted_signal_ids else {}
+                    ),
                     "platform": platform.strip() or "android",
                     "appVersion": app_version.strip(),
                     "deviceModel": device_model.strip(),
@@ -422,9 +428,6 @@ class AgentRelay:
         incident = self._state.get("endpoint_incident")
         if not isinstance(incident, dict):
             incident = None
-        if total_phones < ENDPOINT_INCIDENT_MINIMUM_PHONES and incident is None:
-            return set()
-
         first_seen = self._state.setdefault("endpoint_outage_first_seen", {})
         if not isinstance(first_seen, dict):
             first_seen = {}
@@ -447,6 +450,17 @@ class AgentRelay:
             first_seen.setdefault(signal_id, now)
         if now < float(self._state.get("endpoint_recovery_suppression_until", 0.0)):
             suppressed.update(recovery_ids)
+
+        if total_phones <= 0 and incident is None:
+            return suppressed
+        if 0 < total_phones < ENDPOINT_INCIDENT_MINIMUM_PHONES and incident is None:
+            suppressed.update(
+                signal_id
+                for signal_id in current_ids
+                if now - float(first_seen.get(signal_id, now))
+                < ENDPOINT_SINGLE_NOTIFICATION_DELAY_SECONDS
+            )
+            return suppressed
 
         if incident is None and current_ids:
             ordered = sorted(

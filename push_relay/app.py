@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.15"
+RELAY_VERSION = "0.5.16"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -468,7 +468,7 @@ def _claim_activation_transaction(
             "createdAt": firestore.SERVER_TIMESTAMP,
             "updatedAt": firestore.SERVER_TIMESTAMP,
             "lastConnectedAt": firestore.SERVER_TIMESTAMP,
-            "expiresAt": now + timedelta(days=30),
+            "expiresAt": now + timedelta(days=90),
             "meaningfulEnabled": True,
             "activityEnabled": True,
         },
@@ -520,6 +520,7 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
             "fcmToken": fcm_token,
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
             "activityEnabled": bool(body.get("activityEnabled", True)),
+            "mutedSignalIds": _bounded_string_list(body.get("mutedSignalIds"), "mutedSignalIds"),
             "platform": _bounded_text(
                 body.get("platform", "android"), "platform", 32
             ),
@@ -530,7 +531,7 @@ async def register_device(agent_id: str, request: Request) -> dict[str, str]:
             "siteId": agent["siteId"],
             "updatedAt": firestore.SERVER_TIMESTAMP,
             "lastConnectedAt": firestore.SERVER_TIMESTAMP,
-            "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
+            "expiresAt": datetime.now(timezone.utc) + timedelta(days=90),
             **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
         },
     )
@@ -875,6 +876,7 @@ async def register_own_device(
         {
             "meaningfulEnabled": bool(body.get("meaningfulEnabled", True)),
             "activityEnabled": bool(body.get("activityEnabled", True)),
+            "mutedSignalIds": _bounded_string_list(body.get("mutedSignalIds"), "mutedSignalIds"),
             "platform": _bounded_text(
                 body.get("platform", "android"), "platform", 32
             ),
@@ -884,7 +886,7 @@ async def register_own_device(
             "osVersion": _optional_text(body.get("osVersion")),
             "updatedAt": firestore.SERVER_TIMESTAMP,
             "lastConnectedAt": firestore.SERVER_TIMESTAMP,
-            "expiresAt": datetime.now(timezone.utc) + timedelta(days=30),
+            "expiresAt": datetime.now(timezone.utc) + timedelta(days=90),
         },
         merge=True,
     )
@@ -1020,7 +1022,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     eligible_devices = _unique_devices_by_token([
         device
         for device in devices
-        if _device_wants_event(device, category, importance)
+        if _device_wants_event(device, category, importance, signal_id)
         and device.get("expiresAt", now) >= now
         and device.get("fcmToken")
     ])
@@ -1404,8 +1406,13 @@ def _remove_invalid_tokens(agent_id: str, devices: list[dict[str, Any]], respons
     return removed
 
 
-def _device_wants_event(device: dict[str, Any], category: str, importance: str) -> bool:
+def _device_wants_event(
+    device: dict[str, Any], category: str, importance: str, signal_id: str = ""
+) -> bool:
     if not device.get("meaningfulEnabled", True):
+        return False
+    muted = device.get("mutedSignalIds", [])
+    if isinstance(muted, list) and signal_id in muted:
         return False
     if category == "activity":
         return bool(device.get("activityEnabled", True))
@@ -2278,6 +2285,16 @@ def _bounded_text(value: object, name: str, limit: int) -> str:
 
 def _optional_text(value: object, *, limit: int = 120) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _bounded_string_list(
+    value: object, name: str, *, count: int = 100, limit: int = 160
+) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > count:
+        raise HTTPException(status_code=400, detail=f"{name} must be a bounded list")
+    return [_bounded_text(item, name, limit) for item in value]
 
 
 def _timestamp_text(value: object) -> str:

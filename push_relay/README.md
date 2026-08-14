@@ -153,7 +153,7 @@ authentication state and rate-limit documents are short-lived quota counters;
 both are safe to delete after their enforcement windows.
 
 Deploy compatibility note: Agent `0.6.0-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.15`,
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.16`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -207,12 +207,16 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.15` provides the encrypted Internet Relay data path and
+Relay service `0.5.16` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
 separate AES-256-GCM envelope for each device. Firestore and the Cloud Run
 service see only encrypted snapshot bytes and routing metadata.
+
+Paired-device registrations are renewed whenever the app registers its current
+FCM token and expire after 90 days without renewal. This tolerates normal gaps
+between app launches without retaining abandoned records indefinitely.
 
 The snapshot API deliberately excludes recordings and does not expose
 diagnostics or PBX control. Envelopes carry authenticated sequence and creation
@@ -227,7 +231,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.15 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.16 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the
@@ -240,7 +244,7 @@ heartbeat, so cost tuning never weakens Agent-down detection.
 
 Open `/admin/usage` and enter the Relay administrator token for the private
 operator dashboard. It shows current fleet presence, the remotely delivered
-policy, per-day counters, and hashed Agent activity. Relay `0.5.15` also shows
+policy, per-day counters, and hashed Agent activity. Relay `0.5.16` also shows
 Firebase acceptance/failure and latency, notification-quota pressure,
 heartbeat-scheduler freshness, remote-snapshot availability, encrypted-data
 coverage, expiring registrations, retention expectations, and a seven-day

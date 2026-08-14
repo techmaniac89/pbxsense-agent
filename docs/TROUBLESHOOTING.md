@@ -40,6 +40,12 @@ Health endpoint:
 http://<agent-host>:8765/health
 ```
 
+Use `/health/live` to confirm only that the web process is alive. Use
+`/health/ready` to confirm that the Agent has completed a recent successful PBX
+poll. A readiness HTTP 503 does not mean the container is dead; open protected
+`/diagnostics` to see which background loop failed or became stale. The Agent
+watchdog restarts a background task if it exits unexpectedly.
+
 When native Agent TLS is enabled, use `https://` for the landing page,
 diagnostics, and health URLs. If startup fails, confirm both
 `PBXSENSE_AGENT_TLS_CERTFILE` and `PBXSENSE_AGENT_TLS_KEYFILE` are set and are
@@ -142,7 +148,7 @@ when closed-app push notifications are required.
 If push notifications work but the app cannot use encrypted Home snapshots
 away from the LAN:
 
-- Confirm the hosted relay reports service `0.5.15` and use current Breeze
+- Confirm the hosted relay reports service `0.5.16` and use current Breeze
   app/Agent builds.
 - Confirm `PBXSENSE_INTERNET_RELAY_ENABLED` is `true` (the default) and restart
   the Agent after changing an explicit override.

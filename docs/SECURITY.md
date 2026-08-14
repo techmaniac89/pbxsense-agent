@@ -65,7 +65,8 @@ When a token is set, every protected HTTP and `/live` request must authenticate,
 including requests from localhost, a private LAN, or a VPN. Tokens are accepted
 through Bearer or `X-PBXSense-Token` headers; query-string credentials are
 rejected. The Agent does not enable cross-origin browser access. `GET /health`,
-the favicon, and the token-free `/session` bootstrap page are the only
+`GET /health/live`, `GET /health/ready`, the favicon, and the token-free
+`/session` bootstrap page are the only
 unauthenticated routes and disclose no PBX state.
 
 All Agent responses use `Cache-Control: no-store, private`, `Referrer-Policy:
@@ -112,7 +113,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

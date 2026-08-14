@@ -34,9 +34,9 @@ class AgentSettings:
     relay_timeout_seconds: float = 5
     relay_enrollment_ticket: str = ""
     quality_frequency_seconds: int = 180
-    endpoint_outage_confirmation_seconds: float = 30
+    endpoint_outage_confirmation_seconds: float = 5
     trunk_outage_confirmation_seconds: float = 5
-    endpoint_recovery_confirmation_seconds: float = 60
+    endpoint_recovery_confirmation_seconds: float = 15
     trunk_endpoints: frozenset[str] = frozenset()
     asterisk_recordings_path: str = "/var/spool/asterisk/monitor"
     asterisk_security_log_path: str = "/var/log/asterisk/security"

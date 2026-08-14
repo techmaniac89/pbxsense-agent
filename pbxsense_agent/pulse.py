@@ -3,11 +3,43 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from threading import Lock
+from uuid import uuid4
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from .engine import build_engine_signals
 from .history import CdrCall, SecurityEvent, VoicemailMessage, interpreted_call_kind
+
+
+class SignalNotificationEpisodeTracker:
+    """Give each active Signal episode a stable, occurrence-specific ID."""
+
+    def __init__(self) -> None:
+        self._episodes: dict[str, str] = {}
+        self._lock = Lock()
+
+    def observe(self, signals: list[dict[str, object]]) -> None:
+        active_ids = {
+            str(signal.get("id", ""))
+            for signal in signals
+            if signal.get("state") == "active" and signal.get("id")
+        }
+        with self._lock:
+            for signal_id in list(self._episodes):
+                if signal_id not in active_ids:
+                    self._episodes.pop(signal_id, None)
+            for signal in signals:
+                signal_id = str(signal.get("id", ""))
+                if not signal_id or signal.get("state") != "active":
+                    continue
+                explicit_id = str(signal.get("notificationId", "")).strip()
+                if explicit_id:
+                    self._episodes[signal_id] = explicit_id
+                    continue
+                notification_id = self._episodes.setdefault(
+                    signal_id, f"{signal_id}_{uuid4().hex}"
+                )
+                signal["notificationId"] = notification_id
 
 
 @dataclass(frozen=True)
@@ -87,8 +119,8 @@ class ActivityTracker:
         self,
         *,
         keep_for: timedelta = timedelta(hours=24),
-        phone_outage_confirmation: timedelta = timedelta(seconds=30),
-        phone_recovery_confirmation: timedelta = timedelta(seconds=60),
+        phone_outage_confirmation: timedelta = timedelta(seconds=5),
+        phone_recovery_confirmation: timedelta = timedelta(seconds=15),
     ) -> None:
         self._keep_for = keep_for
         self._phone_outage_confirmation = phone_outage_confirmation
@@ -309,8 +341,8 @@ class EndpointAvailabilitySignalTracker:
     def __init__(
         self,
         *,
-        outage_confirmation: timedelta = timedelta(seconds=30),
-        recovery_confirmation: timedelta = timedelta(seconds=60),
+        outage_confirmation: timedelta = timedelta(seconds=5),
+        recovery_confirmation: timedelta = timedelta(seconds=15),
         role: str = "extension",
     ) -> None:
         self._outage_confirmation = outage_confirmation
@@ -434,6 +466,22 @@ class EndpointAvailabilitySignalTracker:
                 extension: state.last_unavailable_endpoint
                 for extension, state in self._states.items()
                 if state.signal_visible and state.last_unavailable_endpoint is not None
+            }
+
+    def signal_lifecycle(self) -> dict[str, dict[str, str]]:
+        """Expose privacy-safe incident timing for the app's audit view."""
+        with self._lock:
+            return {
+                extension: {
+                    "firstDetectedAt": state.outage_started_at.isoformat()
+                    if state.outage_started_at else "",
+                    "recoveryStatus": (
+                        "Confirming recovery"
+                        if state.recovery_started_at else "Waiting for explicit reachable evidence"
+                    ),
+                }
+                for extension, state in self._states.items()
+                if state.signal_visible
             }
 
 
@@ -562,6 +610,7 @@ def build_home_payload(
     endpoint_unavailability_evidence: dict[str, AmiEndpoint] | None = None,
     trunk_unavailability_signals: set[str] | None = None,
     endpoint_notification_ids: dict[str, str] | None = None,
+    endpoint_signal_lifecycle: dict[str, dict[str, str]] | None = None,
     endpoint_last_active: dict[str, datetime] | None = None,
 ) -> dict:
     now = now or _now(timezone_name)
@@ -623,6 +672,7 @@ def build_home_payload(
         endpoint_unavailability_signals,
         endpoint_unavailability_evidence or {},
         endpoint_notification_ids or {},
+        endpoint_signal_lifecycle or {},
         trunk_unavailability_signals,
     )
     signals.extend(
@@ -889,6 +939,7 @@ def _build_signals(
     endpoint_unavailability_signals: set[str] | None,
     endpoint_unavailability_evidence: dict[str, AmiEndpoint],
     endpoint_notification_ids: dict[str, str],
+    endpoint_signal_lifecycle: dict[str, dict[str, str]],
     trunk_unavailability_signals: set[str] | None,
 ) -> list[dict]:
     signals: list[dict] = []
@@ -1035,6 +1086,8 @@ def _build_signals(
                     "technical": {
                         "extension": endpoint.extension,
                         "device_state": endpoint.device_state,
+                        "lastCheckedAt": now.isoformat(),
+                        **endpoint_signal_lifecycle.get(endpoint.extension, {}),
                     },
                 }
             )
@@ -1069,6 +1122,8 @@ def _build_signals(
                 "technical": {
                     "extension": extension,
                     "device_state": endpoint.device_state,
+                    "lastCheckedAt": now.isoformat(),
+                    **endpoint_signal_lifecycle.get(extension, {}),
                 },
             }
         )

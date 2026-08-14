@@ -52,6 +52,7 @@ from pbxsense_agent.pulse import (
     AmiSnapshot,
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
+    SignalNotificationEpisodeTracker,
     build_home_payload,
     uncertain_trunks,
 )
@@ -64,6 +65,21 @@ from pbxsense_agent.yeastar import (
 
 
 class PulseMappingTest(unittest.TestCase):
+    def test_signal_notification_episode_changes_only_after_clear(self) -> None:
+        tracker = SignalNotificationEpisodeTracker()
+        first = [{"id": "sig_security_login", "state": "active"}]
+        tracker.observe(first)
+        first_id = first[0]["notificationId"]
+
+        repeated = [{"id": "sig_security_login", "state": "active"}]
+        tracker.observe(repeated)
+        self.assertEqual(repeated[0]["notificationId"], first_id)
+
+        tracker.observe([])
+        recurrence = [{"id": "sig_security_login", "state": "active"}]
+        tracker.observe(recurrence)
+        self.assertNotEqual(recurrence[0]["notificationId"], first_id)
+
     def test_public_agent_url_requires_a_canonical_http_origin(self) -> None:
         self.assertEqual(
             _public_url("https://agent.example.test/"),
@@ -1150,6 +1166,7 @@ external::backup gateway sip:user@backup.test NOREG
         )
         visible = tracker.observe(snapshot, now)
         notification_ids = tracker.notification_ids()
+        lifecycle = tracker.signal_lifecycle()
         payload = build_home_payload(
             snapshot,
             display_name="Office PBX",
@@ -1157,12 +1174,19 @@ external::backup gateway sip:user@backup.test NOREG
             now=now,
             endpoint_unavailability_signals=visible,
             endpoint_notification_ids=notification_ids,
+            endpoint_signal_lifecycle=lifecycle,
         )
 
         signal = next(item for item in payload["signals"] if item["kind"] == "endpoint_unavailable")
         self.assertEqual(signal["notificationId"], notification_ids["200"])
+        self.assertEqual(signal["technical"]["firstDetectedAt"], now.isoformat())
+        self.assertEqual(signal["technical"]["lastCheckedAt"], now.isoformat())
+        self.assertEqual(
+            signal["technical"]["recoveryStatus"],
+            "Waiting for explicit reachable evidence",
+        )
 
-    def test_default_phone_outage_requires_thirty_continuous_seconds(self) -> None:
+    def test_default_phone_outage_requires_five_continuous_seconds(self) -> None:
         tracker = EndpointAvailabilitySignalTracker()
         now = datetime(2026, 7, 12, 10, tzinfo=ZoneInfo("Europe/Athens"))
         unavailable = AmiSnapshot(
@@ -1173,10 +1197,10 @@ external::backup gateway sip:user@backup.test NOREG
 
         self.assertEqual(tracker.observe(unavailable, now), set())
         self.assertEqual(
-            tracker.observe(unavailable, now + timedelta(seconds=29)), set()
+            tracker.observe(unavailable, now + timedelta(seconds=4)), set()
         )
         self.assertEqual(
-            tracker.observe(unavailable, now + timedelta(seconds=30)), {"200"}
+            tracker.observe(unavailable, now + timedelta(seconds=5)), {"200"}
         )
 
     def test_trunk_outage_requires_five_continuous_seconds(self) -> None:
@@ -2055,7 +2079,7 @@ external::backup gateway sip:user@backup.test NOREG
             )
         )
 
-    def test_default_phone_recovery_requires_sixty_continuous_seconds(self) -> None:
+    def test_default_phone_recovery_requires_fifteen_continuous_seconds(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
         tracker = ActivityTracker()
         offline = AmiSnapshot(
@@ -2072,8 +2096,8 @@ external::backup gateway sip:user@backup.test NOREG
         tracker.observe(offline, now)
         tracker.observe(offline, now + timedelta(seconds=30))
         self.assertEqual(tracker.observe(online, now + timedelta(seconds=31)), [])
-        self.assertEqual(tracker.observe(online, now + timedelta(seconds=90)), [])
-        events = tracker.observe(online, now + timedelta(seconds=91))
+        self.assertEqual(tracker.observe(online, now + timedelta(seconds=45)), [])
+        events = tracker.observe(online, now + timedelta(seconds=46))
 
         self.assertEqual(
             [event["kind"] for event in events],

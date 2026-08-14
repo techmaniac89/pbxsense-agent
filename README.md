@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.6.2-beta` on the **Breeze** channel.
+The current Agent release is `0.6.5-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -57,11 +57,13 @@ out of the user-facing PBXSense experience.
 
 The app should only talk to these Agent surfaces:
 
-- `GET /health`
+- `GET /health` and `GET /health/live` for process liveness
+- `GET /health/ready` for current PBX-polling readiness
 - `GET /home`
 - `WS /live`
 - `GET /pair`
 - `GET /diagnostics` and connector-specific diagnostics when troubleshooting
+  (including background-loop completion, failure, and recovery state)
 - `GET /recordings/{recording-id}` for a recording attached to a returned call
 - `POST /push/devices`, `GET /push/devices/status`, and
   `POST /push/devices/revoke` for the current phone's notification and
@@ -108,11 +110,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.2-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.5-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -206,10 +208,11 @@ are:
 - `PBXSENSE_HISTORY_POLL_SECONDS`: cached CDR, voicemail, and security-history
   refresh cadence; defaults to `30` seconds and is clamped to at least `5`.
 - `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS`: continuous offline period
-  before the phone Health alert; defaults to `30` seconds.
+  before the phone Health Signal; defaults to `5` seconds. A lone-phone push is
+  held for another `10` seconds, while multi-phone correlation uses `15` seconds.
 - `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS`: continuous online period
   before the recovery Activity and a later outage can be armed; defaults to
-  `60` seconds.
+  `15` seconds.
 - `PBXSENSE_TRUNK_OUTAGE_CONFIRMATION_SECONDS`: continuous unavailable period
   before the trunk Health alert; defaults to `5` seconds.
 - `ASTERISK_AMI_*`: Asterisk AMI host, port, username, password, and timeout.
@@ -758,7 +761,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.6.2-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -772,7 +775,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.6.2-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.6.5-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging

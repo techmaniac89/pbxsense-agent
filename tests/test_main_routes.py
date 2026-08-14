@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -67,6 +69,54 @@ def _websocket(
 
 
 class MainRouteStructureTest(unittest.TestCase):
+    def test_liveness_and_readiness_are_separate(self) -> None:
+        self.assertEqual(agent_main.health_live()["status"], "ok")
+        with agent_main._runtime_lock:
+            original = dict(agent_main._runtime_state)
+            agent_main._runtime_state.clear()
+        try:
+            response = agent_main.health_ready()
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(json.loads(response.body)["status"], "not_ready")
+
+            with agent_main._runtime_lock:
+                agent_main._runtime_state["snapshot"] = {
+                    "lastCompletedAt": time.time(),
+                    "lastSuccessAt": time.time(),
+                    "consecutiveFailures": 0,
+                    "lastError": "",
+                }
+            response = agent_main.health_ready()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(json.loads(response.body)["status"], "ready")
+        finally:
+            with agent_main._runtime_lock:
+                agent_main._runtime_state.clear()
+                agent_main._runtime_state.update(original)
+
+    def test_runtime_failures_are_counted_and_success_clears_error(self) -> None:
+        with agent_main._runtime_lock:
+            original = dict(agent_main._runtime_state)
+            agent_main._runtime_state.clear()
+            agent_main._runtime_state["snapshot"] = {
+                "lastLogAtMonotonic": time.monotonic(),
+            }
+        try:
+            agent_main._record_runtime_result("snapshot", ok=False, error="parse failed")
+            agent_main._record_runtime_result("snapshot", ok=False, error="parse failed")
+            failed = agent_main._runtime_diagnostics()["snapshot"]
+            self.assertEqual(failed["consecutiveFailures"], 2)
+            self.assertEqual(failed["lastError"], "parse failed")
+
+            agent_main._record_runtime_result("snapshot", ok=True)
+            recovered = agent_main._runtime_diagnostics()["snapshot"]
+            self.assertEqual(recovered["consecutiveFailures"], 0)
+            self.assertEqual(recovered["lastError"], "")
+        finally:
+            with agent_main._runtime_lock:
+                agent_main._runtime_state.clear()
+                agent_main._runtime_state.update(original)
+
     def test_ami_diagnostics_progressively_describe_unattempted_checks(self) -> None:
         self.assertEqual(
             ami_diagnostic_statuses({

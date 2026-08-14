@@ -25,6 +25,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate repository contract
+        run: python scripts/check_contract.py
+
       - name: Audit Agent and Relay locks
         uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266
         with:
