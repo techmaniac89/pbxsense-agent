@@ -97,13 +97,13 @@ Create two independent Secret Manager secrets:
   continue to pair apps.
 
 The Relay application itself defaults to `closed`, so a missing environment
-variable cannot accidentally expose public enrollment. The official deployment
-script explicitly defaults to `ticket`; use `open` only as a deliberate,
-temporary development or migration override.
+variable cannot accidentally expose public enrollment. During the beta rollout,
+the official deployment script explicitly selects `open` until automatic
+subscription-ticket handoff is available in the app and Agent.
 
 ```sh
 GOOGLE_CLOUD_PROJECT=your-project-id \
-PBXSENSE_RELAY_ENROLLMENT_MODE=ticket \
+PBXSENSE_RELAY_ENROLLMENT_MODE=open \
 sh ./deploy_cloud_run.sh
 ```
 
