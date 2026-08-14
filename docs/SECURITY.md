@@ -114,7 +114,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.6-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 
@@ -141,8 +141,10 @@ sudo chown root:root /etc/pbxsense-agent.env
 ```
 
 The relay identity under `/var/lib/pbxsense-agent` contains the installation's
-private signing key and queued device registrations. The Agent enforces `0700`
-on its directory and `0600` on the identity file on Linux.
+private signing key and queued device registrations. It is encrypted and
+authenticated with `PBXSENSE_RELAY_STATE_KEY`; upgrades migrate legacy
+plaintext state on the next write. The Agent also enforces `0700` on its
+directory and `0600` on the identity file on Linux.
 
 The Agent refuses non-local `http://` relay URLs. Hosted relay traffic must use
 HTTPS for activation secrets, device registrations, Signals, presence, and
@@ -154,8 +156,9 @@ extension identifiers and last-active timestamps. It contains no PBX
 credentials, but it is operational metadata and should remain protected by the
 Agent data-directory permissions and backup policy.
 
-Preserve `relay_identity.json` across rebuilds and host migrations. Anyone who
-obtains it can authenticate as that Agent, so store backups like credentials.
+Preserve both `relay_identity.json` and `PBXSENSE_RELAY_STATE_KEY` across
+rebuilds and host migrations. Neither is sufficient alone, so store both as
+credentials in separate protected backup scopes where practical.
 Deleting the Docker data volume or identity file creates a new relay identity;
 the previous app registrations remain isolated under the old identity and must
 be recovered from backup or replaced by pairing the apps again.

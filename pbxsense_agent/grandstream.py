@@ -40,12 +40,10 @@ class GrandstreamUcmClient(AmiClient):
                 "management network or enable TLS."
             )
         else:
-            result["tlsVerification"] = self._settings.grandstream_ami_verify_tls
-            if not self._settings.grandstream_ami_verify_tls:
-                result["securityWarning"] = (
-                    "TLS certificate verification is disabled; AMI credentials and "
-                    "PBX data are vulnerable to interception."
-                )
+            result["tlsVerification"] = True
+            result["customCertificateAuthority"] = bool(
+                self._settings.grandstream_ami_ca_file
+            )
         return result
 
     def _connect(self) -> socket.socket:
@@ -54,19 +52,12 @@ class GrandstreamUcmClient(AmiClient):
             return sock
 
         try:
-            context = (
-                ssl.create_default_context()
-                if self._settings.grandstream_ami_verify_tls
-                # Explicit legacy option; the diagnostics page surfaces it.
-                else ssl._create_unverified_context()  # nosec B323
+            context = ssl.create_default_context(
+                cafile=self._settings.grandstream_ami_ca_file or None
             )
             return context.wrap_socket(
                 sock,
-                server_hostname=(
-                    self._ami_host()
-                    if self._settings.grandstream_ami_verify_tls
-                    else None
-                ),
+                server_hostname=self._ami_host(),
             )
         except OSError as exc:
             sock.close()

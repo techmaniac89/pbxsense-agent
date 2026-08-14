@@ -233,6 +233,15 @@ class PulseMappingTest(unittest.TestCase):
         self.assertFalse(settings.grandstream_ami_tls)
         self.assertIsInstance(connector, GrandstreamUcmClient)
 
+    def test_grandstream_rejects_disabled_tls_verification(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"GRANDSTREAM_UCM_AMI_VERIFY_TLS": "false"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "Unverified Grandstream TLS"):
+                AgentSettings.from_env()
+
     def test_internet_relay_capability_defaults_ready_but_can_be_prohibited(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(AgentSettings.from_env().internet_relay_enabled)

@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.16"
+RELAY_VERSION = "0.5.17"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -352,7 +352,11 @@ async def claim_activation(activation_id: str, request: Request) -> dict[str, st
         ) from exc
     agent_id = str(claim["agentId"])
     site_id = str(claim["siteId"])
-    logger.info("activation_claimed agent_id=%s reused=%s", agent_id, claim["reusedAgent"])
+    logger.info(
+        "activation_claimed agent_id=%s reused=%s",
+        _safe_log_identifier(agent_id),
+        claim["reusedAgent"],
+    )
     result = {"status": "claimed", "agentId": agent_id, "siteId": site_id}
     result.update({"deviceId": relay_device_id, "deviceAccessToken": relay_access_token})
     return result
@@ -891,7 +895,11 @@ async def register_own_device(
         merge=True,
     )
     _assign_device_token_transaction(db.transaction(), device_ref, fcm_token)
-    logger.info("device_self_registered agent_id=%s device_id=%s", agent_id, device_id)
+    logger.info(
+        "device_self_registered agent_id=%s device_id=%s",
+        _safe_log_identifier(agent_id),
+        _safe_log_identifier(device_id),
+    )
     return {"delivered": True, "deviceId": device_id}
 
 
@@ -1089,7 +1097,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     )
     logger.info(
         "fcm_signal agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
-        agent_id,
+        _safe_log_identifier(agent_id),
         len(eligible_devices),
         response.success_count,
         response.failure_count,
@@ -1185,6 +1193,16 @@ def _bounded_identifier(value: object, field: str) -> str:
     if len(text) > 96 or not text.replace("-", "").replace("_", "").replace(".", "").isalnum():
         raise HTTPException(status_code=400, detail=f"Invalid {field}")
     return text
+
+
+def _safe_log_identifier(value: object) -> str:
+    """Return a bounded single-line identifier even for defense-in-depth logs."""
+    single_line = str(value).replace("\r", "_").replace("\n", "_")[:96]
+    return "".join(
+        character
+        for character in single_line
+        if character.isalnum() or character in {"-", "_", "."}
+    ) or "invalid"
 
 
 def _optional_identifier(value: object) -> str:
@@ -1494,7 +1512,10 @@ def _send_agent_status(agent_id: str, title: str, body: str) -> None:
             latency_ms=0,
             no_recipients=1,
         )
-        logger.info("fcm_agent_status agent_id=%s eligible=0 accepted=0 failed=0 invalid_removed=0", agent_id)
+        logger.info(
+            "fcm_agent_status agent_id=%s eligible=0 accepted=0 failed=0 invalid_removed=0",
+            _safe_log_identifier(agent_id),
+        )
         return
     started = time.monotonic()
     try:
@@ -1530,7 +1551,7 @@ def _send_agent_status(agent_id: str, title: str, body: str) -> None:
     )
     logger.info(
         "fcm_agent_status agent_id=%s eligible=%d accepted=%d failed=%d invalid_removed=%d",
-        agent_id,
+        _safe_log_identifier(agent_id),
         len(eligible_devices),
         response.success_count,
         response.failure_count,

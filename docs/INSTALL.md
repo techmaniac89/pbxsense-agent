@@ -15,11 +15,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.6-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.5-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.5-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.6-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.6-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where

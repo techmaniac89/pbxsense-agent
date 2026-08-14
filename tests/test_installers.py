@@ -29,6 +29,10 @@ class InstallerStructureTest(unittest.TestCase):
 
             self.assertEqual(first["PBXSENSE_AGENT_TOKEN"], "durable-token")
             self.assertEqual(second["PBXSENSE_AGENT_TOKEN"], "durable-token")
+            self.assertEqual(
+                first["PBXSENSE_RELAY_STATE_KEY"],
+                second["PBXSENSE_RELAY_STATE_KEY"],
+            )
             self.assertNotEqual(
                 first["PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"],
                 second["PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"],

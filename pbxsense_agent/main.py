@@ -85,6 +85,8 @@ push_relay = AgentRelay(
     display_name=settings.display_name,
     timeout_seconds=settings.relay_timeout_seconds,
     enrollment_ticket=settings.relay_enrollment_ticket,
+    storage_secret=settings.relay_state_key or settings.token,
+    legacy_storage_secrets=(settings.token,) if settings.relay_state_key else (),
 )
 internet_relay = SecureInternetRelay(
     enabled=settings.internet_relay_enabled,
@@ -1112,6 +1114,29 @@ def recording(recording_id: str, request: Request):
     return FileResponse(path, filename=path.name)
 
 
+def _public_diagnostics(value: object, *, field: str = "") -> object:
+    """Remove exception details before diagnostics cross the HTTP boundary."""
+    sensitive_fields = {"error", "exception", "traceback", "lastError"}
+    if isinstance(value, dict):
+        cleaned: dict[str, object] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in sensitive_fields:
+                cleaned[key_text] = (
+                    "The check failed. Review the Agent service logs for details."
+                    if item
+                    else ""
+                )
+            else:
+                cleaned[key_text] = _public_diagnostics(item, field=key_text)
+        return cleaned
+    if isinstance(value, list):
+        return [_public_diagnostics(item, field=field) for item in value]
+    if isinstance(value, tuple):
+        return [_public_diagnostics(item, field=field) for item in value]
+    return value
+
+
 def _diagnostics_response(request: Request):
     payload = connector.diagnostics()
     payload["internetRelay"] = internet_relay.status()
@@ -1132,6 +1157,7 @@ def _diagnostics_response(request: Request):
         payload["history"] = cucm_history_diagnostics(
             settings.cucm_cdr_path, settings.cucm_cmr_path
         )
+    payload = _public_diagnostics(payload)
     if _wants_html(request):
         return HTMLResponse(
             _json_page(
@@ -1620,7 +1646,7 @@ def _wants_html(request: Request) -> bool:
 
 
 def _agent_status() -> dict:
-    diagnostics = connector.diagnostics()
+    diagnostics = _public_diagnostics(connector.diagnostics())
     relay_status = internet_relay.status()
     push_status = push_relay.status()
     diagnostics["internetRelayState"] = (

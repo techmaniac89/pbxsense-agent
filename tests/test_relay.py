@@ -38,6 +38,7 @@ class _RecordingRelay(AgentRelay):
             url="https://relay.example",
             identity_path=path,
             display_name="Test PBX",
+            storage_secret="test-storage-secret",
         )
         self._state["agent_id"] = "agent_test"
         self.requests: list[tuple[str, dict, bool]] = []
@@ -82,6 +83,7 @@ class _ActivationRelay(AgentRelay):
             identity_path=path,
             display_name="Test PBX",
             enrollment_ticket=enrollment_ticket,
+            storage_secret="test-storage-secret",
         )
         self.requests: list[tuple[str, dict, bool]] = []
 
@@ -202,8 +204,54 @@ class RelayTest(unittest.TestCase):
                 url="http://localhost:8080",
                 identity_path=str(Path(directory) / "identity.json"),
                 display_name="Test PBX",
+                storage_secret="test-storage-secret",
             )
             self.assertEqual(relay._url, "http://localhost:8080")
+
+    def test_plaintext_identity_is_migrated_to_authenticated_encryption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.json"
+            path.write_text(
+                json.dumps({"agent_id": "agent_existing", "private_key": "secret"}),
+                encoding="utf-8",
+            )
+            relay = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(path),
+                display_name="Test PBX",
+                storage_secret="state-secret",
+            )
+            relay._save()
+
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["format"], "pbxsense-relay-state-v1")
+            self.assertNotIn("agent_existing", path.read_text(encoding="utf-8"))
+            reloaded = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(path),
+                display_name="Test PBX",
+                storage_secret="state-secret",
+            )
+            self.assertEqual(reloaded.status()["agentId"], "agent_existing")
+
+    def test_encrypted_identity_fails_closed_with_wrong_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.json"
+            relay = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(path),
+                display_name="Test PBX",
+                storage_secret="right-secret",
+            )
+            relay._state["agent_id"] = "agent_existing"
+            relay._save()
+            with self.assertRaisesRegex(RuntimeError, "could not be decrypted"):
+                AgentRelay(
+                    url="https://relay.example",
+                    identity_path=str(path),
+                    display_name="Test PBX",
+                    storage_secret="wrong-secret",
+                )
 
     def test_permanent_outbox_error_does_not_block_later_items(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

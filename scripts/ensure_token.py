@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 TOKEN_KEY = "PBXSENSE_AGENT_TOKEN"
+RELAY_STATE_KEY = "PBXSENSE_RELAY_STATE_KEY"
 BOOTSTRAP_TOKEN_KEY = "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN"
 BOOTSTRAP_EXPIRY_KEY = "PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT"
 BOOTSTRAP_LIFETIME_SECONDS = 15 * 60
@@ -43,6 +44,14 @@ def main() -> int:
         if updated and updated[-1].strip():
             updated.append("")
         updated.append(f"{TOKEN_KEY}={token}")
+        changed = True
+
+    if not any(line.startswith(f"{RELAY_STATE_KEY}=") and line.split("=", 1)[1].strip() for line in updated):
+        updated = [line for line in updated if not line.startswith(f"{RELAY_STATE_KEY}=")]
+        if updated and updated[-1].strip():
+            updated.append("")
+        updated.append(f"{RELAY_STATE_KEY}={secrets.token_urlsafe(32)}")
+        print(f"Generated {RELAY_STATE_KEY}.")
         changed = True
 
     bootstrap_token = secrets.token_urlsafe(24)

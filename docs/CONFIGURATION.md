@@ -48,6 +48,7 @@ Endpoint outage evidence includes `firstDetectedAt`, `lastCheckedAt`, and
 | `PBXSENSE_QUALITY_FREQUENCY_SECONDS` | `180` | Evidence window before aggregate availability Tips are emitted. |
 | `PBXSENSE_RELAY_URL` | hosted PBXSense URL in `.env.example` | Shared notification/encrypted-data relay URL. Production URLs must use HTTPS; plain HTTP is accepted only for localhost development. Leave empty only for deliberately local-only installs. |
 | `PBXSENSE_RELAY_IDENTITY_PATH` | `/var/lib/pbxsense-agent/relay_identity.json` | Persistent Agent Ed25519 identity and durable relay state. Back up and preserve it across rebuilds. |
+| `PBXSENSE_RELAY_STATE_KEY` | generated | Installation-held key that encrypts and authenticates the relay identity file. Preserve it with identity backups; the installer generates it once and never rotates it. Existing installs temporarily fall back to `PBXSENSE_AGENT_TOKEN` while migrating. |
 | `PBXSENSE_RELAY_TIMEOUT` | `5` | Outbound relay HTTP timeout in seconds. |
 | `PBXSENSE_RELAY_ENROLLMENT_TICKET` | empty | Operator-only bootstrap override for controlled testing/support. In production the subscribed app obtains a short-lived ticket and passes it automatically during QR pairing; end users do not configure it. Existing enrolled Agents authenticate with their durable identity. |
 | `PBXSENSE_INTERNET_RELAY_ENABLED` | `true` | Makes encrypted Internet Relay available to apps that explicitly enable it while pairing. Set `false` to prohibit it for this Agent. |
@@ -144,7 +145,8 @@ ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 | `GRANDSTREAM_UCM_AMI_USERNAME` | empty | Dedicated UCM AMI username. |
 | `GRANDSTREAM_UCM_AMI_PASSWORD` | empty | Dedicated UCM AMI password. |
 | `GRANDSTREAM_UCM_AMI_TLS` | `false` | Set `true` for UCM's TLS AMI listener. |
-| `GRANDSTREAM_UCM_AMI_VERIFY_TLS` | `true` | Set `false` only for a trusted local UCM with a self-signed certificate. |
+| `GRANDSTREAM_UCM_AMI_VERIFY_TLS` | `true` | Must remain `true`; unverified TLS is rejected. |
+| `GRANDSTREAM_UCM_AMI_CA_FILE` | empty | PEM CA bundle for a UCM certificate issued by a private or self-signed CA. |
 | `GRANDSTREAM_UCM_AMI_TIMEOUT` | `3` | Deprecated compatibility fallback used only when `PBXSENSE_CONNECT_TIMEOUT` is unset. |
 | `GRANDSTREAM_UCM_CDR_CSV_PATH` | empty | Optional UCM CDR CSV file visible to the Agent. |
 | `GRANDSTREAM_UCM_VOICEMAIL_PATH` | empty | Optional UCM voicemail folder visible to the Agent. |

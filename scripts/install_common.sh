@@ -318,7 +318,10 @@ configure_grandstream_env() {
   fi
   prompt_value GRANDSTREAM_UCM_AMI_USERNAME "Grandstream UCM AMI username" "${GRANDSTREAM_UCM_AMI_USERNAME:-pbxsense}"
   prompt_secret GRANDSTREAM_UCM_AMI_PASSWORD "Grandstream UCM AMI password" "${GRANDSTREAM_UCM_AMI_PASSWORD:-}"
-  prompt_value GRANDSTREAM_UCM_AMI_VERIFY_TLS "Verify Grandstream UCM TLS certificate (true/false)" "${GRANDSTREAM_UCM_AMI_VERIFY_TLS:-true}"
+  set_env_value GRANDSTREAM_UCM_AMI_VERIFY_TLS "true"
+  if [ "$(env_value GRANDSTREAM_UCM_AMI_TLS)" = "true" ]; then
+    prompt_value GRANDSTREAM_UCM_AMI_CA_FILE "Private/self-signed CA PEM path (optional)" "${GRANDSTREAM_UCM_AMI_CA_FILE:-}"
+  fi
   prompt_value GRANDSTREAM_UCM_CDR_CSV_PATH "Grandstream UCM CDR CSV path (optional)" "${GRANDSTREAM_UCM_CDR_CSV_PATH:-}"
   prompt_value GRANDSTREAM_UCM_VOICEMAIL_PATH "Grandstream UCM voicemail path (optional)" "${GRANDSTREAM_UCM_VOICEMAIL_PATH:-}"
   prompt_value GRANDSTREAM_UCM_RECORDINGS_PATH "Grandstream UCM recordings path (optional)" "${GRANDSTREAM_UCM_RECORDINGS_PATH:-}"

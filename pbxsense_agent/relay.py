@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -21,6 +22,7 @@ try:
     from cryptography.hazmat.primitives.hashes import SHA256
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 except ImportError:  # Existing Agents remain usable before the optional relay is installed.
+    InvalidTag = ValueError  # type: ignore[assignment,misc]
     serialization = None  # type: ignore[assignment]
     Ed25519PrivateKey = None  # type: ignore[assignment,misc]
     X25519PrivateKey = X25519PublicKey = AESGCM = HKDF = SHA256 = None  # type: ignore[assignment,misc]
@@ -77,12 +79,22 @@ class AgentRelay:
         display_name: str,
         timeout_seconds: float = 5,
         enrollment_ticket: str = "",
+        storage_secret: str = "",
+        legacy_storage_secrets: tuple[str, ...] = (),
     ) -> None:
         self._url = _validated_relay_url(url)
         self._path = Path(identity_path)
         self._display_name = display_name
         self._timeout_seconds = timeout_seconds
         self._enrollment_ticket = enrollment_ticket.strip()
+        self._storage_secret = storage_secret.strip()
+        self._storage_secrets = tuple(
+            dict.fromkeys(
+                secret.strip()
+                for secret in (self._storage_secret, *legacy_storage_secrets)
+                if secret.strip()
+            )
+        )
         self._lock = threading.Lock()
         self._state = self._load()
         self._protect_storage()
@@ -901,16 +913,63 @@ class AgentRelay:
     def _load(self) -> dict[str, Any]:
         try:
             decoded = json.loads(self._path.read_text(encoding="utf-8"))
-            return decoded if isinstance(decoded, dict) else {}
+            if not isinstance(decoded, dict):
+                return {"outbox": [], "delivered": {}}
+            if decoded.get("format") != "pbxsense-relay-state-v1":
+                # Existing installations are migrated on the next save.
+                return decoded
+            return self._decrypt_state(decoded)
         except (OSError, json.JSONDecodeError):
             return {"outbox": [], "delivered": {}}
 
+    def _decrypt_state(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        if AESGCM is None or not self._storage_secrets:
+            raise RuntimeError(
+                "The encrypted relay identity needs PBXSENSE_RELAY_STATE_KEY "
+                "or the Agent token used when it was created"
+            )
+        try:
+            nonce = _decode(str(envelope["nonce"]))
+            ciphertext = _decode(str(envelope["ciphertext"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("The encrypted relay identity is malformed") from exc
+        for secret in self._storage_secrets:
+            try:
+                plaintext = AESGCM(_relay_state_key(secret)).decrypt(
+                    nonce, ciphertext, b"pbxsense-relay-state-v1"
+                )
+                decoded = json.loads(plaintext.decode("utf-8"))
+                if isinstance(decoded, dict):
+                    return decoded
+            except (InvalidTag, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        raise RuntimeError(
+            "The relay identity could not be decrypted; restore its state key "
+            "instead of creating a new identity"
+        )
+
     def _save(self) -> None:
+        if AESGCM is None or not self._storage_secret:
+            raise RuntimeError(
+                "PBXSENSE_RELAY_STATE_KEY or PBXSENSE_AGENT_TOKEN is required "
+                "to protect relay identity state"
+            )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             self._path.parent.chmod(0o700)
         temporary = self._path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self._state, sort_keys=True), encoding="utf-8")
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(_relay_state_key(self._storage_secret)).encrypt(
+            nonce,
+            json.dumps(self._state, sort_keys=True).encode("utf-8"),
+            b"pbxsense-relay-state-v1",
+        )
+        envelope = {
+            "format": "pbxsense-relay-state-v1",
+            "nonce": _encode(nonce),
+            "ciphertext": _encode(ciphertext),
+        }
+        temporary.write_text(json.dumps(envelope, sort_keys=True), encoding="utf-8")
         if os.name != "nt":
             temporary.chmod(0o600)
         temporary.replace(self._path)
@@ -928,6 +987,12 @@ class AgentRelay:
         except OSError:
             # A later save will retry; read-only installations still start.
             pass
+
+
+def _relay_state_key(secret: str) -> bytes:
+    return hashlib.sha256(
+        b"pbxsense-relay-state-v1\0" + secret.encode("utf-8")
+    ).digest()
 
 
 def _should_relay(signal: dict[str, object]) -> bool:

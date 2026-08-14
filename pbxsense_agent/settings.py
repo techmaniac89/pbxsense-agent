@@ -33,6 +33,7 @@ class AgentSettings:
     relay_identity_path: str = "/var/lib/pbxsense-agent/relay_identity.json"
     relay_timeout_seconds: float = 5
     relay_enrollment_ticket: str = ""
+    relay_state_key: str = ""
     quality_frequency_seconds: int = 180
     endpoint_outage_confirmation_seconds: float = 5
     trunk_outage_confirmation_seconds: float = 5
@@ -52,6 +53,7 @@ class AgentSettings:
     grandstream_ami_password: str = ""
     grandstream_ami_tls: bool = False
     grandstream_ami_verify_tls: bool = True
+    grandstream_ami_ca_file: str = ""
     grandstream_cdr_csv_path: str = ""
     grandstream_voicemail_path: str = ""
     grandstream_recordings_path: str = ""
@@ -152,6 +154,7 @@ class AgentSettings:
             relay_enrollment_ticket=os.getenv(
                 "PBXSENSE_RELAY_ENROLLMENT_TICKET", ""
             ).strip(),
+            relay_state_key=os.getenv("PBXSENSE_RELAY_STATE_KEY", "").strip(),
             quality_frequency_seconds=_env_int("PBXSENSE_QUALITY_FREQUENCY_SECONDS", 180),
             endpoint_outage_confirmation_seconds=max(
                 0, _env_float("PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS", 30)
@@ -189,7 +192,10 @@ class AgentSettings:
             grandstream_ami_username=os.getenv("GRANDSTREAM_UCM_AMI_USERNAME", "").strip(),
             grandstream_ami_password=os.getenv("GRANDSTREAM_UCM_AMI_PASSWORD", ""),
             grandstream_ami_tls=grandstream_tls,
-            grandstream_ami_verify_tls=_env_bool("GRANDSTREAM_UCM_AMI_VERIFY_TLS", True),
+            grandstream_ami_verify_tls=_verified_grandstream_tls(),
+            grandstream_ami_ca_file=os.getenv(
+                "GRANDSTREAM_UCM_AMI_CA_FILE", ""
+            ).strip(),
             grandstream_cdr_csv_path=os.getenv("GRANDSTREAM_UCM_CDR_CSV_PATH", "").strip(),
             grandstream_voicemail_path=os.getenv("GRANDSTREAM_UCM_VOICEMAIL_PATH", "").strip(),
             grandstream_recordings_path=os.getenv("GRANDSTREAM_UCM_RECORDINGS_PATH", "").strip(),
@@ -336,3 +342,13 @@ def _env_bool(key: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _verified_grandstream_tls() -> bool:
+    verified = _env_bool("GRANDSTREAM_UCM_AMI_VERIFY_TLS", True)
+    if not verified:
+        raise ValueError(
+            "Unverified Grandstream TLS is not supported; configure "
+            "GRANDSTREAM_UCM_AMI_CA_FILE for a private or self-signed CA"
+        )
+    return True
