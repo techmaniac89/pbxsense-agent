@@ -64,11 +64,11 @@ class AmiClient:
                 endpoints=endpoints,
                 queues=_queues_from_events(events),
             )
-        except OSError as exc:
+        except OSError:
             return AmiSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
-                error=str(exc),
+                error="The Asterisk AMI connection is unavailable.",
             )
 
     def diagnostics(self) -> dict:
@@ -106,12 +106,14 @@ class AmiClient:
                         event.name == "OutboundRegistrationDetail"
                         for event in registrations
                     )
-                except OSError as exc:
+                except OSError:
                     result["outboundRegistrationActionSupported"] = False
-                    result["outboundRegistrationWarning"] = str(exc)
+                    result["outboundRegistrationWarning"] = (
+                        "Outbound registration diagnostics are unavailable."
+                    )
                 self._send_action(sock, {"Action": "Logoff"})
-        except OSError as exc:
-            result["error"] = str(exc)
+        except OSError:
+            result["error"] = "The Asterisk AMI diagnostic check failed."
 
         result["ok"] = result["loginAccepted"] is True
         return result
@@ -287,8 +289,8 @@ class AmiClient:
     def _read_optional_banner(self, sock: socket.socket) -> tuple[str, str | None]:
         try:
             return self._read_banner(sock), None
-        except AmiError as exc:
-            return "", str(exc)
+        except AmiError:
+            return "", "The AMI banner could not be read."
 
     def _read_packet(self, sock: socket.socket, *, phase: str) -> dict[str, str]:
         try:

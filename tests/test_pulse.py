@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import socket
+import ssl
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from pbxsense_agent.ami import (
@@ -241,6 +242,28 @@ class PulseMappingTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "Unverified Grandstream TLS"):
                 AgentSettings.from_env()
+
+    def test_grandstream_tls_requires_tls_1_2_or_newer(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PBXSENSE_PBX_TYPE": "grandstream",
+                "GRANDSTREAM_UCM_AMI_TLS": "true",
+                "GRANDSTREAM_UCM_AMI_HOST": "ucm.example.test",
+            },
+            clear=True,
+        ):
+            client = GrandstreamUcmClient(AgentSettings.from_env())
+        raw_socket = MagicMock()
+        wrapped_socket = MagicMock()
+        context = MagicMock()
+        context.wrap_socket.return_value = wrapped_socket
+        with (
+            patch.object(AmiClient, "_connect", return_value=raw_socket),
+            patch("pbxsense_agent.grandstream.ssl.create_default_context", return_value=context),
+        ):
+            self.assertIs(client._connect(), wrapped_socket)
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
 
     def test_internet_relay_capability_defaults_ready_but_can_be_prohibited(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -2280,7 +2303,10 @@ external::backup gateway sip:user@backup.test NOREG
 
         self.assertFalse(diagnostics["cdrCsvExists"])
         self.assertFalse(diagnostics["cdrCsvReadable"])
-        self.assertIn("denied", diagnostics["cdrCsvAccessError"])
+        self.assertEqual(
+            diagnostics["cdrCsvAccessError"],
+            "The configured file cannot be accessed.",
+        )
 
         with patch.object(Path, "is_dir", side_effect=PermissionError("denied")):
             self.assertEqual(read_recent_voicemails("/private/voicemail"), [])
@@ -2288,7 +2314,10 @@ external::backup gateway sip:user@backup.test NOREG
 
         self.assertFalse(diagnostics["voicemailPathExists"])
         self.assertFalse(diagnostics["voicemailPathReadable"])
-        self.assertIn("denied", diagnostics["voicemailPathAccessError"])
+        self.assertEqual(
+            diagnostics["voicemailPathAccessError"],
+            "The configured folder cannot be accessed.",
+        )
 
     def test_pulse_engine_adds_tip_for_repeated_missed_calls(self) -> None:
         calls = [

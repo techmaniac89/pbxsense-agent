@@ -133,10 +133,10 @@ class AgentRelay:
     def _activation_with_tracking_locked(self) -> dict[str, str]:
         try:
             activation = self._activation_locked()
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError):
             # Cloud enrollment is optional for local pairing, but the protected
             # admin page must retain the real reason it fell back to LAN.
-            self._state["last_activation_error"] = str(exc)[:240]
+            self._state["last_activation_error"] = "The relay activation request failed."
             self._save()
             return {}
         if self._state.pop("last_activation_error", None) is not None:
@@ -835,7 +835,9 @@ class AgentRelay:
                     "at": int(time.time()),
                 })
                 rejected[:] = rejected[-20:]
-                self._state["last_outbox_error"] = str(exc)[:240]
+                self._state["last_outbox_error"] = (
+                    f"The relay rejected a queued item with HTTP {exc.status}."
+                )
                 self._save()
                 continue
             except OSError:
@@ -890,7 +892,7 @@ class AgentRelay:
                 message += f": {detail}"
             raise RelayRequestError(exc.code, message) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise OSError(str(exc)) from exc
+            raise OSError("The relay request could not be completed.") from exc
         return decoded if isinstance(decoded, dict) else {}
 
     def _private_key(self) -> Ed25519PrivateKey:

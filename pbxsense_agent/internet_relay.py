@@ -77,9 +77,9 @@ class SecureInternetRelay:
                 self._snapshot_publisher(self._snapshot_provider())
             self._connected = True
             self._last_error = ""
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError):
             self._connected = False
-            self._last_error = str(exc)[:240]
+            self._last_error = "The secure relay exchange failed."
 
     def _accept_policy(self, raw_policy: object) -> None:
         if not isinstance(raw_policy, dict):

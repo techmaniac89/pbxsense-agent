@@ -55,6 +55,7 @@ class GrandstreamUcmClient(AmiClient):
             context = ssl.create_default_context(
                 cafile=self._settings.grandstream_ami_ca_file or None
             )
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             return context.wrap_socket(
                 sock,
                 server_hostname=self._ami_host(),

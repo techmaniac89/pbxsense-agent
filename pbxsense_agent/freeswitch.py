@@ -62,11 +62,11 @@ class FreeSwitchClient:
                     self._settings.freeswitch_voicemail_path,
                 ),
             )
-        except OSError as exc:
+        except OSError:
             return AmiSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
-                error=str(exc),
+                error="The FreeSWITCH ESL connection is unavailable.",
             )
 
     def diagnostics(self) -> dict:
@@ -91,8 +91,8 @@ class FreeSwitchClient:
                 result["loginAccepted"] = True
                 self._api(sock, "status")
                 result["commandAccepted"] = True
-        except OSError as exc:
-            result["error"] = str(exc)
+        except OSError:
+            result["error"] = "The FreeSWITCH ESL diagnostic check failed."
 
         result["ok"] = result["loginAccepted"] is True
         return result

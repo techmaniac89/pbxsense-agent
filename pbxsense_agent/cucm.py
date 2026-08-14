@@ -61,10 +61,10 @@ class CucmClient:
                 self._known_trunks = trunks
                 endpoints.extend(trunks)
                 self._trunk_error = ""
-            except OSError as exc:
+            except OSError:
                 # Trunk serviceability is additive. A missing optional service
                 # must not make phone inventory and registration unreachable.
-                self._trunk_error = str(exc)
+                self._trunk_error = "CUCM trunk serviceability is unavailable."
                 endpoints.extend(uncertain_trunks(
                     self._known_trunks,
                     "CUCM trunk serviceability evidence is temporarily unavailable",
@@ -74,9 +74,11 @@ class CucmClient:
                 agent_version=AGENT_VERSION,
                 endpoints=endpoints,
             )
-        except OSError as exc:
+        except OSError:
             result = AmiSnapshot(
-                reachable=False, agent_version=AGENT_VERSION, error=str(exc)
+                reachable=False,
+                agent_version=AGENT_VERSION,
+                error="The CUCM Core connection is unavailable.",
             )
         self._cached_snapshot = result
         # RisPort is a bulk real-time query; avoid turning the one-second app
@@ -105,18 +107,18 @@ class CucmClient:
         try:
             self._directory_inventory()
             result["axlReachable"] = True
-        except OSError as exc:
-            result["axlError"] = str(exc)
+        except OSError:
+            result["axlError"] = "The CUCM AXL diagnostic check failed."
         try:
             self._registration_status()
             result["risPortReachable"] = True
-        except OSError as exc:
-            result["risPortError"] = str(exc)
+        except OSError:
+            result["risPortError"] = "The CUCM RisPort diagnostic check failed."
         try:
             self._trunk_endpoints()
             self._trunk_error = ""
-        except OSError as exc:
-            self._trunk_error = str(exc)
+        except OSError:
+            self._trunk_error = "CUCM trunk serviceability is unavailable."
         result.update(self._jtapi.diagnostics())
         result["sipTrunkEvidenceAvailable"] = not bool(self._trunk_error)
         if self._trunk_error:
@@ -329,8 +331,8 @@ class CucmClient:
                 "perfmonCollectCounterData",
             )
             self._perfmon_error = ""
-        except OSError as exc:
-            self._perfmon_error = str(exc)
+        except OSError:
+            self._perfmon_error = "CUCM PerfMon is unavailable."
             return {}
         counters: dict[str, int] = {}
         for item in _elements(root, "perfmonCollectCounterDataReturn"):

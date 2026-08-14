@@ -74,8 +74,12 @@ class YeastarClient:
                 recent_calls=self._cdr_calls(),
                 voicemails=self._voicemails(endpoints),
             )
-        except OSError as exc:
-            snapshot = AmiSnapshot(reachable=False, agent_version=AGENT_VERSION, error=str(exc))
+        except OSError:
+            snapshot = AmiSnapshot(
+                reachable=False,
+                agent_version=AGENT_VERSION,
+                error="The Yeastar API connection is unavailable.",
+            )
         self._cached_snapshot = snapshot
         # The web UI checks for updates every second. Keep cloud polling modest
         # while preserving a near-live view without a user-configured interval.
@@ -107,8 +111,8 @@ class YeastarClient:
             self._api("system/information")
             result["tokenAccepted"] = True
             result["apiReachable"] = True
-        except OSError as exc:
-            result["error"] = str(exc)
+        except OSError:
+            result["error"] = "The Yeastar API diagnostic check failed."
         result["ok"] = result["apiReachable"] is True
         return result
 

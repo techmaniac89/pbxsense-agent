@@ -424,8 +424,9 @@ def _access_error(path: Path, kind: str) -> str:
             path.is_dir()
         else:
             path.is_file()
-    except OSError as exc:
-        return str(exc)
+    except OSError:
+        label = "folder" if kind == "dir" else "file"
+        return f"The configured {label} cannot be accessed."
     return ""
 
 

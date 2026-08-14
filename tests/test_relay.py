@@ -360,7 +360,10 @@ class RelayTest(unittest.TestCase):
             relay._request = unavailable  # type: ignore[method-assign]
 
             self.assertEqual(relay.activation(), {})
-            self.assertIn("HTTP 429", relay.status()["lastActivationError"])
+            self.assertEqual(
+                relay.status()["lastActivationError"],
+                "The relay activation request failed.",
+            )
 
     def test_unconfirmed_cached_activation_is_not_reused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -377,7 +380,10 @@ class RelayTest(unittest.TestCase):
             relay._request = unavailable  # type: ignore[method-assign]
 
             self.assertEqual(relay.activation(), {})
-            self.assertIn("status unavailable", relay.status()["lastActivationError"])
+            self.assertEqual(
+                relay.status()["lastActivationError"],
+                "The relay activation request failed.",
+            )
 
     def test_relay_status_expiry_removes_stale_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

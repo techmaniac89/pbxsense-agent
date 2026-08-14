@@ -199,10 +199,13 @@ async def _snapshot_loop() -> None:
                 ok=bool(snapshot.reachable),
                 error=str(snapshot.error or "") if not snapshot.reachable else "",
             )
-        except Exception as exc:
+        except Exception:
             # Connector failures normally produce an unreachable snapshot. An
             # unexpected parser/filesystem failure must not stop later polls.
-            _record_runtime_result("snapshot", ok=False, error=str(exc), log_exception=True)
+            _record_runtime_result(
+                "snapshot", ok=False,
+                error="The snapshot loop failed unexpectedly.", log_exception=True,
+            )
         await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_SECONDS)
 
 
@@ -222,8 +225,12 @@ async def _relay_publish_loop() -> None:
                 ),
             )
             _record_runtime_result("pushRelayPublisher", ok=True)
-        except Exception as exc:
-            _record_runtime_result("pushRelayPublisher", ok=False, error=str(exc), log_exception=True)
+        except Exception:
+            _record_runtime_result(
+                "pushRelayPublisher", ok=False,
+                error="The push relay publisher is temporarily unavailable.",
+                log_exception=True,
+            )
         await asyncio.sleep(RELAY_PUBLISH_INTERVAL_SECONDS)
 
 
@@ -237,9 +244,13 @@ async def _relay_heartbeat_loop() -> None:
                 ok=heartbeat_ok is not False,
                 error="Relay heartbeat was not accepted." if heartbeat_ok is False else "",
             )
-        except Exception as exc:
+        except Exception:
             # Network and enrollment failures are retried on the next cadence.
-            _record_runtime_result("pushRelayHeartbeat", ok=False, error=str(exc), log_exception=True)
+            _record_runtime_result(
+                "pushRelayHeartbeat", ok=False,
+                error="The push relay heartbeat is temporarily unavailable.",
+                log_exception=True,
+            )
         await asyncio.sleep(PRESENCE_HEARTBEAT_INTERVAL_SECONDS)
 
 
@@ -248,8 +259,12 @@ async def _internet_relay_loop() -> None:
         try:
             await asyncio.to_thread(internet_relay.poll)
             _record_runtime_result("internetRelay", ok=True)
-        except Exception as exc:
-            _record_runtime_result("internetRelay", ok=False, error=str(exc), log_exception=True)
+        except Exception:
+            _record_runtime_result(
+                "internetRelay", ok=False,
+                error="The Internet Relay poll is temporarily unavailable.",
+                log_exception=True,
+            )
         await asyncio.sleep(settings.internet_relay_poll_seconds)
 
 
@@ -274,9 +289,7 @@ async def _background_task_watchdog() -> None:
             error = "Background task stopped unexpectedly and was restarted."
             if isinstance(task, asyncio.Task) and not task.cancelled():
                 try:
-                    exception = task.exception()
-                    if exception:
-                        error = f"{error} {exception}"
+                    task.exception()
                 except (asyncio.CancelledError, asyncio.InvalidStateError):
                     pass
             _record_runtime_result(name, ok=False, error=error, log_exception=True)
@@ -1099,7 +1112,10 @@ def recording(recording_id: str, request: Request):
         try:
             content, filename, media_type = connector.download_recording(recording_id)
         except OSError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=404,
+                detail="The requested recording is unavailable.",
+            ) from exc
         safe_filename = filename.replace('"', "'").replace("\r", "").replace("\n", "")
         return StreamingResponse(
             content=content,
