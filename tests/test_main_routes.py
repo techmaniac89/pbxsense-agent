@@ -13,10 +13,12 @@ from fastapi import HTTPException, Request, WebSocket
 from starlette.responses import Response
 
 from pbxsense_agent import main as agent_main
+from pbxsense_agent.connectors import MockConnector
 from pbxsense_agent.diagnostics import (
     ami_diagnostic_statuses,
     connector_diagnostic_statuses,
 )
+from pbxsense_agent.pulse import AmiQueue
 
 
 def _request(
@@ -69,6 +71,55 @@ def _websocket(
 
 
 class MainRouteStructureTest(unittest.TestCase):
+    def test_snapshot_poller_slows_only_after_a_stable_quiet_window(self) -> None:
+        snapshot = replace(MockConnector().snapshot(), channels=[], queues=[])
+        poller = agent_main.AdaptiveSnapshotPoller(1, 5, 30)
+
+        self.assertEqual(poller.observe(snapshot, 0), 1)
+        self.assertEqual(poller.observe(snapshot, 29), 1)
+        self.assertEqual(poller.observe(snapshot, 30), 5)
+
+        changed = replace(
+            snapshot,
+            endpoints=[replace(snapshot.endpoints[0], presence="away")],
+        )
+        self.assertEqual(poller.observe(changed, 31), 1)
+        self.assertEqual(poller.observe(changed, 60), 1)
+        self.assertEqual(poller.observe(changed, 61), 5)
+
+    def test_snapshot_poller_stays_fast_for_live_or_degraded_state(self) -> None:
+        base = MockConnector().snapshot()
+        poller = agent_main.AdaptiveSnapshotPoller(1, 5, 30)
+
+        self.assertEqual(poller.observe(base, 100), 1)
+        idle = replace(base, channels=[], queues=[])
+        self.assertEqual(poller.observe(idle, 131), 1)
+        self.assertEqual(poller.observe(idle, 161), 5)
+        waiting = replace(
+            idle,
+            queues=[AmiQueue(name="support", waiting_callers=1)],
+        )
+        self.assertEqual(poller.observe(waiting, 162), 1)
+        unreachable = replace(idle, reachable=False)
+        self.assertEqual(poller.observe(unreachable, 200), 1)
+
+    def test_refresh_home_state_returns_a_snapshot_tuple(self) -> None:
+        # Regression: the snapshot loop reads state[0] to find the snapshot,
+        # so _refresh_home_state must return the state tuple (it previously
+        # dropped the return value, making every poll fail with
+        # "TypeError: 'NoneType' object is not subscriptable").
+        original_connector = agent_main.connector
+        try:
+            agent_main.connector = MockConnector()
+            with agent_main._snapshot_lock:
+                agent_main._cached_home_state = None
+            state = agent_main._refresh_home_state()
+            self.assertIsInstance(state, tuple)
+            self.assertGreaterEqual(len(state), 10)
+            self.assertTrue(state[0].reachable)
+        finally:
+            agent_main.connector = original_connector
+
     def test_liveness_and_readiness_are_separate(self) -> None:
         self.assertEqual(agent_main.health_live()["status"], "ok")
         with agent_main._runtime_lock:

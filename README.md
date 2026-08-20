@@ -5,7 +5,7 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.6.7-beta` on the **Breeze** channel.
+The current Agent release is `0.6.8-beta` on the **Breeze** channel.
 
 The Agent keeps PBX integration concerns in one place. The app talks to the
 Agent; the Agent talks to Asterisk, FreeSWITCH, Yeastar P-Series, Grandstream
@@ -110,11 +110,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.7-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.8-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.7-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.7-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.8-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.8-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -203,8 +203,12 @@ are:
 - `PBXSENSE_INTERNET_RELAY_POLL_SECONDS`: changed-snapshot check cadence;
   defaults to `15` seconds. Control exchanges are rate-limited to once every
   five minutes.
-- `PBXSENSE_SNAPSHOT_POLL_SECONDS`: live PBX refresh cadence; defaults to `1`
-  seconds and is clamped to at least `0.5` seconds.
+- `PBXSENSE_SNAPSHOT_POLL_SECONDS`: active/reconnecting PBX refresh cadence;
+  defaults to `1` second and is clamped to at least `0.5` seconds.
+- `PBXSENSE_SNAPSHOT_IDLE_POLL_SECONDS`: stable-idle PBX refresh cadence;
+  defaults to `5` seconds and cannot be faster than the active cadence.
+- `PBXSENSE_SNAPSHOT_QUIET_SECONDS`: time a changed PBX remains on fast polling
+  before returning to the idle cadence; defaults to `30` seconds.
 - `PBXSENSE_HISTORY_POLL_SECONDS`: cached CDR, voicemail, and security-history
   refresh cadence; defaults to `30` seconds and is clamped to at least `5`.
 - `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS`: continuous offline period
@@ -397,6 +401,8 @@ ASTERISK_AMI_PORT=5038
 ASTERISK_AMI_USERNAME=pbxsense
 ASTERISK_AMI_PASSWORD=<secret>
 PBXSENSE_SNAPSHOT_POLL_SECONDS=1
+PBXSENSE_SNAPSHOT_IDLE_POLL_SECONDS=5
+PBXSENSE_SNAPSHOT_QUIET_SECONDS=30
 PBXSENSE_HISTORY_POLL_SECONDS=30
 ASTERISK_CDR_CSV_PATH=/var/log/asterisk/cdr-csv/Master.csv
 ASTERISK_VOICEMAIL_PATH=/var/spool/asterisk/voicemail
@@ -761,7 +767,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.6.7-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.6.8-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -775,7 +781,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.6.7-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.6.8-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, the workflow fails and asks for
 `pbxsense_agent/version.py` to be bumped before the next push. The packaging
