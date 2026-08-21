@@ -84,6 +84,20 @@ class MainRouteStructureTest(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertNotEqual(first, changed)
 
+    def test_voicemail_signature_changes_without_reading_message_contents(self) -> None:
+        with TemporaryDirectory() as directory:
+            inbox = Path(directory) / "default" / "100" / "INBOX"
+            inbox.mkdir(parents=True)
+            message = inbox / "msg0000.txt"
+            message.write_text("callerid=Alice\n", encoding="utf-8")
+            first = agent_main._voicemail_signature(directory)
+            second = agent_main._voicemail_signature(directory)
+            message.write_text("callerid=Bob\nlonger=yes\n", encoding="utf-8")
+            changed = agent_main._voicemail_signature(directory)
+
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, changed)
+
     def test_home_payload_is_cached_until_the_snapshot_refreshes(self) -> None:
         original_connector = agent_main.connector
         original_state = agent_main._cached_home_state

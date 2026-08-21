@@ -147,8 +147,15 @@ every PBX snapshot. This preserves the proven `0.6.7-beta` task cadence and
 prevents one-second connector polling from multiplying relay work.
 Encrypted relay identity persistence is change-aware: an unchanged evaluation
 must not repeat AES-GCM encryption or replace the identity file.
-The 30-second Asterisk/Grandstream history check compares CDR size and mtime
-before reading. An unchanged append-only CDR must not be reread or reparsed.
+The 30-second Asterisk/Grandstream history check compares CDR and security-log
+size/mtime plus voicemail-message metadata before reading. Unchanged history
+sources must not be reopened or reparsed.
+The Docker health check uses the small `curl` client rather than starting a new
+Python interpreter every 30 seconds. Keep TLS-aware `/health` behavior in
+`docker/healthcheck.sh`; interpreter startup is visible as container CPU usage.
+Asterisk and Grandstream snapshots reuse one authenticated AMI session. A socket
+or protocol failure closes it immediately; the following poll creates and
+authenticates a fresh session.
 
 The optional Secure Internet Relay runs as another independent outbound task.
 Keep its command allowlist explicit and bounded. Home data uses a separate

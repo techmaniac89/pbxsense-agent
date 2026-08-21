@@ -12,19 +12,24 @@ WORKDIR /app
 COPY --from=jtapi-java /opt/java/openjdk /opt/java/openjdk
 
 COPY requirements.lock .
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY pbxsense_agent ./pbxsense_agent
 COPY jtapi_bridge ./jtapi_bridge
+COPY docker/healthcheck.sh /usr/local/bin/pbxsense-healthcheck
 
 RUN adduser --disabled-password --gecos "" pbxsense \
   && mkdir -p /var/lib/pbxsense-agent /var/log/pbxsense-agent \
+  && chmod 0755 /usr/local/bin/pbxsense-healthcheck \
   && chown -R pbxsense:pbxsense /var/lib/pbxsense-agent /var/log/pbxsense-agent
 USER pbxsense
 
 EXPOSE 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import os, ssl, urllib.request; port=os.environ.get('PBXSENSE_AGENT_PORT', '8765'); tls=bool(os.environ.get('PBXSENSE_AGENT_TLS_CERTFILE')); scheme='https' if tls else 'http'; context=ssl._create_unverified_context() if tls else None; urllib.request.urlopen(f'{scheme}://127.0.0.1:{port}/health', timeout=3, context=context).read()"
+  CMD ["/usr/local/bin/pbxsense-healthcheck"]
 
 CMD ["python", "-m", "pbxsense_agent.server"]

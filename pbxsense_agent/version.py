@@ -1,2 +1,2 @@
-AGENT_VERSION = "0.6.14-beta"
+AGENT_VERSION = "0.6.17-beta"
 AGENT_RELEASE_CHANNEL = "breeze"

@@ -125,6 +125,22 @@ class PulseMappingTest(unittest.TestCase):
             writer.close()
             reader.close()
 
+    def test_ami_session_reuses_an_authenticated_socket(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            client = AmiClient(AgentSettings.from_env())
+        sock = MagicMock()
+        with (
+            patch.object(client, "_connect", return_value=sock) as connect,
+            patch.object(client, "_read_optional_banner", return_value=("Asterisk", None)),
+            patch.object(client, "_login", return_value={"Response": "Success"}),
+        ):
+            self.assertIs(client._session(), sock)
+            self.assertIs(client._session(), sock)
+
+        connect.assert_called_once()
+        client._close_session()
+        sock.close.assert_called_once()
+
     def test_ami_packet_reader_rejects_an_oversized_frame(self) -> None:
         class OversizedSocket:
             def __init__(self) -> None:

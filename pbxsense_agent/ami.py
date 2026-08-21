@@ -33,6 +33,7 @@ class AmiClient:
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
         self._known_trunks: dict[str, AmiEndpoint] = {}
+        self._session_socket: socket.socket | None = None
 
     def snapshot(self) -> AmiSnapshot:
         try:
@@ -65,6 +66,7 @@ class AmiClient:
                 queues=_queues_from_events(events),
             )
         except OSError:
+            self._close_session()
             return AmiSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
@@ -119,10 +121,9 @@ class AmiClient:
         return result
 
     def _read_events(self) -> list[AmiEvent]:
-        with self._connect() as sock:
+        sock = self._session()
+        try:
             sock.settimeout(self._settings.timeout_seconds)
-            self._read_optional_banner(sock)
-            self._login(sock)
 
             events: list[AmiEvent] = []
             events.extend(
@@ -168,8 +169,32 @@ class AmiClient:
                 )
             )
 
-            self._send_action(sock, {"Action": "Logoff"})
             return events
+        except OSError:
+            self._close_session()
+            raise
+
+    def _session(self) -> socket.socket:
+        if self._session_socket is not None:
+            return self._session_socket
+        sock = self._connect()
+        try:
+            sock.settimeout(self._settings.timeout_seconds)
+            self._read_optional_banner(sock)
+            self._login(sock)
+        except OSError:
+            sock.close()
+            raise
+        self._session_socket = sock
+        return sock
+
+    def _close_session(self) -> None:
+        sock, self._session_socket = self._session_socket, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def _connect(self) -> socket.socket:
         host = self._ami_host()

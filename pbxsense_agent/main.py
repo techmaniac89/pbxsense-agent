@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -116,6 +116,8 @@ _cached_home_state: tuple | None = None
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
 _cdr_history_signature: tuple[str, int, int] | None = None
+_voicemail_history_signature: tuple[tuple[str, int, int], ...] | None = None
+_security_history_signature: tuple[str, int, int] | None = None
 _runtime_lock = threading.Lock()
 _runtime_state: dict[str, dict[str, object]] = {}
 _cached_home_payloads: dict[int, dict[str, object]] = {}
@@ -1254,7 +1256,8 @@ def _refresh_home_state() -> tuple:
 
 def _refresh_home_state_locked() -> tuple:
     global _cached_home_state, _cached_history, _history_refreshed_at
-    global _cdr_history_signature
+    global _cdr_history_signature, _security_history_signature
+    global _voicemail_history_signature
     snapshot = connector.snapshot()
     if settings.pbx_type in {"asterisk", "grandstream", "cucm"}:
         now_monotonic = time.monotonic()
@@ -1274,15 +1277,31 @@ def _refresh_home_state_locked() -> tuple:
                 )
             else:
                 cdr_path, voicemail_path = _history_paths()
-                recent_calls, _, _ = _cached_history
+                recent_calls, voicemails, security_events = _cached_history
                 cdr_signature = _file_signature(cdr_path)
                 if _cdr_history_signature != cdr_signature:
                     recent_calls = read_recent_cdr_calls(cdr_path, limit=1000)
                     _cdr_history_signature = cdr_signature
+                voicemail_signature = _voicemail_signature(voicemail_path)
+                if _voicemail_history_signature != voicemail_signature:
+                    voicemails = read_recent_voicemails(voicemail_path)
+                    _voicemail_history_signature = voicemail_signature
+                security_path = _security_log_path()
+                security_signature = _file_signature(security_path)
+                if _security_history_signature != security_signature:
+                    security_events = read_recent_security_events(security_path)
+                    _security_history_signature = security_signature
+                else:
+                    security_cutoff = datetime.now() - timedelta(minutes=15)
+                    security_events = [
+                        event for event in security_events
+                        if event.occurred_at is not None
+                        and event.occurred_at >= security_cutoff
+                    ]
                 _cached_history = (
                     recent_calls,
-                    read_recent_voicemails(voicemail_path),
-                    read_recent_security_events(_security_log_path()),
+                    voicemails,
+                    security_events,
                 )
             _history_refreshed_at = now_monotonic
         recent_calls, voicemails, security_events = _cached_history
@@ -1340,6 +1359,21 @@ def _file_signature(path: str) -> tuple[str, int, int]:
         return (path, stat.st_size, stat.st_mtime_ns)
     except OSError:
         return (path, 0, 0)
+
+
+def _voicemail_signature(path: str) -> tuple[tuple[str, int, int], ...]:
+    """Fingerprint voicemail metadata without reopening message contents."""
+    if not path:
+        return ()
+    root = Path(path)
+    try:
+        entries = []
+        for item in root.glob("**/INBOX/msg*.txt"):
+            stat = item.stat()
+            entries.append((str(item), stat.st_size, stat.st_mtime_ns))
+        return tuple(sorted(entries))
+    except OSError:
+        return ()
 
 
 def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
