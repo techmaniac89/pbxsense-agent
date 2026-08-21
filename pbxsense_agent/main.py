@@ -8,7 +8,6 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
 from datetime import timedelta
 from html import escape
 from pathlib import Path
@@ -104,8 +103,6 @@ LOCAL_WEB_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 10
 LIVE_INTERVAL_SECONDS = 1
 LIVE_HEARTBEAT_INTERVAL_SECONDS = 10
 SNAPSHOT_POLL_INTERVAL_SECONDS = settings.snapshot_poll_seconds
-SNAPSHOT_IDLE_POLL_INTERVAL_SECONDS = settings.snapshot_idle_poll_seconds
-SNAPSHOT_QUIET_SECONDS = settings.snapshot_quiet_seconds
 HISTORY_POLL_INTERVAL_SECONDS = settings.history_poll_seconds
 RELAY_PUBLISH_INTERVAL_SECONDS = 5
 _snapshot_task: asyncio.Task[None] | None = None
@@ -118,57 +115,12 @@ _browser_bootstrap_lock = threading.Lock()
 _cached_home_state: tuple | None = None
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
+_cdr_history_signature: tuple[str, int, int] | None = None
 _runtime_lock = threading.Lock()
 _runtime_state: dict[str, dict[str, object]] = {}
+_cached_home_payloads: dict[int, dict[str, object]] = {}
 RUNTIME_ERROR_LOG_INTERVAL_SECONDS = 60
 WATCHDOG_INTERVAL_SECONDS = 5
-
-
-@dataclass
-class AdaptiveSnapshotPoller:
-    active_seconds: float
-    idle_seconds: float
-    quiet_seconds: float
-    _previous_signature: tuple | None = None
-    _fast_until: float = 0.0
-
-    def observe(self, snapshot: object, now_monotonic: float) -> float:
-        signature = _snapshot_poll_signature(snapshot)
-        changed = (
-            self._previous_signature is None
-            or signature != self._previous_signature
-        )
-        self._previous_signature = signature
-        urgent = (
-            changed
-            or not bool(getattr(snapshot, "reachable", False))
-            or bool(getattr(snapshot, "channels", ()))
-            or any(
-                getattr(queue, "waiting_callers", 0) > 0
-                for queue in getattr(snapshot, "queues", ())
-            )
-        )
-        if urgent:
-            self._fast_until = now_monotonic + self.quiet_seconds
-        if urgent or now_monotonic < self._fast_until:
-            return self.active_seconds
-        return self.idle_seconds
-
-
-def _snapshot_poll_signature(snapshot: object) -> tuple:
-    return (
-        bool(getattr(snapshot, "reachable", False)),
-        tuple(getattr(snapshot, "channels", ())),
-        tuple(getattr(snapshot, "endpoints", ())),
-        tuple(getattr(snapshot, "queues", ())),
-    )
-
-
-_snapshot_poller = AdaptiveSnapshotPoller(
-    active_seconds=SNAPSHOT_POLL_INTERVAL_SECONDS,
-    idle_seconds=SNAPSHOT_IDLE_POLL_INTERVAL_SECONDS,
-    quiet_seconds=SNAPSHOT_QUIET_SECONDS,
-)
 
 
 @app.middleware("http")
@@ -241,11 +193,9 @@ async def stop_relay_publisher() -> None:
 
 async def _snapshot_loop() -> None:
     while True:
-        interval = SNAPSHOT_POLL_INTERVAL_SECONDS
         try:
             state = await asyncio.to_thread(_refresh_home_state)
             snapshot = state[0]
-            interval = _snapshot_poller.observe(snapshot, time.monotonic())
             _record_runtime_result(
                 "snapshot",
                 ok=bool(snapshot.reachable),
@@ -258,7 +208,7 @@ async def _snapshot_loop() -> None:
                 "snapshot", ok=False,
                 error="The snapshot loop failed unexpectedly.", log_exception=True,
             )
-        await asyncio.sleep(interval)
+        await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_SECONDS)
 
 
 async def _relay_publish_loop() -> None:
@@ -388,7 +338,7 @@ def _readiness() -> tuple[bool, str]:
     last_completed = float(snapshot.get("lastCompletedAt", 0.0))
     stale_after = max(
         10.0,
-        settings.snapshot_idle_poll_seconds * 3 + settings.timeout_seconds,
+        settings.snapshot_poll_seconds * 3 + settings.timeout_seconds,
     )
     if last_completed <= 0:
         return False, "The first PBX snapshot has not completed."
@@ -1290,7 +1240,11 @@ def _home_payload(*, moment_hours: int = 24) -> dict:
         if _cached_home_state is None:
             _refresh_home_state_locked()
         state = _cached_home_state
-    return _home_payload_from_state(state, moment_hours=moment_hours)
+        cached = _cached_home_payloads.get(moment_hours)
+        if cached is None:
+            cached = _home_payload_from_state(state, moment_hours=moment_hours)
+            _cached_home_payloads[moment_hours] = cached
+        return cached
 
 
 def _refresh_home_state() -> tuple:
@@ -1300,6 +1254,7 @@ def _refresh_home_state() -> tuple:
 
 def _refresh_home_state_locked() -> tuple:
     global _cached_home_state, _cached_history, _history_refreshed_at
+    global _cdr_history_signature
     snapshot = connector.snapshot()
     if settings.pbx_type in {"asterisk", "grandstream", "cucm"}:
         now_monotonic = time.monotonic()
@@ -1319,8 +1274,13 @@ def _refresh_home_state_locked() -> tuple:
                 )
             else:
                 cdr_path, voicemail_path = _history_paths()
+                recent_calls, _, _ = _cached_history
+                cdr_signature = _file_signature(cdr_path)
+                if _cdr_history_signature != cdr_signature:
+                    recent_calls = read_recent_cdr_calls(cdr_path, limit=1000)
+                    _cdr_history_signature = cdr_signature
                 _cached_history = (
-                    read_recent_cdr_calls(cdr_path, limit=1000),
+                    recent_calls,
                     read_recent_voicemails(voicemail_path),
                     read_recent_security_events(_security_log_path()),
                 )
@@ -1367,7 +1327,19 @@ def _refresh_home_state_locked() -> tuple:
         show_aggregate_tip,
         endpoint_last_active,
     )
+    _cached_home_payloads.clear()
     return _cached_home_state
+
+
+def _file_signature(path: str) -> tuple[str, int, int]:
+    """Return cheap change evidence for an append-oriented history file."""
+    if not path:
+        return ("", 0, 0)
+    try:
+        stat = Path(path).stat()
+        return (path, stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return (path, 0, 0)
 
 
 def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:

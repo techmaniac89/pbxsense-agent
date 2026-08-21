@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -120,6 +121,60 @@ class _SecureExchangeRelay(_RecordingRelay):
 
 
 class RelayTest(unittest.TestCase):
+    def test_unchanged_relay_state_is_not_reencrypted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            identity_path = Path(directory) / "identity.json"
+            relay = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(identity_path),
+                display_name="Test PBX",
+                storage_secret="test-storage-secret",
+            )
+            relay._save()
+            first_envelope = identity_path.read_bytes()
+
+            relay._save()
+
+            self.assertEqual(identity_path.read_bytes(), first_envelope)
+
+    def test_relay_requests_reuse_the_https_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(Path(directory) / "identity.json"),
+                display_name="Test PBX",
+                storage_secret="test-storage-secret",
+            )
+            response = MagicMock(status=200)
+            response.read.return_value = b'{"status":"accepted"}'
+            connection = MagicMock()
+            connection.getresponse.return_value = response
+
+            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=connection) as factory:
+                relay._request("/v1/first", {}, signed=False)
+                relay._request("/v1/second", {}, signed=False)
+
+            factory.assert_called_once_with("relay.example", port=None, timeout=5)
+            self.assertEqual(connection.request.call_count, 2)
+
+    def test_relay_transport_failure_discards_the_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = AgentRelay(
+                url="https://relay.example",
+                identity_path=str(Path(directory) / "identity.json"),
+                display_name="Test PBX",
+                storage_secret="test-storage-secret",
+            )
+            connection = MagicMock()
+            connection.getresponse.side_effect = http.client.RemoteDisconnected()
+
+            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=connection):
+                with self.assertRaises(OSError):
+                    relay._request("/v1/heartbeat", {}, signed=False)
+
+            connection.close.assert_called_once()
+            self.assertIsNone(relay._http_connection)
+
     def test_new_relay_activation_is_signed_and_carries_provisioned_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _ActivationRelay(

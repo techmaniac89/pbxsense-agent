@@ -28,9 +28,11 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_AGENT_PUBLIC_URL` | empty | Canonical root origin embedded in pairing QR codes, such as `https://pbxsense-agent.example:8765`. Required when TLS terminates at a reverse proxy or request host/scheme is not canonical. |
 | `PBXSENSE_EXTENSION_NAMES` | empty | Optional friendly-name map such as `101=Reception,120=Support`. |
 | `PBXSENSE_SNAPSHOT_POLL_SECONDS` | `1` | Fast polling cadence while calls or queue demand are active, the PBX is reconnecting, or state recently changed; clamped to at least 0.5 seconds. |
-| `PBXSENSE_SNAPSHOT_IDLE_POLL_SECONDS` | `5` | Stable-idle PBX polling cadence. It cannot be shorter than the fast cadence; cached app/WebSocket refresh remains one second. |
-| `PBXSENSE_SNAPSHOT_QUIET_SECONDS` | `30` | Stable period after a state change before polling backs off to the idle cadence. |
 | `PBXSENSE_HISTORY_POLL_SECONDS` | `30` | CDR, voicemail, recording, and security-history refresh cadence, clamped to at least 5 seconds. |
+
+The Agent caches Home and Signal serialization until a new snapshot arrives.
+Relay evaluation follows snapshot completion with a one-second stagger and a
+30-second delivery-retry fallback, reducing synchronized idle CPU bursts.
 | `PBXSENSE_ENDPOINT_ACTIVITY_PATH` | `/var/lib/pbxsense-agent/endpoint_activity.json` | Persistent last-active timestamps captured when monitored devices transition offline. Keep this inside the Agent data volume. |
 | `PBXSENSE_ENDPOINT_OUTAGE_CONFIRMATION_SECONDS` | `5` | Continuous unavailable period required before a per-device Health Signal. A lone-phone push is held for another 10 seconds; multi-phone incidents use the 15-second correlation window. |
 | `PBXSENSE_ENDPOINT_RECOVERY_CONFIRMATION_SECONDS` | `15` | Continuous reachable period required before recovery and a later outage notification can be armed. |

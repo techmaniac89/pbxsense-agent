@@ -138,9 +138,17 @@ Grouped updates use unique event IDs for relay idempotency and one stable
 notification tag for Android replacement. The grouped recovery uses that same
 tag so it replaces the outage notification instead of stacking beside it.
 
-The relay presence heartbeat is a separate task. It must remain independent of
-PBX snapshot, history, and signal failures so a slow connector cannot create a
-false Agent-lost notification.
+The relay presence heartbeat is a separate task. Relay requests reuse a verified
+HTTPS connection to avoid repeating TLS setup on every heartbeat. The heartbeat
+must remain independent of PBX snapshot, history, and signal failures so a slow
+connector cannot create a false Agent-lost notification.
+Signal relay evaluation runs independently every five seconds rather than after
+every PBX snapshot. This preserves the proven `0.6.7-beta` task cadence and
+prevents one-second connector polling from multiplying relay work.
+Encrypted relay identity persistence is change-aware: an unchanged evaluation
+must not repeat AES-GCM encryption or replace the identity file.
+The 30-second Asterisk/Grandstream history check compares CDR size and mtime
+before reading. An unchanged append-only CDR must not be reread or reparsed.
 
 The optional Secure Internet Relay runs as another independent outbound task.
 Keep its command allowlist explicit and bounded. Home data uses a separate

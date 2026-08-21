@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import secrets
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +96,13 @@ class AgentRelay:
         )
         self._lock = threading.Lock()
         self._state = self._load()
+        # Leave this unset for the first save so legacy plaintext identities
+        # are still migrated to the encrypted envelope. Later unchanged saves
+        # can skip AES-GCM and filesystem replacement work.
+        self._last_saved_state_fingerprint = ""
         self._protect_storage()
         self._last_heartbeat_at = 0.0
+        self._http_connection: http.client.HTTPConnection | None = None
         self._secure_devices: list[dict[str, object]] = []
         self._secure_devices_refreshed_at = 0.0
 
@@ -874,26 +878,56 @@ class AgentRelay:
                         self._private_key().sign(v2_message)
                     ),
                 })
-        request = urllib.request.Request(f"{self._url}{path}", data=raw, headers=headers, method="POST")
+        parsed = urllib.parse.urlparse(self._url)
+        request_path = f"{parsed.path.rstrip('/')}{path}" or "/"
         try:
-            # __init__ accepts only HTTPS, plus explicit loopback HTTP for development.
-            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:  # nosec B310
-                response_body = response.read(5 * 1024 * 1024 + 1)
-                if len(response_body) > 5 * 1024 * 1024:
-                    raise OSError("Relay response exceeds the 5 MiB safety limit")
-                decoded = json.loads(response_body.decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")[:200]
-            except OSError:
-                detail = ""
-            message = f"Relay returned HTTP {exc.code}"
-            if detail:
-                message += f": {detail}"
-            raise RelayRequestError(exc.code, message) from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+            connection = self._relay_connection(parsed)
+            connection.request("POST", request_path, body=raw, headers=headers)
+            response = connection.getresponse()
+            response_body = response.read(5 * 1024 * 1024 + 1)
+            if len(response_body) > 5 * 1024 * 1024:
+                raise OSError("Relay response exceeds the 5 MiB safety limit")
+            if response.status >= 400:
+                detail = response_body.decode("utf-8", errors="replace")[:200]
+                message = f"Relay returned HTTP {response.status}"
+                if detail:
+                    message += f": {detail}"
+                self._close_relay_connection()
+                raise RelayRequestError(response.status, message)
+            decoded = json.loads(response_body.decode("utf-8"))
+        except RelayRequestError:
+            raise
+        except (http.client.HTTPException, OSError, TimeoutError) as exc:
+            self._close_relay_connection()
             raise OSError("The relay request could not be completed.") from exc
         return decoded if isinstance(decoded, dict) else {}
+
+    def _relay_connection(
+        self,
+        parsed: urllib.parse.ParseResult,
+    ) -> http.client.HTTPConnection:
+        if self._http_connection is not None:
+            return self._http_connection
+        # _validated_relay_url restricts plaintext HTTP to loopback development.
+        connection_type = (
+            http.client.HTTPSConnection
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        self._http_connection = connection_type(
+            parsed.hostname,
+            port=parsed.port,
+            timeout=self._timeout_seconds,
+        )
+        return self._http_connection
+
+    def _close_relay_connection(self) -> None:
+        connection, self._http_connection = self._http_connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                pass
 
     def _private_key(self) -> Ed25519PrivateKey:
         if Ed25519PrivateKey is None or serialization is None:
@@ -956,6 +990,10 @@ class AgentRelay:
                 "PBXSENSE_RELAY_STATE_KEY or PBXSENSE_AGENT_TOKEN is required "
                 "to protect relay identity state"
             )
+        serialized_state = json.dumps(self._state, sort_keys=True).encode("utf-8")
+        state_fingerprint = hashlib.sha256(serialized_state).hexdigest()
+        if state_fingerprint == self._last_saved_state_fingerprint:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             self._path.parent.chmod(0o700)
@@ -963,7 +1001,7 @@ class AgentRelay:
         nonce = secrets.token_bytes(12)
         ciphertext = AESGCM(_relay_state_key(self._storage_secret)).encrypt(
             nonce,
-            json.dumps(self._state, sort_keys=True).encode("utf-8"),
+            serialized_state,
             b"pbxsense-relay-state-v1",
         )
         envelope = {
@@ -975,6 +1013,7 @@ class AgentRelay:
         if os.name != "nt":
             temporary.chmod(0o600)
         temporary.replace(self._path)
+        self._last_saved_state_fingerprint = state_fingerprint
         if os.name != "nt":
             self._path.chmod(0o600)
 

@@ -59,8 +59,6 @@ class AgentSettings:
     grandstream_recordings_path: str = ""
     grandstream_security_log_path: str = ""
     snapshot_poll_seconds: float = 1
-    snapshot_idle_poll_seconds: float = 5
-    snapshot_quiet_seconds: float = 30
     history_poll_seconds: float = 30
     internet_relay_enabled: bool = True
     internet_relay_poll_seconds: float = 15
@@ -207,13 +205,6 @@ class AgentSettings:
             ).strip(),
             snapshot_poll_seconds=max(
                 0.5, _env_float("PBXSENSE_SNAPSHOT_POLL_SECONDS", 1)
-            ),
-            snapshot_idle_poll_seconds=max(
-                max(0.5, _env_float("PBXSENSE_SNAPSHOT_POLL_SECONDS", 1)),
-                _env_float("PBXSENSE_SNAPSHOT_IDLE_POLL_SECONDS", 5),
-            ),
-            snapshot_quiet_seconds=max(
-                0, _env_float("PBXSENSE_SNAPSHOT_QUIET_SECONDS", 30)
             ),
             history_poll_seconds=max(
                 5, _env_float("PBXSENSE_HISTORY_POLL_SECONDS", 30)

@@ -18,7 +18,6 @@ from pbxsense_agent.diagnostics import (
     ami_diagnostic_statuses,
     connector_diagnostic_statuses,
 )
-from pbxsense_agent.pulse import AmiQueue
 
 
 def _request(
@@ -71,37 +70,42 @@ def _websocket(
 
 
 class MainRouteStructureTest(unittest.TestCase):
-    def test_snapshot_poller_slows_only_after_a_stable_quiet_window(self) -> None:
-        snapshot = replace(MockConnector().snapshot(), channels=[], queues=[])
-        poller = agent_main.AdaptiveSnapshotPoller(1, 5, 30)
+    def test_file_signature_changes_only_with_history_file_metadata(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "Master.csv"
+            missing = agent_main._file_signature(str(path))
+            path.write_text("first\n", encoding="utf-8")
+            first = agent_main._file_signature(str(path))
+            second = agent_main._file_signature(str(path))
+            path.write_text("first\nsecond\n", encoding="utf-8")
+            changed = agent_main._file_signature(str(path))
 
-        self.assertEqual(poller.observe(snapshot, 0), 1)
-        self.assertEqual(poller.observe(snapshot, 29), 1)
-        self.assertEqual(poller.observe(snapshot, 30), 5)
+            self.assertEqual(missing, (str(path), 0, 0))
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, changed)
 
-        changed = replace(
-            snapshot,
-            endpoints=[replace(snapshot.endpoints[0], presence="away")],
-        )
-        self.assertEqual(poller.observe(changed, 31), 1)
-        self.assertEqual(poller.observe(changed, 60), 1)
-        self.assertEqual(poller.observe(changed, 61), 5)
+    def test_home_payload_is_cached_until_the_snapshot_refreshes(self) -> None:
+        original_connector = agent_main.connector
+        original_state = agent_main._cached_home_state
+        original_payloads = dict(agent_main._cached_home_payloads)
+        try:
+            agent_main.connector = MockConnector()
+            with agent_main._snapshot_lock:
+                agent_main._cached_home_state = None
+                agent_main._cached_home_payloads.clear()
+            first = agent_main._home_payload()
+            second = agent_main._home_payload()
+            self.assertIs(first, second)
 
-    def test_snapshot_poller_stays_fast_for_live_or_degraded_state(self) -> None:
-        base = MockConnector().snapshot()
-        poller = agent_main.AdaptiveSnapshotPoller(1, 5, 30)
-
-        self.assertEqual(poller.observe(base, 100), 1)
-        idle = replace(base, channels=[], queues=[])
-        self.assertEqual(poller.observe(idle, 131), 1)
-        self.assertEqual(poller.observe(idle, 161), 5)
-        waiting = replace(
-            idle,
-            queues=[AmiQueue(name="support", waiting_callers=1)],
-        )
-        self.assertEqual(poller.observe(waiting, 162), 1)
-        unreachable = replace(idle, reachable=False)
-        self.assertEqual(poller.observe(unreachable, 200), 1)
+            agent_main._refresh_home_state()
+            third = agent_main._home_payload()
+            self.assertIsNot(first, third)
+        finally:
+            agent_main.connector = original_connector
+            with agent_main._snapshot_lock:
+                agent_main._cached_home_state = original_state
+                agent_main._cached_home_payloads.clear()
+                agent_main._cached_home_payloads.update(original_payloads)
 
     def test_refresh_home_state_returns_a_snapshot_tuple(self) -> None:
         # Regression: the snapshot loop reads state[0] to find the snapshot,
