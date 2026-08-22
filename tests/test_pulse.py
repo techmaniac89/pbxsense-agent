@@ -531,6 +531,34 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(second.endpoints[0].health_status, "unknown")
         self.assertIn("temporarily unavailable", second.endpoints[0].health_evidence[-1])
 
+    def test_freeswitch_history_is_cached_between_poll_intervals(self) -> None:
+        settings = replace(
+            AgentSettings.from_env(),
+            mode="freeswitch",
+            pbx_type="freeswitch",
+            history_poll_seconds=30,
+        )
+        client = FreeSwitchClient(settings)
+        with (
+            patch("pbxsense_agent.freeswitch.time.monotonic", return_value=100.0),
+            patch("pbxsense_agent.freeswitch._read_json_cdr_calls", return_value=[]) as calls,
+            patch("pbxsense_agent.freeswitch._read_voicemails", return_value=[]) as voicemail,
+        ):
+            client._history()
+            client._history()
+
+        calls.assert_called_once()
+        voicemail.assert_called_once()
+
+    def test_freeswitch_oversized_cdr_is_skipped(self) -> None:
+        with TemporaryDirectory() as directory:
+            Path(directory, "large.json").write_text(
+                '{"caller":"1001","padding":"' + "x" * 100 + '"}',
+                encoding="utf-8",
+            )
+            with patch("pbxsense_agent.freeswitch.MAX_CDR_JSON_FILE_BYTES", 32):
+                self.assertEqual(_read_json_cdr_calls(directory), [])
+
     def test_yeastar_retains_known_trunk_as_unknown_on_query_failure(self) -> None:
         settings = replace(
             AgentSettings.from_env(), mode="yeastar", pbx_type="yeastar",

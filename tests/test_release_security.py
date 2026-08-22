@@ -47,6 +47,16 @@ class ReleaseSecurityTest(unittest.TestCase):
         self.assertGreaterEqual(source.count("package-ecosystem: pip"), 2)
         self.assertGreaterEqual(source.count("package-ecosystem: docker"), 2)
 
+    def test_relay_deploy_enables_activation_ttl_without_changing_open_enrollment(self) -> None:
+        source = Path("push_relay/deploy_cloud_run.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'ENROLLMENT_MODE="${PBXSENSE_RELAY_ENROLLMENT_MODE:-open}"', source
+        )
+        self.assertIn("gcloud firestore fields ttls update expiresAt", source)
+        self.assertIn("--collection-group activations", source)
+        self.assertIn("--enable-ttl", source)
+
 
 if __name__ == "__main__":
     unittest.main()

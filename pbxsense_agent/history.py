@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import csv
+import fnmatch
+import heapq
 import io
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+
+MAX_CUCM_ENTRIES_SCANNED = 50_000
+MAX_CUCM_CSV_FILE_BYTES = 8 * 1024 * 1024
+MAX_CUCM_ROWS = 20_000
 
 MISSED_CDR_DISPOSITIONS = {"NO ANSWER", "BUSY", "FAILED", "CONGESTION"}
 IVR_REACHED_KIND = "ivr_reached"
@@ -144,19 +151,19 @@ def _cucm_csv_rows(path: str, *, file_limit: int) -> list[dict[str, str]]:
     root = Path(path)
     if not _is_dir(root):
         return []
-    try:
-        files = sorted(
-            (item for item in root.rglob("*") if item.is_file()),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )[:file_limit]
-    except OSError:
-        return []
+    files = _recent_tree_files(root, "*.csv", file_limit)
     rows: list[dict[str, str]] = []
     for item in files:
         try:
-            with item.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-                rows.extend(dict(row) for row in csv.DictReader(handle))
+            with item.open("rb") as handle:
+                raw = handle.read(MAX_CUCM_CSV_FILE_BYTES + 1)
+            if len(raw) > MAX_CUCM_CSV_FILE_BYTES:
+                continue
+            text = raw.decode("utf-8-sig", errors="replace")
+            for row in csv.DictReader(io.StringIO(text, newline="")):
+                rows.append(dict(row))
+                if len(rows) >= MAX_CUCM_ROWS:
+                    return rows
         except (OSError, csv.Error):
             continue
     return rows
@@ -195,9 +202,47 @@ def _count_csv_files(root: Path) -> int:
     if not _is_dir(root):
         return 0
     try:
-        return sum(1 for item in root.rglob("*") if item.is_file())
+        return len(_recent_tree_files(root, "*.csv", MAX_CUCM_ENTRIES_SCANNED))
     except OSError:
         return 0
+
+
+def _recent_tree_files(root: Path, pattern: str, limit: int) -> list[Path]:
+    if limit <= 0:
+        return []
+    newest: list[tuple[float, int, Path]] = []
+    pending = [root]
+    scanned = 0
+    sequence = 0
+    while pending and scanned < MAX_CUCM_ENTRIES_SCANNED:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > MAX_CUCM_ENTRIES_SCANNED:
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False) or not fnmatch.fnmatch(
+                            entry.name.lower(), pattern.lower()
+                        ):
+                            continue
+                        modified = entry.stat(follow_symlinks=False).st_mtime
+                    except OSError:
+                        continue
+                    candidate = (modified, sequence, Path(entry.path))
+                    sequence += 1
+                    if len(newest) < limit:
+                        heapq.heappush(newest, candidate)
+                    elif candidate[:2] > newest[0][:2]:
+                        heapq.heapreplace(newest, candidate)
+        except OSError:
+            continue
+    newest.sort(reverse=True)
+    return [item[2] for item in newest]
 
 
 def _recent_cdr_rows(path: Path, *, limit: int) -> list[list[str]]:

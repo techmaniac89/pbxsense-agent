@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.17"
+RELAY_VERSION = "0.5.18"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -76,6 +76,7 @@ REMOTE_APP_POLL_SECONDS = max(
 CONTROL_EXCHANGE_SECONDS = max(
     60, min(900, int(os.getenv("PBXSENSE_RELAY_CONTROL_EXCHANGE_SECONDS", "300")))
 )
+ADMIN_COOKIE_TTL_SECONDS = 8 * 60 * 60
 
 
 def _bounded_cost_rate(name: str, default: float) -> float:
@@ -240,7 +241,7 @@ async def usage_dashboard_login(request: Request) -> Any:
     response.set_cookie(
         _admin_cookie,
         _admin_cookie_value(),
-        max_age=8 * 60 * 60,
+        max_age=ADMIN_COOKIE_TTL_SECONDS,
         httponly=True,
         secure=True,
         samesite="strict",
@@ -1619,18 +1620,33 @@ def _admin_authenticated(request: Request) -> bool:
     cookie_token = request.cookies.get(_admin_cookie, "")
     return bool(_admin_token) and (
         hmac.compare_digest(header_token, _admin_token)
-        or hmac.compare_digest(cookie_token, _admin_cookie_value())
+        or _admin_cookie_valid(cookie_token)
     )
 
 
-def _admin_cookie_value() -> str:
+def _admin_cookie_value(expires_at: int | None = None) -> str:
     if not _admin_token:
         return ""
-    return hmac.new(
+    expiry = expires_at or int(time.time()) + ADMIN_COOKIE_TTL_SECONDS
+    signature = hmac.new(
         _admin_token.encode("utf-8"),
-        b"pbxsense-relay-admin-cookie-v1",
+        f"pbxsense-relay-admin-cookie-v2:{expiry}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+    return f"{expiry}.{signature}"
+
+
+def _admin_cookie_valid(value: str, now: int | None = None) -> bool:
+    if not _admin_token:
+        return False
+    try:
+        expiry_text, _ = value.split(".", 1)
+        expiry = int(expiry_text)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if expiry <= (int(time.time()) if now is None else now):
+        return False
+    return hmac.compare_digest(value, _admin_cookie_value(expiry))
 
 
 def _require_admin(request: Request) -> None:

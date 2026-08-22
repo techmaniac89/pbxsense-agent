@@ -331,6 +331,26 @@ class RelayTest(unittest.TestCase):
             self.assertEqual(relay.status()["rejectedOutboxItems"], 1)
             self.assertEqual(attempts, 2)
 
+    def test_outbox_coalesces_signal_updates_and_discards_oldest_events_at_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            with (
+                patch("pbxsense_agent.relay.MAX_RELAY_OUTBOX_ITEMS", 2),
+                patch("pbxsense_agent.relay.MAX_RELAY_OUTBOX_BYTES", 1024 * 1024),
+            ):
+                relay._queue("events", {"signalId": "one", "state": "active"})
+                relay._queue("events", {"signalId": "one", "state": "recovered"})
+                relay._queue("events", {"signalId": "two", "state": "active"})
+                relay._queue("events", {"signalId": "three", "state": "active"})
+
+            queued = relay._state["outbox"]
+            self.assertEqual(
+                [item["payload"]["signalId"] for item in queued],
+                ["two", "three"],
+            )
+            self.assertEqual(relay.status()["droppedOutboxItems"], 1)
+            self.assertIn("safety limit", relay.status()["lastOutboxError"])
+
     def test_secure_exchange_requires_replay_protected_signing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             relay = _SecureExchangeRelay(str(Path(directory) / "identity.json"))

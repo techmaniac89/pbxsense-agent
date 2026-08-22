@@ -37,12 +37,20 @@ ENDPOINT_INCIDENT_CORRELATION_SECONDS = 15
 ENDPOINT_INCIDENT_UPDATE_SECONDS = 30
 ENDPOINT_INCIDENT_RECOVERY_SECONDS = 15
 ENDPOINT_INCIDENT_COOLDOWN_SECONDS = 120
+MAX_RELAY_OUTBOX_ITEMS = 500
+MAX_RELAY_OUTBOX_BYTES = 2 * 1024 * 1024
 _FEED_ONLY_LIVE_CALL_KINDS = {
     "call_active",
     "pbx_live_calls_activity",
     "trunk_active",
     "trunk_call_active",
 }
+
+
+def _outbox_bytes(outbox: list[dict[str, object]]) -> int:
+    return len(
+        json.dumps(outbox, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
 
 
 class RelayRequestError(OSError):
@@ -123,6 +131,7 @@ class AgentRelay:
                 self._state.get("device_registration_revision", 0)
             ),
             "rejectedOutboxItems": len(self._state.get("rejected_outbox", [])),
+            "droppedOutboxItems": int(self._state.get("outbox_dropped", 0)),
             "lastOutboxError": str(self._state.get("last_outbox_error", "")),
             "lastActivationError": str(
                 self._state.get("last_activation_error", "")
@@ -815,8 +824,37 @@ class AgentRelay:
                 if item.get("kind") != "devices"
                 or str(item.get("payload", {}).get("fcmToken", "")) != token
             ]
+        elif kind == "events":
+            signal_id = str(payload.get("signalId", ""))
+            if signal_id:
+                outbox[:] = [
+                    item
+                    for item in outbox
+                    if item.get("kind") != "events"
+                    or str(item.get("payload", {}).get("signalId", ""))
+                    != signal_id
+                ]
         outbox.append({"kind": kind, "payload": payload})
+        self._trim_outbox(outbox)
         self._save()
+
+    def _trim_outbox(self, outbox: list[dict[str, object]]) -> None:
+        dropped = 0
+        while len(outbox) > MAX_RELAY_OUTBOX_ITEMS or _outbox_bytes(outbox) > MAX_RELAY_OUTBOX_BYTES:
+            event_index = next(
+                (index for index, item in enumerate(outbox) if item.get("kind") == "events"),
+                0,
+            )
+            outbox.pop(event_index)
+            dropped += 1
+        if dropped:
+            self._state["outbox_dropped"] = int(
+                self._state.get("outbox_dropped", 0)
+            ) + dropped
+            self._state["last_outbox_error"] = (
+                "The oldest queued relay updates were discarded after the durable "
+                "outbox reached its safety limit."
+            )
 
     def _flush(self) -> None:
         outbox = self._state.setdefault("outbox", [])

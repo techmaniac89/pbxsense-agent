@@ -3,11 +3,37 @@ from __future__ import annotations
 import ast
 import hashlib
 import html
+import hmac
+import time
 import unittest
 from pathlib import Path
 
 
 class RelayDashboardTest(unittest.TestCase):
+    def test_admin_cookie_signature_enforces_server_side_expiry(self) -> None:
+        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        module = ast.parse(source)
+        functions = [
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"_admin_cookie_value", "_admin_cookie_valid"}
+        ]
+        namespace = {
+            "hashlib": hashlib,
+            "hmac": hmac,
+            "time": time,
+            "_admin_token": "operator-secret",
+            "ADMIN_COOKIE_TTL_SECONDS": 8 * 60 * 60,
+        }
+        exec(compile(ast.Module(functions, type_ignores=[]), "cookie", "exec"), namespace)
+        cookie = namespace["_admin_cookie_value"](200)
+
+        self.assertTrue(namespace["_admin_cookie_valid"](cookie, 199))
+        self.assertFalse(namespace["_admin_cookie_valid"](cookie, 200))
+        self.assertFalse(namespace["_admin_cookie_valid"](cookie + "tampered", 199))
+        self.assertFalse(namespace["_admin_cookie_valid"]("legacy-signature", 199))
+
     def test_operations_dashboard_renders_complete_metric_sections(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
         module = ast.parse(source)

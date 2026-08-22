@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -223,6 +224,21 @@ class CucmConnectorTest(unittest.TestCase):
             security_events=[], extension_names={}, now=calls[0].started_at,
         )
         self.assertIn("call_quality_degradation", {signal["kind"] for signal in signals})
+
+    def test_cucm_history_skips_oversized_csv_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cdr = Path(directory, "cdr")
+            cmr = Path(directory, "cmr")
+            cdr.mkdir()
+            cmr.mkdir()
+            self._write(cdr / "cdr.csv", [{
+                "callingPartyNumber": "1001",
+                "finalCalledPartyNumber": "2000",
+                "duration": "30",
+                "padding": "x" * 200,
+            }])
+            with patch("pbxsense_agent.history.MAX_CUCM_CSV_FILE_BYTES", 64):
+                self.assertEqual(read_recent_cucm_calls(str(cdr), str(cmr)), [])
 
     @staticmethod
     def _write(path: Path, rows: list[dict[str, str]]) -> None:

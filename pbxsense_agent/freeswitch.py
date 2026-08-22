@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import fnmatch
+import heapq
 import json
+import os
 import re
 import socket
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +20,9 @@ from .version import AGENT_VERSION
 
 MAX_ESL_HEADER_BYTES = 64 * 1024
 MAX_ESL_BODY_BYTES = 16 * 1024 * 1024
+MAX_HISTORY_ENTRIES_SCANNED = 50_000
+MAX_CDR_JSON_FILE_BYTES = 4 * 1024 * 1024
+MAX_VOICEMAIL_METADATA_BYTES = 256 * 1024
 
 
 class FreeSwitchError(OSError):
@@ -35,6 +42,9 @@ class FreeSwitchClient:
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
         self._known_trunks: list[AmiEndpoint] = []
+        self._cached_recent_calls: list[CdrCall] = []
+        self._cached_voicemails: list[VoicemailMessage] = []
+        self._history_refresh_after = 0.0
 
     def snapshot(self) -> AmiSnapshot:
         try:
@@ -49,18 +59,15 @@ class FreeSwitchClient:
                     "FreeSWITCH gateway evidence is temporarily unavailable",
                 )
             endpoints.extend(trunks)
+            recent_calls, voicemails = self._history()
             return AmiSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=channels,
                 endpoints=endpoints,
                 queues=self._queues(),
-                recent_calls=_read_json_cdr_calls(
-                    self._settings.freeswitch_cdr_json_path,
-                ),
-                voicemails=_read_voicemails(
-                    self._settings.freeswitch_voicemail_path,
-                ),
+                recent_calls=recent_calls,
+                voicemails=voicemails,
             )
         except OSError:
             return AmiSnapshot(
@@ -68,6 +75,20 @@ class FreeSwitchClient:
                 agent_version=AGENT_VERSION,
                 error="The FreeSWITCH ESL connection is unavailable.",
             )
+
+    def _history(self) -> tuple[list[CdrCall], list[VoicemailMessage]]:
+        now = time.monotonic()
+        if now >= self._history_refresh_after:
+            self._cached_recent_calls = _read_json_cdr_calls(
+                self._settings.freeswitch_cdr_json_path,
+            )
+            self._cached_voicemails = _read_voicemails(
+                self._settings.freeswitch_voicemail_path,
+            )
+            self._history_refresh_after = now + max(
+                1, self._settings.history_poll_seconds
+            )
+        return list(self._cached_recent_calls), list(self._cached_voicemails)
 
     def diagnostics(self) -> dict:
         result: dict[str, object] = {
@@ -404,7 +425,10 @@ def _read_json_cdr_calls(path: str, *, limit: int = 1000) -> list[CdrCall]:
     calls: list[CdrCall] = []
     for file in files:
         try:
-            data = json.loads(file.read_text(encoding="utf-8", errors="replace"))
+            text = _read_bounded_text(file, MAX_CDR_JSON_FILE_BYTES)
+            if text is None:
+                continue
+            data = json.loads(text)
         except (OSError, json.JSONDecodeError):
             continue
         row = _flatten_json_cdr(data)
@@ -496,26 +520,66 @@ def _cdr_disposition(row: dict[str, Any]) -> str:
 
 
 def _recent_files(root: Path, pattern: str, limit: int) -> list[Path]:
-    try:
-        files = [file for file in root.rglob(pattern) if file.is_file()]
-    except OSError:
+    if limit <= 0:
         return []
-    files.sort(key=lambda file: _mtime(file), reverse=True)
-    return files[:limit]
+    newest: list[tuple[float, int, Path]] = []
+    pending = [root]
+    scanned = 0
+    sequence = 0
+    while pending and scanned < MAX_HISTORY_ENTRIES_SCANNED:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > MAX_HISTORY_ENTRIES_SCANNED:
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False) or not fnmatch.fnmatch(
+                            entry.name, pattern
+                        ):
+                            continue
+                        modified = entry.stat(follow_symlinks=False).st_mtime
+                    except OSError:
+                        continue
+                    candidate = (modified, sequence, Path(entry.path))
+                    sequence += 1
+                    if len(newest) < limit:
+                        heapq.heappush(newest, candidate)
+                    elif candidate[:2] > newest[0][:2]:
+                        heapq.heapreplace(newest, candidate)
+        except OSError:
+            continue
+    newest.sort(reverse=True)
+    return [item[2] for item in newest]
 
 
 def _key_value_file(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    text = _read_bounded_text(path, MAX_VOICEMAIL_METADATA_BYTES)
+    if text is None:
         return result
+    lines = text.splitlines()
     for line in lines:
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
         result[key.strip()] = value.strip().strip('"')
     return result
+
+
+def _read_bounded_text(path: Path, maximum_bytes: int) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(maximum_bytes + 1)
+    except OSError:
+        return None
+    if len(raw) > maximum_bytes:
+        return None
+    return raw.decode("utf-8", errors="replace")
 
 
 def _parse_datetime(raw: str) -> datetime | None:

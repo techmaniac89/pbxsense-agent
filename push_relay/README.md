@@ -143,17 +143,19 @@ The relay additionally enforces:
 
 Ticket enrollment fails startup unless `PBXSENSE_RELAY_TICKET_SECRET` is set,
 and it must differ from the administrator token. Administrative browser
-sessions store a derived, eight-hour HttpOnly cookie rather than the raw admin
-token. Signed Agent mutations include a one-time nonce; replayed requests are
+sessions store an expiry-bearing, signed eight-hour HttpOnly cookie rather than
+the raw admin token. Signed Agent mutations include a one-time nonce; replayed requests are
 rejected even inside the five-minute timestamp window.
 
-Enable Firestore TTL on the `expiresAt` field for the `activationNonces`,
-`secureNonces`, and `rateLimits` collection groups. Nonce documents are
+The deployment script enables Firestore TTL on the `expiresAt` field for the
+`activations` collection group, so expired activation capabilities are removed.
+Also enable TTL for the `activationNonces`, `secureNonces`, and `rateLimits`
+collection groups. Nonce documents are
 authentication state and rate-limit documents are short-lived quota counters;
 both are safe to delete after their enforcement windows.
 
 Deploy compatibility note: Agent `0.6.0-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.17`,
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.18`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -207,7 +209,7 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.17` provides the encrypted Internet Relay data path and
+Relay service `0.5.18` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -231,7 +233,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.17 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.18 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the
@@ -244,7 +246,7 @@ heartbeat, so cost tuning never weakens Agent-down detection.
 
 Open `/admin/usage` and enter the Relay administrator token for the private
 operator dashboard. It shows current fleet presence, the remotely delivered
-policy, per-day counters, and hashed Agent activity. Relay `0.5.17` also shows
+policy, per-day counters, and hashed Agent activity. Relay `0.5.18` also shows
 Firebase acceptance/failure and latency, notification-quota pressure,
 heartbeat-scheduler freshness, remote-snapshot availability, encrypted-data
 coverage, expiring registrations, retention expectations, and a seven-day

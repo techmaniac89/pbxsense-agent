@@ -118,7 +118,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.18-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.19-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 
