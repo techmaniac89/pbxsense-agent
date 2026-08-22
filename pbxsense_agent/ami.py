@@ -25,6 +25,10 @@ class AmiError(OSError):
     pass
 
 
+class AmiActionResponseError(AmiError):
+    """An action-level AMI rejection received on an otherwise valid stream."""
+
+
 class AmiClient:
     name = "asterisk"
     diagnostics_label = "Asterisk AMI"
@@ -265,7 +269,7 @@ class AmiClient:
             if not packet:
                 continue
             if packet.get("Response") == "Error":
-                raise AmiError(
+                raise AmiActionResponseError(
                     f"AMI action {action} failed: "
                     f"{packet.get('Message', 'unsupported action')}"
                 )
@@ -290,7 +294,7 @@ class AmiClient:
                 action=action,
                 complete_event=complete_event,
             )
-        except OSError:
+        except AmiActionResponseError:
             return []
 
     def _read_until_response(self, sock: socket.socket, *, phase: str) -> dict[str, str]:

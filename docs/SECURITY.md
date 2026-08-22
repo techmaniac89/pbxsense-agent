@@ -62,9 +62,13 @@ Successful access creates a long-lived, renewable HttpOnly, SameSite=Strict
 cookie. HTTPS Agent origins also mark the cookie `Secure`.
 
 When a token is set, every protected HTTP and `/live` request must authenticate,
-including requests from localhost, a private LAN, or a VPN. Tokens are accepted
-through Bearer or `X-PBXSense-Token` headers; query-string credentials are
-rejected. The Agent does not enable cross-origin browser access. `GET /health`,
+including requests from localhost, a private LAN, or a VPN. Protected HTTP
+routes accept Bearer or `X-PBXSense-Token` headers; `/live` accepts Bearer or
+the protected browser cookie. Query-string credentials are rejected.
+Cookie-authenticated `/live` WebSockets additionally require the browser's
+exact Agent Origin; native Bearer-authenticated WebSocket clients do not need
+to send an Origin header. The Agent does not enable cross-origin browser
+access. `GET /health`,
 `GET /health/live`, `GET /health/ready`, the favicon, and the token-free
 `/session` bootstrap page are the only
 unauthenticated routes and disclose no PBX state.
@@ -114,7 +118,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.17-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.18-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

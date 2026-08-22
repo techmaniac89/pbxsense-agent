@@ -49,6 +49,7 @@ def _websocket(
     query: bytes = b"",
     headers: list[tuple[bytes, bytes]] | None = None,
     client: tuple[str, int] = ("127.0.0.1", 50000),
+    scheme: str = "ws",
 ) -> WebSocket:
     async def receive() -> dict[str, object]:
         return {"type": "websocket.disconnect", "code": 1000}
@@ -58,7 +59,7 @@ def _websocket(
 
     return WebSocket({
         "type": "websocket",
-        "scheme": "ws",
+        "scheme": scheme,
         "path": "/live",
         "raw_path": b"/live",
         "query_string": query,
@@ -468,12 +469,43 @@ class MainRouteStructureTest(unittest.TestCase):
 
             cookie = agent_main._local_web_cookie_value()
             self.assertTrue(agent_main._websocket_authorized(_websocket(headers=[
-                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode())
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"http://agent.test:8765"),
+            ])))
+            self.assertFalse(agent_main._websocket_authorized(_websocket(headers=[
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"http://attacker.test"),
+            ])))
+            self.assertFalse(agent_main._websocket_authorized(_websocket(headers=[
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"http://agent.test:8765/"),
+            ])))
+            self.assertFalse(agent_main._websocket_authorized(_websocket(headers=[
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
             ])))
             self.assertFalse(agent_main._websocket_authorized(_websocket(
                 query=b"token=test-token",
                 client=("8.8.8.8", 50000),
             )))
+        finally:
+            agent_main.settings = original
+
+    def test_websocket_cookie_uses_the_configured_public_origin(self) -> None:
+        original = agent_main.settings
+        agent_main.settings = replace(
+            original,
+            token="test-token",
+            public_url="https://AGENT.example.test:443",
+        )
+        try:
+            cookie = agent_main._local_web_cookie_value()
+            headers = [
+                (b"cookie", f"{agent_main.LOCAL_WEB_COOKIE}={cookie}".encode()),
+                (b"origin", b"https://agent.example.test"),
+            ]
+            self.assertTrue(agent_main._websocket_authorized(
+                _websocket(headers=headers, scheme="wss")
+            ))
         finally:
             agent_main.settings = original
 

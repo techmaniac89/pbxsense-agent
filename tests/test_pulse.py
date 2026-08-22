@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from pbxsense_agent.ami import (
+    AmiActionResponseError,
     AmiClient,
     AmiError,
     AmiEvent,
@@ -139,6 +140,40 @@ class PulseMappingTest(unittest.TestCase):
 
         connect.assert_called_once()
         client._close_session()
+        sock.close.assert_called_once()
+
+    def test_optional_ami_action_rejection_keeps_the_session_usable(self) -> None:
+        client = AmiClient.__new__(AmiClient)
+        sock = MagicMock()
+        with patch.object(
+            client,
+            "_collect_action_events",
+            side_effect=AmiActionResponseError("unsupported action"),
+        ):
+            self.assertEqual(
+                client._collect_optional_action_events(
+                    sock,
+                    action="PJSIPShowEndpoints",
+                    complete_event="EndpointListComplete",
+                ),
+                [],
+            )
+        sock.close.assert_not_called()
+
+    def test_optional_ami_transport_failure_discards_the_persistent_session(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            client = AmiClient(AgentSettings.from_env())
+        sock = MagicMock()
+        client._session_socket = sock
+        with patch.object(
+            client,
+            "_collect_action_events",
+            side_effect=[[], AmiError("timed out")],
+        ):
+            with self.assertRaisesRegex(AmiError, "timed out"):
+                client._read_events()
+
+        self.assertIsNone(client._session_socket)
         sock.close.assert_called_once()
 
     def test_ami_packet_reader_rejects_an_oversized_frame(self) -> None:

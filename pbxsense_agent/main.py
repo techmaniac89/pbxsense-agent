@@ -1916,17 +1916,53 @@ def _websocket_authorized(websocket: WebSocket) -> bool:
         return True
     authorization = websocket.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
+        return hmac.compare_digest(authorization[7:].strip(), settings.token)
+    cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
+    client_host = websocket.client.host if websocket.client else ""
+    return (
+        is_private_or_loopback_host(client_host)
+        and hmac.compare_digest(cookie, _local_web_cookie_value())
+        and _websocket_origin_allowed(websocket)
+    )
+
+
+def _websocket_origin_allowed(websocket: WebSocket) -> bool:
+    """Require the browser cookie to come from the Agent's exact HTTP origin."""
+    supplied = websocket.headers.get("origin", "")
+    if not supplied:
+        return False
+    if settings.public_url:
+        expected = settings.public_url
     else:
-        token = ""
-        cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
-        client_host = websocket.client.host if websocket.client else ""
-        if (
-            is_private_or_loopback_host(client_host)
-            and hmac.compare_digest(cookie, _local_web_cookie_value())
-        ):
-            token = settings.token
-    return hmac.compare_digest(token, settings.token)
+        scheme = "https" if websocket.url.scheme == "wss" else "http"
+        expected = f"{scheme}://{websocket.url.netloc}"
+    supplied_origin = _normalized_http_origin(supplied)
+    expected_origin = _normalized_http_origin(expected)
+    return supplied_origin is not None and supplied_origin == expected_origin
+
+
+def _normalized_http_origin(value: str) -> tuple[str, str, int] | None:
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return (
+        parsed.scheme,
+        parsed.hostname.lower(),
+        port or (443 if parsed.scheme == "https" else 80),
+    )
 
 
 def _pairing_payload(request: Request) -> str:
