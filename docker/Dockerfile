@@ -1,4 +1,4 @@
-FROM eclipse-temurin:8-jre@sha256:058a4f63a2338710054e905f88cd50e843173124b50a921df83e77506af6fc82 AS jtapi-java
+FROM eclipse-temurin:26-jre@sha256:0995fcafb64b246eb9acb44bd3bd4df63e5e26c8e3af66a3f623bea2e4d9e27f AS jtapi-java
 
 FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
