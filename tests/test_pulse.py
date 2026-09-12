@@ -27,6 +27,7 @@ from pbxsense_agent.connectors import connector_for_settings
 from pbxsense_agent.freeswitch import (
     FreeSwitchClient,
     FreeSwitchError,
+    FreeSwitchReply,
     _channel_from_row,
     _first_integer,
     _pipe_first_column,
@@ -203,6 +204,59 @@ class PulseMappingTest(unittest.TestCase):
         finally:
             writer.close()
             reader.close()
+
+    def test_freeswitch_authentication_accepts_reply_text_header(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"FREESWITCH_ESL_PASSWORD": "secret"},
+            clear=True,
+        ):
+            client = FreeSwitchClient(AgentSettings.from_env())
+        sock = MagicMock()
+        with (
+            patch.object(
+                client,
+                "_read_reply",
+                side_effect=(
+                    FreeSwitchReply({"content-type": "auth/request"}, ""),
+                    FreeSwitchReply(
+                        {
+                            "content-type": "command/reply",
+                            "reply-text": "+OK accepted",
+                        },
+                        "",
+                    ),
+                ),
+            ),
+            patch.object(client, "_send") as send,
+        ):
+            client._authenticate(sock)
+
+        send.assert_called_once_with(sock, "auth secret")
+
+    def test_freeswitch_authentication_rejects_error_reply_text_header(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"FREESWITCH_ESL_PASSWORD": "wrong"},
+            clear=True,
+        ):
+            client = FreeSwitchClient(AgentSettings.from_env())
+        with patch.object(
+            client,
+            "_read_reply",
+            side_effect=(
+                FreeSwitchReply({"content-type": "auth/request"}, ""),
+                FreeSwitchReply(
+                    {
+                        "content-type": "command/reply",
+                        "reply-text": "-ERR invalid",
+                    },
+                    "",
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(FreeSwitchError, "authentication failed"):
+                client._authenticate(MagicMock())
 
     def test_gui_pbx_names_normalize_to_engine_connectors(self) -> None:
         self.assertEqual(_normalize_pbx_type("freepbx"), "asterisk")

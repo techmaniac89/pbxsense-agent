@@ -225,7 +225,8 @@ class FreeSwitchClient:
             raise FreeSwitchError("FreeSWITCH ESL password is not configured")
         self._send(sock, f"auth {self._settings.freeswitch_password}")
         reply = self._read_reply(sock, phase="FreeSWITCH ESL auth")
-        if "+OK" not in reply.body:
+        reply_text = reply.headers.get("reply-text", "")
+        if "+OK" not in reply_text and "+OK" not in reply.body:
             raise FreeSwitchError("FreeSWITCH ESL authentication failed")
 
     def _api(self, sock: socket.socket, command: str) -> str:
