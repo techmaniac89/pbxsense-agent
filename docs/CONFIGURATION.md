@@ -183,6 +183,10 @@ active.
 | `FREESWITCH_RECORDINGS_PATH` | empty | Optional local FreeSWITCH recording root visible to the Agent. |
 | `FREESWITCH_FILES_HOST_PATH` | `../freeswitch` | Generic Docker staging root, relative to `docker/`, mounted read-only by `docker/docker-compose.freeswitch.yml`; expected children are `cdr/`, `voicemail/`, and `recordings/`. FusionPBX Docker named volumes require the separate layout documented in `INSTALL.md`. |
 
+For the standard native Agent installation, configure the first three paths to
+their real FreeSWITCH host locations and ignore `FREESWITCH_FILES_HOST_PATH`.
+That staging variable exists only for the optional containerized Agent.
+
 ## Yeastar P-Series Settings
 
 | Variable | Default | Description |

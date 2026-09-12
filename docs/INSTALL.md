@@ -263,6 +263,10 @@ default ESL password prompt. It does not edit FreeSWITCH configuration.
 
 FusionPBX uses the FreeSWITCH connector.
 
+The standard deployment is a native Agent installation on the PBX host. Like an
+Asterisk-based PBX, it reads PBX history and voicemail directly from local
+filesystem paths and needs no Docker volume mapping.
+
 Set `FREESWITCH_CDR_JSON_PATH` only when `mod_json_cdr` writes local JSON CDR
 files visible to the Agent. The installer detects common local JSON CDR
 directories and offers the first one as the default. Event Socket itself does
@@ -474,14 +478,15 @@ ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
 ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 ```
 
-For the generic FreeSWITCH override, `FREESWITCH_FILES_HOST_PATH` is a prepared
+The following applies only when the Agent runs in Docker. For the generic
+FreeSWITCH override, `FREESWITCH_FILES_HOST_PATH` is a prepared
 root containing `cdr/`, `voicemail/`, and `recordings/`:
 
 ```text
 FREESWITCH_FILES_HOST_PATH=../freeswitch
 ```
 
-This prepared-root convention is not FusionPBX Docker's native storage layout.
+This Docker prepared-root convention is not FusionPBX Docker's native storage layout.
 FusionPBX commonly uses separate `freeswitch_lib` and `freeswitch_log` named
 volumes. To consume CDR written directly under `/var/log/freeswitch`, add the
 log volume to the Agent service:

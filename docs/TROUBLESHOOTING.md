@@ -109,7 +109,9 @@ appear instead of relying only on the sample configuration comment. Diagnostics 
 `cdrJsonEnabled`, `cdrJsonReadable`, and `cdrRecentRecordsReadable`; the last
 value must become non-zero after a completed test call.
 
-When the Agent uses the generic Docker override, set
+For a native Agent installation, set `FREESWITCH_CDR_JSON_PATH` directly to the
+FreeSWITCH host directory containing the generated files; no volume mapping is
+involved. Only when the Agent uses the generic Docker override, set
 `FREESWITCH_FILES_HOST_PATH` to a prepared host directory containing a `cdr/`
 child. A FusionPBX Docker deployment commonly keeps `/var/log/freeswitch` in a
 named `freeswitch_log` volume instead. Mount that volume read-only into the Agent

@@ -221,9 +221,10 @@ FREESWITCH_VOICEMAIL_PATH=/var/lib/freeswitch/storage/voicemail
 
 Those paths are disabled by default because FreeSWITCH CDR and voicemail storage
 layout depends on enabled modules and distribution packaging.
-Completed CDR is file-backed and is not obtained through ESL. A remote or
-containerized Agent therefore needs a read-only mount or synchronized copy of
-the `mod_json_cdr` output directory. The sample module configuration describes
+Completed CDR is file-backed and is not obtained through ESL. The standard
+native Agent installation reads the `mod_json_cdr` output directory directly,
+as it does with filesystem history on Asterisk. A remote or containerized Agent
+instead needs a read-only mount or synchronized copy. The sample module configuration describes
 `log-dir` as a base directory, but builds can write `*.cdr.json` directly into
 that directory. Point `FREESWITCH_CDR_JSON_PATH` at whichever directory actually
 contains the files; do not assume that a `json_cdr/` child exists.

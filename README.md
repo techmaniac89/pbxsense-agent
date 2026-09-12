@@ -456,7 +456,9 @@ ESL, so `mod_json_cdr` output must be directly readable or mounted read-only
 into the Agent container. `FREESWITCH_CDR_JSON_PATH` must name the directory
 that actually contains the generated `*.json` or `*.cdr.json` files; with
 `log-dir=/var/log/freeswitch`, that may be the log directory itself rather than
-a `json_cdr/` child.
+a `json_cdr/` child. A native Agent installation reads these paths directly and
+is the standard deployment. Bind mounts or named volumes are needed only when
+the Agent itself runs in Docker.
 
 ### GUI PBX Distributions
 
@@ -712,10 +714,10 @@ CUCM_HISTORY_HOST_PATH=../cucm-history
 CUCM_JTAPI_HOST_PATH=../vendor/jtapi
 ```
 
-The generic FreeSWITCH override expects a prepared root containing `cdr/`,
-`voicemail/`, and `recordings/`. FusionPBX Docker commonly stores logs and
-runtime data in separate named volumes instead; see `docs/INSTALL.md` before
-using that layout.
+For the optional Docker deployment, the generic FreeSWITCH override expects a
+prepared root containing `cdr/`, `voicemail/`, and `recordings/`. FusionPBX
+Docker commonly stores logs and runtime data in separate named volumes instead;
+see `docs/INSTALL.md` before using that exceptional layout.
 Grandstream expects `cdr/Master.csv`, `voicemail/`, `recordings/`, and
 optionally `security/`. CUCM history and JTAPI use their independent roots.
 All of these PBX inputs are mounted read-only.
