@@ -205,7 +205,9 @@ The installer tries to read the password from:
 
 If the connector can authenticate, it reads `show channels as json` for live
 calls and `show registrations as json` for registered Sofia users. This keeps
-idle registered extensions visible in People. When `mod_callcenter` is loaded,
+idle registered extensions visible in People. Live-channel discovery accepts
+only internal Sofia and `user/` legs, so external caller IDs are not presented
+as temporary extensions in People. When `mod_callcenter` is loaded,
 the connector uses `callcenter_config queue list` and `queue count members` for
 read-only waiting counts. These supplemental commands are optional and do not
 make the core connector unreachable when unavailable.
@@ -219,6 +221,9 @@ FREESWITCH_VOICEMAIL_PATH=/var/lib/freeswitch/storage/voicemail
 
 Those paths are disabled by default because FreeSWITCH CDR and voicemail storage
 layout depends on enabled modules and distribution packaging.
+Completed CDR is file-backed and is not obtained through ESL. A remote or
+containerized Agent therefore needs a read-only mount or synchronized copy of
+the `mod_json_cdr` output directory.
 
 ## Yeastar P-Series Notes
 

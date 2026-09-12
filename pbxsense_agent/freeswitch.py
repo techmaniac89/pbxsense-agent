@@ -91,6 +91,8 @@ class FreeSwitchClient:
         return list(self._cached_recent_calls), list(self._cached_voicemails)
 
     def diagnostics(self) -> dict:
+        cdr_enabled = bool(self._settings.freeswitch_cdr_json_path.strip())
+        cdr_readable = _is_dir(self._settings.freeswitch_cdr_json_path)
         result: dict[str, object] = {
             "pbxType": "freeswitch",
             "host": self._settings.freeswitch_host,
@@ -100,7 +102,13 @@ class FreeSwitchClient:
             "loginAccepted": False,
             "commandAccepted": False,
             "cdrJsonPath": self._settings.freeswitch_cdr_json_path,
-            "cdrJsonReadable": _is_dir(self._settings.freeswitch_cdr_json_path),
+            "cdrJsonEnabled": cdr_enabled,
+            "cdrJsonReadable": cdr_readable,
+            "cdrRecentRecordsReadable": (
+                len(_read_json_cdr_calls(self._settings.freeswitch_cdr_json_path, limit=5))
+                if cdr_readable
+                else 0
+            ),
             "voicemailPath": self._settings.freeswitch_voicemail_path,
             "voicemailPathReadable": _is_dir(self._settings.freeswitch_voicemail_path),
         }
@@ -287,6 +295,12 @@ class FreeSwitchClient:
     def _endpoints_from_channels(self, channels: list[AmiChannel]) -> list[AmiEndpoint]:
         endpoints: dict[str, AmiEndpoint] = {}
         for channel in channels:
+            # A FreeSWITCH call normally has both an internal phone leg and an
+            # external gateway leg.  Only extension-facing channel types belong
+            # in People; otherwise an inbound caller number appears as a
+            # temporary extension for the duration of the call.
+            if not _is_extension_channel(channel.channel):
+                continue
             endpoint = channel.endpoint or channel.extension
             if not endpoint:
                 continue
@@ -635,6 +649,11 @@ def _endpoint_from_channel(value: str) -> str:
         return value
     endpoint = value.rsplit("/", 1)[1]
     return endpoint.split("@", 1)[0].split("-", 1)[0]
+
+
+def _is_extension_channel(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized.startswith("sofia/internal/") or normalized.startswith("user/")
 
 
 def _string(row: dict[str, Any], *keys: str) -> str:

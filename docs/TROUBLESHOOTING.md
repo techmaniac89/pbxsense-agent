@@ -100,6 +100,19 @@ Check the Event Socket password in:
 
 Then update `FREESWITCH_ESL_PASSWORD` and restart the Agent.
 
+ESL provides live calls but not completed call history. For CDR, load and
+configure FreeSWITCH `mod_json_cdr`, then set `FREESWITCH_CDR_JSON_PATH` to its
+local output directory. Common locations are `/var/log/freeswitch/json_cdr`,
+`/var/log/freeswitch/cdr-json`, and `/var/log/cdr-json`. Diagnostics reports
+`cdrJsonEnabled`, `cdrJsonReadable`, and `cdrRecentRecordsReadable`; the last
+value must become non-zero after a completed test call.
+
+When the Agent runs in Docker, the path must be mounted into the container. Set
+`FREESWITCH_FILES_HOST_PATH` to a host directory containing a `cdr/` child, or
+adjust both the bind mount and `FREESWITCH_CDR_JSON_PATH`. When FreeSWITCH is on
+another machine, its CDR directory must be securely shared or synchronized to
+the Agent host; ESL access alone cannot retrieve historical CDR.
+
 ## Yeastar API Checks
 
 Open `/diagnostics` and check `tokenAccepted` and `apiReachable`. If either is

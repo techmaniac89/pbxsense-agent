@@ -272,7 +272,11 @@ configure_freeswitch_env() {
   prompt_value FREESWITCH_ESL_HOST "FreeSWITCH ESL host" "${FREESWITCH_ESL_HOST:-127.0.0.1}"
   prompt_value FREESWITCH_ESL_PORT "FreeSWITCH ESL port" "${FREESWITCH_ESL_PORT:-8021}"
   prompt_secret FREESWITCH_ESL_PASSWORD "FreeSWITCH ESL password" "${FREESWITCH_ESL_PASSWORD:-$(detect_freeswitch_password || true)}"
-  prompt_value FREESWITCH_CDR_JSON_PATH "FreeSWITCH JSON CDR folder (optional)" "${FREESWITCH_CDR_JSON_PATH:-}"
+  cdr_path="$(first_existing_path \
+    /var/log/freeswitch/json_cdr \
+    /var/log/freeswitch/cdr-json \
+    /var/log/cdr-json)"
+  prompt_value FREESWITCH_CDR_JSON_PATH "FreeSWITCH JSON CDR folder (optional)" "${FREESWITCH_CDR_JSON_PATH:-$cdr_path}"
   prompt_value FREESWITCH_VOICEMAIL_PATH "FreeSWITCH voicemail metadata folder (optional)" "${FREESWITCH_VOICEMAIL_PATH:-}"
   prompt_value FREESWITCH_RECORDINGS_PATH "FreeSWITCH recordings folder (optional)" "${FREESWITCH_RECORDINGS_PATH:-}"
 }

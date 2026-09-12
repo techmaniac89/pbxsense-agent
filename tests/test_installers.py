@@ -75,6 +75,13 @@ class InstallerStructureTest(unittest.TestCase):
             common,
         )
 
+    def test_freeswitch_setup_detects_common_json_cdr_directories(self) -> None:
+        common = Path("scripts/install_common.sh").read_text(encoding="utf-8")
+
+        self.assertIn("/var/log/freeswitch/json_cdr", common)
+        self.assertIn("/var/log/freeswitch/cdr-json", common)
+        self.assertIn("/var/log/cdr-json", common)
+
     def test_docker_port_is_consistent_with_agent_port_setting(self) -> None:
         dockerfile = Path("docker/Dockerfile").read_text(encoding="utf-8")
         healthcheck = Path("docker/healthcheck.sh").read_text(encoding="utf-8")

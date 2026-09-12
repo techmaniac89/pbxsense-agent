@@ -258,6 +258,35 @@ class PulseMappingTest(unittest.TestCase):
             with self.assertRaisesRegex(FreeSwitchError, "authentication failed"):
                 client._authenticate(MagicMock())
 
+    def test_freeswitch_diagnostics_report_readable_cdr_records(self) -> None:
+        with TemporaryDirectory() as directory:
+            Path(directory, "call.json").write_text(
+                '{"variables":{"caller_id_number":"101",'
+                '"destination_number":"102","hangup_cause":"NORMAL_CLEARING"}}',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "PBXSENSE_PBX_TYPE": "freeswitch",
+                    "FREESWITCH_ESL_PASSWORD": "secret",
+                    "FREESWITCH_CDR_JSON_PATH": directory,
+                },
+                clear=True,
+            ):
+                client = FreeSwitchClient(AgentSettings.from_env())
+            with (
+                patch.object(client, "_connect") as connect,
+                patch.object(client, "_authenticate"),
+                patch.object(client, "_api", return_value="+OK"),
+            ):
+                connect.return_value.__enter__.return_value = MagicMock()
+                diagnostics = client.diagnostics()
+
+        self.assertTrue(diagnostics["cdrJsonEnabled"])
+        self.assertTrue(diagnostics["cdrJsonReadable"])
+        self.assertEqual(diagnostics["cdrRecentRecordsReadable"], 1)
+
     def test_gui_pbx_names_normalize_to_engine_connectors(self) -> None:
         self.assertEqual(_normalize_pbx_type("freepbx"), "asterisk")
         self.assertEqual(_normalize_pbx_type("issabel"), "asterisk")
@@ -732,6 +761,32 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(channel.caller, "Reception")
         self.assertEqual(channel.caller_number, "101")
         self.assertEqual(channel.linked_id, "bridge-1")
+
+    def test_freeswitch_people_exclude_external_caller_channel_legs(self) -> None:
+        client = object.__new__(FreeSwitchClient)
+        endpoints = client._endpoints_from_channels(
+            [
+                AmiChannel(
+                    channel="sofia/external/2105550100@carrier.example",
+                    extension="101",
+                    caller="2105550100",
+                    connected="101",
+                    state="CS_EXECUTE",
+                    endpoint="2105550100",
+                ),
+                AmiChannel(
+                    channel="sofia/internal/101@pbx.example",
+                    extension="2105550100",
+                    caller="Reception",
+                    connected="2105550100",
+                    state="CS_EXECUTE",
+                    endpoint="101",
+                ),
+            ]
+        )
+
+        self.assertEqual([endpoint.extension for endpoint in endpoints], ["101"])
+        self.assertEqual(endpoints[0].active_channels, 1)
 
     def test_freeswitch_callcenter_queue_output_maps_waiting_count(self) -> None:
         raw = "name|strategy|moh_sound\nsupport@default|longest-idle-agent|moh\n"
