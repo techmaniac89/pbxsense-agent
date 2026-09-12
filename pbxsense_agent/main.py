@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from .connectors import connector_for_settings
 from .cucm import enrich_cucm_trunks_with_history

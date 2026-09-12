@@ -178,10 +178,10 @@ active.
 | `FREESWITCH_ESL_HOST` | `127.0.0.1` | Event Socket host. |
 | `FREESWITCH_ESL_PORT` | `8021` | Event Socket port. |
 | `FREESWITCH_ESL_PASSWORD` | empty | Event Socket password. |
-| `FREESWITCH_CDR_JSON_PATH` | empty | Optional local or read-only mounted `mod_json_cdr` folder visible to the Agent; ESL alone does not provide completed CDR. |
+| `FREESWITCH_CDR_JSON_PATH` | empty | Directory containing `mod_json_cdr` `*.json`/`*.cdr.json` files, either local or mounted read-only; this can be the configured `log-dir` itself. ESL alone does not provide completed CDR. |
 | `FREESWITCH_VOICEMAIL_PATH` | empty | Optional local FreeSWITCH voicemail metadata folder visible to the Agent. |
 | `FREESWITCH_RECORDINGS_PATH` | empty | Optional local FreeSWITCH recording root visible to the Agent. |
-| `FREESWITCH_FILES_HOST_PATH` | `../freeswitch` | Docker-only host root, relative to `docker/`, mounted read-only by `docker/docker-compose.freeswitch.yml`; expected children are `cdr/`, `voicemail/`, and `recordings/`. |
+| `FREESWITCH_FILES_HOST_PATH` | `../freeswitch` | Generic Docker staging root, relative to `docker/`, mounted read-only by `docker/docker-compose.freeswitch.yml`; expected children are `cdr/`, `voicemail/`, and `recordings/`. FusionPBX Docker named volumes require the separate layout documented in `INSTALL.md`. |
 
 ## Yeastar P-Series Settings
 

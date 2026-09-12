@@ -102,16 +102,32 @@ Then update `FREESWITCH_ESL_PASSWORD` and restart the Agent.
 
 ESL provides live calls but not completed call history. For CDR, load and
 configure FreeSWITCH `mod_json_cdr`, then set `FREESWITCH_CDR_JSON_PATH` to its
-local output directory. Common locations are `/var/log/freeswitch/json_cdr`,
-`/var/log/freeswitch/cdr-json`, and `/var/log/cdr-json`. Diagnostics reports
+actual output directory. Common locations are `/var/log/freeswitch`,
+`/var/log/freeswitch/json_cdr`, `/var/log/freeswitch/cdr-json`, and
+`/var/log/cdr-json`. Check where recent `*.json` or `*.cdr.json` files really
+appear instead of relying only on the sample configuration comment. Diagnostics reports
 `cdrJsonEnabled`, `cdrJsonReadable`, and `cdrRecentRecordsReadable`; the last
 value must become non-zero after a completed test call.
 
-When the Agent runs in Docker, the path must be mounted into the container. Set
-`FREESWITCH_FILES_HOST_PATH` to a host directory containing a `cdr/` child, or
-adjust both the bind mount and `FREESWITCH_CDR_JSON_PATH`. When FreeSWITCH is on
+When the Agent uses the generic Docker override, set
+`FREESWITCH_FILES_HOST_PATH` to a prepared host directory containing a `cdr/`
+child. A FusionPBX Docker deployment commonly keeps `/var/log/freeswitch` in a
+named `freeswitch_log` volume instead. Mount that volume read-only into the Agent
+and set `FREESWITCH_CDR_JSON_PATH` to the mounted log root. When FreeSWITCH is on
 another machine, its CDR directory must be securely shared or synchronized to
 the Agent host; ESL access alone cannot retrieve historical CDR.
+
+If `cdrJsonReadable` is `true` but `cdrRecentRecordsReadable` remains zero,
+verify both the module and its output from the FreeSWITCH container:
+
+```bash
+docker exec fusionpbx-freeswitch fs_cli -x "module_exists mod_json_cdr"
+docker exec fusionpbx-freeswitch find /var/log/freeswitch \
+  -type f -name "*.json"
+```
+
+The first command must return `true`. The second must show a file after a call
+ends. No CDR is written for calls completed before `mod_json_cdr` was enabled.
 
 ## Yeastar API Checks
 

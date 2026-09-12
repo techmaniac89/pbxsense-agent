@@ -71,6 +71,12 @@ def _websocket(
 
 
 class MainRouteStructureTest(unittest.TestCase):
+    def test_favicon_returns_svg_response(self) -> None:
+        response = agent_main.favicon()
+
+        self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn(b"<svg", response.body)
+
     def test_file_signature_changes_only_with_history_file_metadata(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "Master.csv"

@@ -266,7 +266,9 @@ FusionPBX uses the FreeSWITCH connector.
 Set `FREESWITCH_CDR_JSON_PATH` only when `mod_json_cdr` writes local JSON CDR
 files visible to the Agent. The installer detects common local JSON CDR
 directories and offers the first one as the default. Event Socket itself does
-not expose completed call history. Set `FREESWITCH_VOICEMAIL_PATH` only when
+not expose completed call history. Depending on the FreeSWITCH build,
+`mod_json_cdr` may write `*.cdr.json` directly in its configured `log-dir`; use
+the directory that actually contains the files. Set `FREESWITCH_VOICEMAIL_PATH` only when
 FreeSWITCH voicemail metadata files are visible to the Agent.
 
 The connector reads registered Sofia users with `show registrations as json`,
@@ -472,12 +474,43 @@ ASTERISK_LOGS_HOST_PATH=../../asterisk/logs
 ASTERISK_SPOOL_HOST_PATH=../../asterisk/spool
 ```
 
-For FreeSWITCH/FusionPBX, `FREESWITCH_FILES_HOST_PATH` is a root containing
-`cdr/`, `voicemail/`, and `recordings/`:
+For the generic FreeSWITCH override, `FREESWITCH_FILES_HOST_PATH` is a prepared
+root containing `cdr/`, `voicemail/`, and `recordings/`:
 
 ```text
 FREESWITCH_FILES_HOST_PATH=../freeswitch
 ```
+
+This prepared-root convention is not FusionPBX Docker's native storage layout.
+FusionPBX commonly uses separate `freeswitch_lib` and `freeswitch_log` named
+volumes. To consume CDR written directly under `/var/log/freeswitch`, add the
+log volume to the Agent service:
+
+```yaml
+services:
+  pbxsense-agent:
+    volumes:
+      - freeswitch_lib:/var/lib/pbxsense-agent/freeswitch:ro
+      - freeswitch_log:/var/lib/pbxsense-agent/freeswitch-log:ro
+
+volumes:
+  freeswitch_lib:
+    external: true
+    name: fusionpbx-docker_freeswitch_lib
+  freeswitch_log:
+    external: true
+    name: fusionpbx-docker_freeswitch_log
+```
+
+Then use the container-visible paths:
+
+```text
+FREESWITCH_CDR_JSON_PATH=/var/lib/pbxsense-agent/freeswitch-log
+FREESWITCH_VOICEMAIL_PATH=/var/lib/pbxsense-agent/freeswitch/storage/voicemail
+```
+
+Volume names can differ when the FusionPBX Compose project has another name;
+confirm them with `docker volume ls` or `docker inspect fusionpbx-freeswitch`.
 
 For Grandstream UCM, `GRANDSTREAM_UCM_FILES_HOST_PATH` is a root containing
 `cdr/Master.csv`, `voicemail/`, `recordings/`, and optionally `security/`:
