@@ -192,7 +192,8 @@ changes.
 
 ## Automated GitHub Releases
 
-Pushing to `main` triggers `.github/workflows/release-agent.yml`. It:
+Pushing to `main` or opening a pull request targeting it triggers
+`.github/workflows/release-agent.yml`. It:
 
 1. reads `AGENT_VERSION` from `pbxsense_agent/version.py`;
 2. detects an existing `agent-v<version>` release and skips publishing it;
@@ -204,6 +205,10 @@ Pushing to `main` triggers `.github/workflows/release-agent.yml`. It:
 When the Agent version already has a tag or release, validation and packaging
 still run and the Publish job exits successfully without replacing the existing
 release.
+
+On pull requests, the `Test and package` job runs in full and the Publish job is
+skipped unconditionally. This makes `Test and package` safe to require in the
+`main` branch ruleset.
 
 Functional changes therefore need a new `AGENT_VERSION` before they are pushed
 to `main`. Keep the default in `packaging/linux/build_release.ps1` and the

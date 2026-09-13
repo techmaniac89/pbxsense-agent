@@ -797,9 +797,10 @@ required. The packaging script's default version and the release references in
 this README should be
 updated in the same change.
 
-The same workflow can be started manually from **Actions → Release PBXSense
-Agent → Run workflow** when a failed release needs to be retried after its
-underlying problem is fixed.
+Pull requests targeting `main` run the same test-and-package validation, but
+never execute the Publish job. The workflow can also be started manually from
+**Actions → Release PBXSense Agent → Run workflow** when a failed release needs
+to be retried after its underlying problem is fixed.
 
 ## Development Mode
 
