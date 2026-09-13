@@ -195,11 +195,15 @@ changes.
 Pushing to `main` triggers `.github/workflows/release-agent.yml`. It:
 
 1. reads `AGENT_VERSION` from `pbxsense_agent/version.py`;
-2. refuses to overwrite an existing `agent-v<version>` release;
+2. detects an existing `agent-v<version>` release and skips publishing it;
 3. installs dependencies and runs the full unit-test suite;
 4. builds the Linux source installer with `packaging/linux/build_release.ps1`;
 5. generates `SHA256SUMS.txt`; and
 6. creates the matching GitHub tag and Release with both assets attached.
+
+When the Agent version already has a tag or release, validation and packaging
+still run and the Publish job exits successfully without replacing the existing
+release.
 
 Functional changes therefore need a new `AGENT_VERSION` before they are pushed
 to `main`. Keep the default in `packaging/linux/build_release.ps1` and the

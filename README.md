@@ -791,9 +791,10 @@ environment on the target machine.
 
 The workflow creates a tag such as `agent-v0.6.22-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
-the tag/release already exists, the workflow fails and asks for
-`pbxsense_agent/version.py` to be bumped before the next push. The packaging
-script's default version and the release references in this README should be
+the tag/release already exists, tests and packaging still run but publishing is
+skipped successfully. Bump `pbxsense_agent/version.py` when a new release is
+required. The packaging script's default version and the release references in
+this README should be
 updated in the same change.
 
 The same workflow can be started manually from **Actions → Release PBXSense
