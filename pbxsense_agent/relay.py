@@ -143,6 +143,14 @@ class AgentRelay:
         with self._lock:
             return self._activation_with_tracking_locked()
 
+    def signing_public_key(self) -> str:
+        """Expose the durable Agent identity only through trusted QR pairing."""
+        with self._lock:
+            public = self._private_key().public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            return _encode(public)
+
     def _activation_with_tracking_locked(self) -> dict[str, str]:
         try:
             activation = self._activation_locked()
@@ -758,13 +766,15 @@ class AgentRelay:
             )
             fingerprint = hashlib.sha256(
                 raw + json.dumps(recipients, separators=(",", ":")).encode("utf-8")
+                + b"|signed-envelope-v1"
             ).hexdigest()
             if self._state.get("secure_snapshot_fingerprint") == fingerprint:
                 return 0
             sequence = int(self._state.get("secure_snapshot_sequence", 0)) + 1
             envelopes = [
                 _encrypt_snapshot_for_device(
-                    raw, str(self._state["agent_id"]), device, sequence
+                    raw, str(self._state["agent_id"]), device, sequence,
+                    self._private_key(),
                 )
                 for device in devices
                 if isinstance(device, dict) and device.get("encryptionPublicKey")
@@ -1121,6 +1131,7 @@ def _encrypt_snapshot_for_device(
     agent_id: str,
     device: dict[str, object],
     sequence: int,
+    signing_key: Ed25519PrivateKey,
 ) -> dict[str, object]:
     if any(value is None for value in (X25519PrivateKey, X25519PublicKey, AESGCM, HKDF, SHA256)):
         raise OSError("Secure Internet Relay needs the cryptography package")
@@ -1143,7 +1154,7 @@ def _encrypt_snapshot_for_device(
     ephemeral_public = ephemeral.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
-    return {
+    envelope = {
         "deviceId": device_id,
         "sequence": sequence,
         "createdAt": created_at,
@@ -1152,6 +1163,13 @@ def _encrypt_snapshot_for_device(
         "nonce": _encode(nonce),
         "ciphertext": _encode(ciphertext),
     }
+    message = "\n".join([
+        "pbxsense-relay-envelope-signature-v1", agent_id, device_id,
+        str(sequence), created_at, str(envelope["ephemeralPublicKey"]),
+        str(envelope["salt"]), str(envelope["nonce"]), str(envelope["ciphertext"]),
+    ]).encode("utf-8")
+    envelope["signature"] = _encode(signing_key.sign(message))
+    return envelope
 
 
 def _encode(value: bytes) -> str:

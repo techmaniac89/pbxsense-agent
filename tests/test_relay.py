@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -226,9 +227,11 @@ class RelayTest(unittest.TestCase):
             serialization.Encoding.Raw, serialization.PublicFormat.Raw
         )
         plaintext = json.dumps({"greeting": "Good morning"}).encode()
+        signing_key = Ed25519PrivateKey.generate()
         envelope = _encrypt_snapshot_for_device(
             plaintext, "agent_test",
             {"id": "device_test", "encryptionPublicKey": _b64(app_public)}, 7,
+            signing_key,
         )
         ephemeral = X25519PublicKey.from_public_bytes(_unb64(envelope["ephemeralPublicKey"]))
         key = HKDF(
@@ -243,6 +246,21 @@ class RelayTest(unittest.TestCase):
             ).encode(),
         )
         self.assertEqual(decrypted, plaintext)
+        signed_message = "\n".join([
+            "pbxsense-relay-envelope-signature-v1", "agent_test", "device_test",
+            "7", str(envelope["createdAt"]), str(envelope["ephemeralPublicKey"]),
+            str(envelope["salt"]), str(envelope["nonce"]), str(envelope["ciphertext"]),
+        ]).encode()
+        signing_key.public_key().verify(_unb64(envelope["signature"]), signed_message)
+
+    def test_qr_signing_key_is_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "identity.json")
+            relay = _SecureExchangeRelay(path)
+            key = relay.signing_public_key()
+            self.assertEqual(len(_unb64(key)), 32)
+            restored = _SecureExchangeRelay(path)
+            self.assertEqual(restored.signing_public_key(), key)
 
     def test_all_relay_traffic_rejects_plain_http_outside_local_development(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

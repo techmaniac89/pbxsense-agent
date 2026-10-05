@@ -795,6 +795,12 @@ async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str,
             "ciphertext": ciphertext,
             "updatedAt": firestore.SERVER_TIMESTAMP,
         }
+        # Keep old Agent envelopes readable by old apps during rollout, while
+        # new apps require and verify this signature against their QR-pinned key.
+        if envelope.get("signature"):
+            safe_envelope["signature"] = _bounded_base64(
+                envelope["signature"], "signature", 100
+            )
         devices_ref.document(device_id).collection("secureSnapshots").document("latest").set(safe_envelope)
         devices_ref.document(device_id).update(
             {
@@ -1057,6 +1063,7 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
             "signalId": signal_id,
             "notificationId": event_id,
             "siteId": agent["siteId"],
+            "agentId": agent_id,
             "category": category,
             "importance": importance,
         },

@@ -1980,6 +1980,7 @@ def _pairing_payload(request: Request) -> str:
         query["relay"] = settings.relay_url
         query["activation"] = activation["id"]
         query["activationSecret"] = activation["secret"]
+        query["agentSigningKey"] = push_relay.signing_public_key()
     return "pbxsense://pair?" + urlencode(query)
 
 

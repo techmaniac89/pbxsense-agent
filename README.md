@@ -763,8 +763,16 @@ pbxsense://pair?agent=https%3A%2F%2Fagent.example%3A8765&token=your-token
 The QR contains a `pbxsense://pair?...` payload with the Agent URL and token.
 When relay activation is ready it also contains the hosted relay URL and an
 opaque, short-lived activation ID/secret. PBXSense setup uses those fields to
+pin the Agent's durable Ed25519 public key from the QR's `agentSigningKey`
+parameter (not from a Relay response), and to
 create a separate per-app encrypted-relay credential; the app-generated private
 key never enters the QR, Agent, or relay. A local-only QR omits the relay fields.
+
+Signed-snapshot rollout requires upgrading Relay first (so it preserves the
+envelope `signature`), then Agent, then app. Existing encrypted-data pairings
+must scan a refreshed QR; the updated app rejects unsigned snapshots. Do not
+rotate or regenerate the durable Agent identity during the upgrade. Relay push
+data includes `agentId` so the app can reject queued messages from old pairings.
 
 ## GitHub Release Assets
 
