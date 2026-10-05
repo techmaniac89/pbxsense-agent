@@ -44,11 +44,17 @@ class EndpointLastActiveTracker:
     def _load(self) -> dict[str, datetime]:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
-            return {
-                str(extension): datetime.fromisoformat(str(value))
-                for extension, value in raw.items()
-                if extension and value
-            }
+            if not isinstance(raw, dict):
+                return {}
+            recovered = {}
+            for extension, value in raw.items():
+                if not extension or not isinstance(value, str):
+                    continue
+                try:
+                    recovered[extension] = datetime.fromisoformat(value)
+                except ValueError:
+                    continue
+            return recovered
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return {}
 

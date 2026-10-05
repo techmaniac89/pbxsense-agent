@@ -1,5 +1,11 @@
 # PBXSense Agent Configuration
 
+Agent 0.6.24-beta no longer accepts `PBXSENSE_AGENT_TOKEN` as an app Bearer
+credential. Use the individual credential from the pairing QR. Administrator
+pages require the browser session established by the setup link. Persist
+`app_credentials.json` alongside `relay_identity.json`; both use the configured
+relay state key (or the Agent token when no separate state key is configured).
+
 PBXSense Agent is configured with environment variables. Docker and development
 mode normally use `.env`; Linux service installs use:
 

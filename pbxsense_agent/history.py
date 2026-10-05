@@ -69,7 +69,7 @@ def read_recent_cdr_calls(path: str, *, limit: int = 30) -> list[CdrCall]:
 
     try:
         rows = _recent_cdr_rows(cdr_path, limit=limit)
-    except OSError:
+    except (OSError, csv.Error):
         return []
 
     calls: list[CdrCall] = []
@@ -258,12 +258,22 @@ def _recent_cdr_rows(path: Path, *, limit: int) -> list[list[str]]:
         size = handle.tell()
         start = max(0, size - target_bytes)
         handle.seek(start)
-        raw = handle.read()
+        raw = handle.read(target_bytes)
     if start:
         newline = raw.find(b"\n")
         raw = raw[newline + 1:] if newline >= 0 else b""
     text = raw.decode("utf-8", errors="replace")
-    return list(csv.reader(io.StringIO(text, newline="")))
+    reader = csv.reader(io.StringIO(text, newline=""))
+    rows = []
+    while True:
+        try:
+            rows.append(next(reader))
+        except StopIteration:
+            return rows
+        except csv.Error:
+            # A bad record must not prevent live PBX state or other CDRs from
+            # refreshing. The CSV iterator advances past the offending input.
+            continue
 
 
 def interpreted_call_kind(call: CdrCall) -> str:

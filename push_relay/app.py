@@ -30,7 +30,7 @@ from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 
-RELAY_VERSION = "0.5.18"
+RELAY_VERSION = "0.5.19"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -467,6 +467,7 @@ def _claim_activation_transaction(
     transaction.create(
         devices_ref.document(relay_device_id),
         {
+            "activationId": activation_ref.id,
             "siteId": site_id,
             "accessTokenHash": hashlib.sha256(relay_access_token.encode("utf-8")).hexdigest(),
             **({"encryptionPublicKey": encryption_public_key} if encryption_public_key else {}),
@@ -647,6 +648,7 @@ async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
             {
                 "id": snapshot.id if device.get("accessTokenHash") else snapshot.id[:12],
                 "revokeId": snapshot.id,
+                "activationId": str(device.get("activationId", "")),
                 "platform": str(device.get("platform", "unknown")),
                 "appVersion": str(device.get("appVersion", "")),
                 "deviceModel": str(device.get("deviceModel", "")),

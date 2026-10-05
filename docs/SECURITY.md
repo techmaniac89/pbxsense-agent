@@ -6,6 +6,47 @@ internet.
 
 ## Network Boundaries
 
+Agent 0.6.24-beta also reports failed relay heartbeat, notification delivery,
+and Internet Relay attempts as runtime failures rather than successful polls.
+Disabled relay features are skipped. Malformed Asterisk CSV records no longer
+abort live snapshots, and malformed presence-history JSON or individual dates
+are safely ignored while valid last-active entries are retained.
+
+### Revocable app access (Agent 0.6.24-beta)
+
+Pairing QR codes now contain an individual app credential, never the shared
+Agent administrator token. App credentials allow snapshots, diagnostics,
+recordings, live updates, and that app's push registration; they cannot access
+the administrator pages or remove another app. Administrator access uses the
+single-use setup link and a separately generated browser cookie.
+
+This upgrade deliberately rejects legacy shared-token app authentication and
+old administrator cookies. Pair existing apps again and run `ensure_token.py`
+followed by an Agent restart to obtain a fresh browser setup link. The current
+app understands the unchanged QR `token` field; no app parser update is needed.
+
+Deploy Relay 0.5.19 before upgrading the Agent when using Internet pairing.
+The relay's authenticated device list links each registration to its QR
+activation so Internet-only apps receive individually revocable LAN access.
+Older relays cannot establish that ownership, so cloud-scoped LAN registration
+fails closed until the relay is upgraded.
+
+Removing an app revokes its LAN credential even if cloud removal fails and
+disconnects its existing live socket on the next one-second update. Retry a
+failed cloud removal to finish revoking Internet access. If an old relay cannot
+identify a QR's owner, removal also invalidates unbound/local-only credentials
+as a conservative fallback. Other identified apps keep their credentials.
+
+`app_credentials.json`, beside the relay identity, stores encrypted app-token
+hashes and the random administrator cookie. Preserve it and
+`PBXSENSE_RELAY_STATE_KEY` across rebuilds. Losing this file requires pairing
+again. Unused QR credentials expire after 15 minutes; credentials used locally
+or linked to a registered device persist until revoked.
+
+Heartbeat requests use an independent HTTPS connection and do not wait for the
+notification outbox lock. Outbox delivery is limited to ten items or five
+seconds per batch (an in-flight request is still bounded by the relay timeout).
+
 - Keep Asterisk AMI private to localhost, a single Agent host, LAN, or VPN.
 - Keep FreeSWITCH Event Socket private to localhost, a single Agent host, LAN,
   or VPN.
@@ -118,7 +159,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.22-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.24-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

@@ -71,6 +71,18 @@ def _websocket(
 
 
 class MainRouteStructureTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from pbxsense_agent.credentials import AppCredentials
+        self.credentials_directory = TemporaryDirectory()
+        self.original_credentials = agent_main._app_credentials
+        agent_main._app_credentials = AppCredentials(
+            Path(self.credentials_directory.name) / "credentials.json", "test-key",
+        )
+
+    def tearDown(self) -> None:
+        agent_main._app_credentials = self.original_credentials
+        self.credentials_directory.cleanup()
+
     def test_favicon_returns_svg_response(self) -> None:
         response = agent_main.favicon()
 
@@ -548,11 +560,26 @@ class MainRouteStructureTest(unittest.TestCase):
                 agent_main._require_token(_request(query=b"token=test-token"))
             self.assertEqual(raised.exception.status_code, 401)
 
-            agent_main._require_token(_request(headers=[
-                (b"authorization", b"Bearer test-token")
+            token = agent_main._credentials().issue()
+            agent_main._require_token(_request(path="/home", headers=[
+                (b"authorization", f"Bearer {token}".encode())
             ]))
             self.assertTrue(agent_main._websocket_authorized(_websocket(headers=[
-                (b"authorization", b"Bearer test-token")
+                (b"authorization", f"Bearer {token}".encode())
+            ])))
+            with self.assertRaises(HTTPException):
+                agent_main._require_token(_request(path="/home", headers=[
+                    (b"authorization", b"Bearer test-token")
+                ]))
+            with self.assertRaises(HTTPException) as denied:
+                agent_main._require_token(_request(path="/apps", headers=[
+                    (b"authorization", f"Bearer {token}".encode())
+                ]))
+            self.assertEqual(denied.exception.status_code, 403)
+            agent_main._credentials().bind(token, "111111111111")
+            agent_main._credentials().revoke("111111111111")
+            self.assertFalse(agent_main._websocket_authorized(_websocket(headers=[
+                (b"authorization", f"Bearer {token}".encode())
             ])))
         finally:
             agent_main.settings = original

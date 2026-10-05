@@ -51,7 +51,7 @@ class SecureInternetRelay:
             "controlExchangeSeconds": self._control_exchange_seconds,
         }
 
-    def poll(self) -> None:
+    def poll(self) -> bool | None:
         if not self._enabled:
             return
         try:
@@ -77,9 +77,11 @@ class SecureInternetRelay:
                 self._snapshot_publisher(self._snapshot_provider())
             self._connected = True
             self._last_error = ""
+            return True
         except (OSError, TypeError, ValueError):
             self._connected = False
             self._last_error = "The secure relay exchange failed."
+            return False
 
     def _accept_policy(self, raw_policy: object) -> None:
         if not isinstance(raw_policy, dict):

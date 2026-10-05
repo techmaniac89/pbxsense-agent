@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from starlette.responses import Response, StreamingResponse
 
 from .connectors import connector_for_settings
+from .credentials import AppCredentials
 from .cucm import enrich_cucm_trunks_with_history
 from .diagnostics import connector_diagnostic_statuses
 from .history import (
@@ -87,6 +88,7 @@ push_relay = AgentRelay(
     enrollment_ticket=settings.relay_enrollment_ticket,
     storage_secret=settings.relay_state_key or settings.token,
     legacy_storage_secrets=(settings.token,) if settings.relay_state_key else (),
+    device_observer=lambda devices: _credentials().sync_devices(devices),
 )
 internet_relay = SecureInternetRelay(
     enabled=settings.internet_relay_enabled,
@@ -112,6 +114,8 @@ _internet_relay_task: asyncio.Task[None] | None = None
 _watchdog_task: asyncio.Task[None] | None = None
 _snapshot_lock = threading.Lock()
 _browser_bootstrap_lock = threading.Lock()
+_app_credentials: AppCredentials | None = None
+_app_credentials_lock = threading.Lock()
 _cached_home_state: tuple | None = None
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
@@ -219,7 +223,7 @@ async def _relay_publish_loop() -> None:
             payload = await asyncio.to_thread(_home_payload)
             people = payload.get("people", [])
             connection = payload.get("connection", {})
-            await asyncio.to_thread(
+            publish_ok = await asyncio.to_thread(
                 push_relay.observe,
                 payload.get("signals", []),
                 total_phones=len(people) if isinstance(people, list) else 0,
@@ -228,7 +232,9 @@ async def _relay_publish_loop() -> None:
                     and connection.get("kind") != "reconnecting"
                 ),
             )
-            _record_runtime_result("pushRelayPublisher", ok=True)
+            if publish_ok is not None:
+                _record_runtime_result("pushRelayPublisher", ok=publish_ok,
+                                       error="Relay delivery failed." if not publish_ok else "")
         except Exception:
             _record_runtime_result(
                 "pushRelayPublisher", ok=False,
@@ -243,11 +249,11 @@ async def _relay_heartbeat_loop() -> None:
     while True:
         try:
             heartbeat_ok = await asyncio.to_thread(push_relay.heartbeat)
-            _record_runtime_result(
-                "pushRelayHeartbeat",
-                ok=heartbeat_ok is not False,
-                error="Relay heartbeat was not accepted." if heartbeat_ok is False else "",
-            )
+            if heartbeat_ok is not None:
+                _record_runtime_result(
+                    "pushRelayHeartbeat", ok=heartbeat_ok,
+                    error="Relay heartbeat was not accepted." if not heartbeat_ok else "",
+                )
         except Exception:
             # Network and enrollment failures are retried on the next cadence.
             _record_runtime_result(
@@ -261,8 +267,10 @@ async def _relay_heartbeat_loop() -> None:
 async def _internet_relay_loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(internet_relay.poll)
-            _record_runtime_result("internetRelay", ok=True)
+            relay_ok = await asyncio.to_thread(internet_relay.poll)
+            if relay_ok is not None:
+                _record_runtime_result("internetRelay", ok=relay_ok,
+                                       error="The secure relay exchange failed." if not relay_ok else "")
         except Exception:
             _record_runtime_result(
                 "internetRelay", ok=False,
@@ -1036,6 +1044,12 @@ def remove_paired_app(request: Request):
     _require_token(request)
     _require_safe_cookie_mutation(request)
     device_id = request.query_params.get("deviceId", "").strip()
+    if device_id:
+        listed = push_relay.devices()
+        if listed.get("available"):
+            _credentials().sync_devices(listed.get("devices", []))
+        # Revoke LAN access even when cloud deletion cannot complete.
+        _credentials().revoke(device_id)
     removed = bool(device_id) and push_relay.remove_device(
         fcm_token="", relay_device_id=device_id
     )
@@ -1210,6 +1224,9 @@ async def live(websocket: WebSocket) -> None:
         last_message_at = time.monotonic()
         while True:
             await asyncio.sleep(LIVE_INTERVAL_SECONDS)
+            if not _websocket_authorized(websocket):
+                await websocket.close(code=1008)
+                return
             current_payload = await asyncio.to_thread(
                 _home_payload,
                 moment_hours=moment_hours,
@@ -1439,6 +1456,16 @@ async def register_push_device(request: Request) -> dict[str, object]:
         _require_bounded_text(item, "mutedSignalIds", 160)
         if item:
             normalized_muted_signal_ids.append(item)
+    device_id = str(payload.get("relayDeviceId", "")).strip() or hashlib.sha256(
+        fcm_token.encode("utf-8")
+    ).hexdigest()[:12]
+    listed = await asyncio.to_thread(push_relay.devices)
+    if listed.get("available"):
+        _credentials().sync_devices(listed.get("devices", []))
+    if not _has_valid_local_web_cookie(request) and not _credentials().bind(
+        _request_token(request), device_id,
+    ):
+        raise HTTPException(status_code=403, detail="App credential belongs to another device")
     return await asyncio.to_thread(
         push_relay.register_device,
         fcm_token=fcm_token,
@@ -1493,6 +1520,12 @@ async def revoke_push_device(request: Request) -> dict[str, bool]:
         _require_bounded_text(token, "fcmToken", 4096)
     if relay_device_id:
         _require_bounded_text(relay_device_id, "relayDeviceId", 96)
+    device_id = relay_device_id or hashlib.sha256(token.encode()).hexdigest()[:12]
+    if not _has_valid_local_web_cookie(request) and not _credentials().bind(
+        _request_token(request), device_id,
+    ):
+        raise HTTPException(status_code=403, detail="App credential belongs to another device")
+    _credentials().revoke(device_id)
     return {"revoked": push_relay.remove_device(
         fcm_token=token, relay_device_id=relay_device_id
     )}
@@ -1789,9 +1822,29 @@ def _diagnostic_rows(diagnostics: dict, message: object) -> str:
 def _require_token(request: Request) -> None:
     if not settings.token:
         return
+    if _has_valid_local_web_cookie(request):
+        return
     token = _request_token(request)
-    if not hmac.compare_digest(token, settings.token):
+    if not _credentials().accepts(token):
         raise HTTPException(status_code=401, detail="PBXSense Agent token required")
+    if request.url.path not in {
+        "/home", "/diagnostics", "/diagnostics/ami", "/push/devices",
+        "/push/devices/status", "/push/devices/revoke",
+    } and not request.url.path.startswith("/recordings/"):
+        raise HTTPException(status_code=403, detail="Administrator browser session required")
+    _credentials().activate(token)
+
+
+def _credentials() -> AppCredentials:
+    global _app_credentials
+    with _app_credentials_lock:
+        if _app_credentials is None:
+            _app_credentials = AppCredentials(
+                Path(settings.relay_identity_path).with_name("app_credentials.json"),
+                settings.relay_state_key or settings.token,
+                admin_secret=settings.token,
+            )
+        return _app_credentials
 
 
 def _is_trusted_request(request: Request) -> bool:
@@ -1859,16 +1912,12 @@ def _has_valid_local_web_cookie(request: Request) -> bool:
 
 
 def _local_web_cookie_value() -> str:
-    return hmac.new(
-        settings.token.encode("utf-8"),
-        b"pbxsense-local-web",
-        hashlib.sha256,
-    ).hexdigest()
+    return _credentials().cookie()
 
 
 def _local_web_csrf_value() -> str:
     return hmac.new(
-        settings.token.encode("utf-8"),
+        _local_web_cookie_value().encode("utf-8"),
         b"pbxsense-local-web-csrf",
         hashlib.sha256,
     ).hexdigest()
@@ -1916,7 +1965,11 @@ def _websocket_authorized(websocket: WebSocket) -> bool:
         return True
     authorization = websocket.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
-        return hmac.compare_digest(authorization[7:].strip(), settings.token)
+        token = authorization[7:].strip()
+        accepted = _credentials().accepts(token)
+        if accepted:
+            _credentials().activate(token)
+        return accepted
     cookie = websocket.cookies.get(LOCAL_WEB_COOKIE, "")
     client_host = websocket.client.host if websocket.client else ""
     return (
@@ -1968,8 +2021,6 @@ def _normalized_http_origin(value: str) -> tuple[str, str, int] | None:
 def _pairing_payload(request: Request) -> str:
     agent_url = settings.public_url or str(request.base_url).rstrip("/")
     query = {"agent": agent_url}
-    if settings.token:
-        query["token"] = settings.token
     try:
         activation = push_relay.activation()
     except Exception:
@@ -1981,6 +2032,11 @@ def _pairing_payload(request: Request) -> str:
         query["activation"] = activation["id"]
         query["activationSecret"] = activation["secret"]
         query["agentSigningKey"] = push_relay.signing_public_key()
+    if settings.token:
+        listed = push_relay.devices() if activation else {}
+        if listed.get("available"):
+            _credentials().sync_devices(listed.get("devices", []))
+        query["token"] = _credentials().issue(str(activation.get("id", "")))
     return "pbxsense://pair?" + urlencode(query)
 
 

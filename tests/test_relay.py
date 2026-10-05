@@ -6,6 +6,7 @@ import http.client
 import json
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -956,3 +957,55 @@ class RelayTest(unittest.TestCase):
             with patch("pbxsense_agent.relay.time.monotonic", return_value=130.0):
                 relay.heartbeat()
             self.assertEqual([request[0] for request in relay.requests], ["/v1/agents/agent_test/heartbeat"])
+
+    def test_heartbeat_is_not_blocked_by_delivery_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            completed = threading.Event()
+            def heartbeat():
+                try:
+                    relay.heartbeat()
+                finally:
+                    completed.set()
+            with relay._lock:
+                worker = threading.Thread(target=heartbeat, daemon=True)
+                worker.start()
+                self.assertTrue(completed.wait(2), "heartbeat waited for the outbox lock")
+            worker.join(2)
+            self.assertTrue(any(path.endswith("/heartbeat") for path, _, _ in relay.requests))
+
+    def test_heartbeat_uses_and_closes_its_own_http_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = AgentRelay(url="https://relay.example", identity_path=str(Path(directory) / "id.json"),
+                               display_name="PBX", storage_secret="test-secret")
+            relay._state["agent_id"] = "agent-test"
+            relay._private_key()
+            shared = MagicMock()
+            relay._http_connection = shared
+            dedicated = MagicMock()
+            dedicated.getresponse.return_value.status = 200
+            dedicated.getresponse.return_value.read.return_value = b"{}"
+            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=dedicated):
+                self.assertTrue(relay.heartbeat())
+            dedicated.request.assert_called_once()
+            dedicated.close.assert_called_once()
+            shared.request.assert_not_called()
+            shared.close.assert_not_called()
+            self.assertIs(relay._http_connection, shared)
+
+    def test_flush_leaves_backlog_for_later_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay._state["outbox"] = [
+                {"kind": "events", "payload": {"id": str(index)}} for index in range(30)
+            ]
+            relay._flush()
+            self.assertEqual(len(relay.requests), 10)
+            self.assertEqual(len(relay._state["outbox"]), 20)
+
+    def test_removal_discards_queued_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            relay = _RecordingRelay(str(Path(directory) / "identity.json"))
+            relay._queue("devices", {"fcmToken": "phone", "relayDeviceId": "device-one"})
+            relay.remove_device(fcm_token="", relay_device_id="device-one")
+            self.assertEqual(relay._state["outbox"], [])

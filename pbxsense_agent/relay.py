@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from cryptography.exceptions import InvalidTag
@@ -39,6 +39,8 @@ ENDPOINT_INCIDENT_RECOVERY_SECONDS = 15
 ENDPOINT_INCIDENT_COOLDOWN_SECONDS = 120
 MAX_RELAY_OUTBOX_ITEMS = 500
 MAX_RELAY_OUTBOX_BYTES = 2 * 1024 * 1024
+MAX_FLUSH_ITEMS = 10
+MAX_FLUSH_SECONDS = 5
 _FEED_ONLY_LIVE_CALL_KINDS = {
     "call_active",
     "pbx_live_calls_activity",
@@ -88,6 +90,7 @@ class AgentRelay:
         enrollment_ticket: str = "",
         storage_secret: str = "",
         legacy_storage_secrets: tuple[str, ...] = (),
+        device_observer: Callable[[list], None] | None = None,
     ) -> None:
         self._url = _validated_relay_url(url)
         self._path = Path(identity_path)
@@ -95,6 +98,7 @@ class AgentRelay:
         self._timeout_seconds = timeout_seconds
         self._enrollment_ticket = enrollment_ticket.strip()
         self._storage_secret = storage_secret.strip()
+        self._device_observer = device_observer
         self._storage_secrets = tuple(
             dict.fromkeys(
                 secret.strip()
@@ -103,6 +107,8 @@ class AgentRelay:
             )
         )
         self._lock = threading.Lock()
+        self._heartbeat_lock = threading.Lock()
+        self._transport = threading.local()
         self._state = self._load()
         # Leave this unset for the first save so legacy plaintext identities
         # are still migrated to the encrypted envelope. Later unchanged saves
@@ -350,6 +356,8 @@ class AgentRelay:
                     "error": "The push relay is unavailable.",
                 }
             devices = response.get("devices", [])
+            if isinstance(devices, list) and self._device_observer:
+                self._device_observer(devices)
             return {
                 "available": True,
                 "devices": devices if isinstance(devices, list) else [],
@@ -357,6 +365,19 @@ class AgentRelay:
 
     def remove_device(self, *, fcm_token: str, relay_device_id: str = "") -> bool:
         with self._lock:
+            outbox = self._state.setdefault("outbox", [])
+            retained = [item for item in outbox if not (
+                item.get("kind") == "devices" and (
+                    (fcm_token and item.get("payload", {}).get("fcmToken") == fcm_token)
+                    or (relay_device_id and item.get("payload", {}).get("relayDeviceId") == relay_device_id)
+                    or (relay_device_id and hashlib.sha256(
+                        str(item.get("payload", {}).get("fcmToken", "")).encode()
+                    ).hexdigest() in {relay_device_id})
+                )
+            )]
+            if len(retained) != len(outbox):
+                self._state["outbox"] = retained
+                self._save()
             if not (fcm_token.strip() or relay_device_id.strip()) or not self._ensure_enrolled():
                 return False
             try:
@@ -386,10 +407,12 @@ class AgentRelay:
         total_phones: int = 0,
         connection_ok: bool = True,
         observed_at: float | None = None,
-    ) -> None:
+    ) -> bool | None:
         with self._lock:
+            if not self._url:
+                return None
             if not self._ensure_enrolled():
-                return
+                return False
             now = time.time() if observed_at is None else observed_at
             suppressed_signal_ids = self._correlate_endpoint_incident(
                 signals,
@@ -433,7 +456,7 @@ class AgentRelay:
                     importance=str(signal.get("importance", "feed")),
                 )
             self._save()
-            self._flush()
+            return self._flush()
 
     def _correlate_endpoint_incident(
         self,
@@ -708,13 +731,18 @@ class AgentRelay:
             },
         )
 
-    def heartbeat(self) -> None:
-        with self._lock:
+    def heartbeat(self) -> bool | None:
+        # Established identities need no outbox lock. A dedicated connection
+        # keeps slow deliveries from delaying presence or sharing HTTP streams.
+        with self._heartbeat_lock:
+            if not self._url:
+                return None
             if (
-                not self._ensure_enrolled()
+                not self.configured
                 or time.monotonic() - self._last_heartbeat_at < PRESENCE_HEARTBEAT_INTERVAL_SECONDS
             ):
-                return
+                return False if not self.configured else True
+            self._transport.heartbeat = True
             try:
                 self._request(
                     f"/v1/agents/{self._state['agent_id']}/heartbeat",
@@ -722,8 +750,12 @@ class AgentRelay:
                     signed=True,
                 )
                 self._last_heartbeat_at = time.monotonic()
+                return True
             except OSError:
-                pass
+                return False
+            finally:
+                self._close_relay_connection()
+                self._transport.heartbeat = False
 
     def secure_exchange(self, payload: dict[str, object]) -> dict[str, Any]:
         """Exchange an opaque, capability-scoped secure-relay protocol frame."""
@@ -757,6 +789,8 @@ class AgentRelay:
                 self._secure_devices = [
                     device for device in devices if isinstance(device, dict)
                 ]
+                if self._device_observer:
+                    self._device_observer(self._secure_devices)
                 self._secure_devices_refreshed_at = time.monotonic()
             devices = self._secure_devices
             recipients = sorted(
@@ -866,9 +900,13 @@ class AgentRelay:
                 "outbox reached its safety limit."
             )
 
-    def _flush(self) -> None:
+    def _flush(self) -> bool:
         outbox = self._state.setdefault("outbox", [])
-        while outbox:
+        started = time.monotonic()
+        attempted = 0
+        success = True
+        while outbox and attempted < MAX_FLUSH_ITEMS and time.monotonic() - started < MAX_FLUSH_SECONDS:
+            attempted += 1
             item = outbox[0]
             try:
                 self._request(
@@ -877,6 +915,7 @@ class AgentRelay:
                     signed=True,
                 )
             except RelayRequestError as exc:
+                success = False
                 if exc.retryable:
                     break
                 outbox.pop(0)
@@ -893,6 +932,7 @@ class AgentRelay:
                 self._save()
                 continue
             except OSError:
+                success = False
                 break
             outbox.pop(0)
             if item.get("kind") == "devices":
@@ -900,6 +940,7 @@ class AgentRelay:
                     self._state.get("device_registration_revision", 0)
                 ) + 1
             self._save()
+        return success
 
     def _request(
         self,
@@ -954,7 +995,8 @@ class AgentRelay:
         self,
         parsed: urllib.parse.ParseResult,
     ) -> http.client.HTTPConnection:
-        if self._http_connection is not None:
+        heartbeat = getattr(self._transport, "heartbeat", False)
+        if not heartbeat and self._http_connection is not None:
             return self._http_connection
         # _validated_relay_url restricts plaintext HTTP to loopback development.
         connection_type = (
@@ -962,15 +1004,23 @@ class AgentRelay:
             if parsed.scheme == "https"
             else http.client.HTTPConnection
         )
-        self._http_connection = connection_type(
+        connection = connection_type(
             parsed.hostname,
             port=parsed.port,
             timeout=self._timeout_seconds,
         )
-        return self._http_connection
+        if heartbeat:
+            self._transport.connection = connection
+        else:
+            self._http_connection = connection
+        return connection
 
     def _close_relay_connection(self) -> None:
-        connection, self._http_connection = self._http_connection, None
+        if getattr(self._transport, "heartbeat", False):
+            connection = getattr(self._transport, "connection", None)
+            self._transport.connection = None
+        else:
+            connection, self._http_connection = self._http_connection, None
         if connection is not None:
             try:
                 connection.close()
