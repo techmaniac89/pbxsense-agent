@@ -13,6 +13,7 @@ from pbxsense_agent.ami import AmiClient, AmiError
 from pbxsense_agent.freeswitch import FreeSwitchClient, FreeSwitchError
 from pbxsense_agent.connectors import MockConnector
 from pbxsense_agent.settings import AgentSettings
+from pbxsense_agent.snapshot_runtime import SnapshotRuntime
 from push_relay.backend_worker import backend_worker
 from starlette.requests import Request
 
@@ -63,27 +64,30 @@ class ConcurrencyDeadlineTest(unittest.TestCase):
         self.assertLessEqual(sock.reads, 4)
 
     def test_cached_home_is_available_during_collection(self):
-        original = main._cached_home_state
-        original_payloads = dict(main._cached_home_payloads)
-        original_time = main._snapshot_published_at_monotonic
         entered, release = threading.Event(), threading.Event()
         worker = None
+        clock = [0.0]
+        runtime = SnapshotRuntime(
+            collect=lambda: main._collect_home_state(),
+            build_payload=lambda state, hours: main._home_payload_from_state(state, moment_hours=hours),
+            stale_after=10, stall_after=60, clock=lambda: clock[0],
+        )
         try:
-            with patch.object(main, "connector", MockConnector()):
-                main._refresh_home_state()
+            with patch.object(main, "connector", MockConnector()), patch.object(main, "_snapshot_runtime", runtime):
+                state = main._refresh_home_state()
                 cached = main._home_payload()
                 def collect():
                     entered.set()
                     release.wait(2)
-                    return main._cached_home_state
-                with patch.object(main, "_refresh_home_state_locked", side_effect=collect):
+                    return state
+                with patch.object(main, "_collect_home_state", side_effect=collect):
                     worker = threading.Thread(target=main._refresh_home_state)
                     worker.start()
                     self.assertTrue(entered.wait(1))
                     self.assertIs(main._home_payload(), cached)
                     # A second reader can inspect freshness without PBX I/O.
-                    with patch.object(main, "_snapshot_published_at_monotonic", time.monotonic() - 100):
-                        stale = main._home_payload()
+                    clock[0] = 100
+                    stale = main._home_payload()
                     self.assertTrue(stale["snapshotStale"])
                     self.assertEqual(stale["connection"]["kind"], "reconnecting")
                     self.assertFalse(cached["snapshotStale"])
@@ -94,11 +98,6 @@ class ConcurrencyDeadlineTest(unittest.TestCase):
             release.set()
             if worker:
                 worker.join(2)
-            with main._snapshot_lock:
-                main._cached_home_state = original
-                main._cached_home_payloads.clear()
-                main._cached_home_payloads.update(original_payloads)
-                main._snapshot_published_at_monotonic = original_time
 
     def test_backend_work_does_not_block_event_loop(self):
         entered, release = threading.Event(), threading.Event()
@@ -124,13 +123,17 @@ class ConcurrencyDeadlineTest(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_all_async_routes_use_backend_workers_not_middleware(self):
+        from push_relay.routes import ROUTES
+        registered_names = {name for _, _, name, _ in ROUTES}
         tree = ast.parse(Path("push_relay/app.py").read_text(encoding="utf-8"))
+        checked = set()
         for node in tree.body:
             if not isinstance(node, ast.AsyncFunctionDef):
                 continue
-            routes = [d for d in node.decorator_list if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and isinstance(d.func.value, ast.Name) and d.func.value.id == "app" and d.func.attr != "middleware"]
-            if routes:
+            if node.name in registered_names:
                 self.assertTrue(any(isinstance(d, ast.Name) and d.id == "backend_worker" for d in node.decorator_list), node.name)
+                checked.add(node.name)
+        self.assertEqual(checked, registered_names - {"health"})
 
     def test_request_stream_is_consumed_on_original_loop(self):
         reader_threads = []

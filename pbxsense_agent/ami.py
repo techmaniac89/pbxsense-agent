@@ -4,7 +4,7 @@ import re
 import socket
 from dataclasses import dataclass, replace
 
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
+from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 from .socket_deadline import socket_deadline
@@ -37,10 +37,10 @@ class AmiClient:
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
-        self._known_trunks: dict[str, AmiEndpoint] = {}
+        self._known_trunks: dict[str, PbxEndpoint] = {}
         self._session_socket: socket.socket | None = None
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         try:
             events = self._read_events()
             channels = _channels_from_events(events)
@@ -63,7 +63,7 @@ class AmiClient:
                         health_confidence="low",
                         health_evidence=("Missing from the current endpoint snapshot",),
                     ))
-            return AmiSnapshot(
+            return PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=channels,
@@ -72,7 +72,7 @@ class AmiClient:
             )
         except OSError:
             self._close_session()
-            return AmiSnapshot(
+            return PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The Asterisk AMI connection is unavailable.",
@@ -379,14 +379,14 @@ def _recv_through(
             return bytes(chunks)
 
 
-def _channels_from_events(events: list[AmiEvent]) -> list[AmiChannel]:
-    channels: list[AmiChannel] = []
+def _channels_from_events(events: list[AmiEvent]) -> list[PbxChannel]:
+    channels: list[PbxChannel] = []
     for event in events:
         if event.name != "CoreShowChannel":
             continue
         fields = event.fields
         channels.append(
-            AmiChannel(
+            PbxChannel(
                 channel=fields.get("Channel", ""),
                 extension=fields.get("Extension", "") or fields.get("Exten", ""),
                 caller=fields.get("CallerIDName", "") or fields.get("CallerIDNum", ""),
@@ -407,8 +407,8 @@ def _channels_from_events(events: list[AmiEvent]) -> list[AmiChannel]:
 def _endpoints_from_events(
     events: list[AmiEvent],
     explicit_trunks: frozenset[str] = frozenset(),
-) -> list[AmiEndpoint]:
-    endpoints: list[AmiEndpoint] = []
+) -> list[PbxEndpoint]:
+    endpoints: list[PbxEndpoint] = []
     contact_states = _contact_states_from_events(events)
     contact_addresses = _contact_addresses_from_events(events)
     registration_states = _outbound_registration_states_from_events(events)
@@ -442,7 +442,7 @@ def _endpoints_from_events(
         if role == "trunk" and registration:
             device_state = _outbound_registration_device_state(registration[1])
         endpoints.append(
-            AmiEndpoint(
+            PbxEndpoint(
                 extension=extension,
                 device_state=device_state,
                 active_channels=_parse_int(fields.get("ActiveChannels", "0")),
@@ -498,7 +498,7 @@ def _endpoints_from_events(
         ):
             continue
         state = _outbound_registration_device_state(status)
-        endpoints.append(AmiEndpoint(
+        endpoints.append(PbxEndpoint(
             extension=name,
             device_state=state,
             role="trunk",
@@ -511,7 +511,7 @@ def _endpoints_from_events(
     for extension in sorted(explicit_trunks):
         if extension.casefold() in existing_folded:
             continue
-        endpoints.append(AmiEndpoint(
+        endpoints.append(PbxEndpoint(
             extension=extension,
             device_state="Unknown",
             role="trunk",
@@ -524,9 +524,9 @@ def _endpoints_from_events(
 
 
 def _reconcile_trunk_activity(
-    endpoints: list[AmiEndpoint],
-    channels: list[AmiChannel],
-) -> list[AmiEndpoint]:
+    endpoints: list[PbxEndpoint],
+    channels: list[PbxChannel],
+) -> list[PbxEndpoint]:
     trunk_ids = {endpoint.extension for endpoint in endpoints if endpoint.role == "trunk"}
     active_counts: dict[str, int] = {}
     for channel in channels:
@@ -549,7 +549,7 @@ def _reconcile_trunk_activity(
     ]
 
 
-def _queues_from_events(events: list[AmiEvent]) -> list[AmiQueue]:
+def _queues_from_events(events: list[AmiEvent]) -> list[PbxQueue]:
     queue_params: dict[str, dict[str, str]] = {}
     entry_counts: dict[str, int] = {}
     longest_waits: dict[str, int] = {}
@@ -582,11 +582,11 @@ def _queues_from_events(events: list[AmiEvent]) -> list[AmiQueue]:
                 counts["busy"] += 1
 
     queue_names = set(queue_params) | set(entry_counts) | set(member_counts)
-    queues: list[AmiQueue] = []
+    queues: list[PbxQueue] = []
     for queue in sorted(queue_names):
         members = member_counts.get(queue, {})
         queues.append(
-            AmiQueue(
+            PbxQueue(
                 name=queue,
                 waiting_callers=(
                     entry_counts[queue]

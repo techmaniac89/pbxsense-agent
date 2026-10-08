@@ -8,12 +8,14 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from fastapi import HTTPException, Request, WebSocket
 from starlette.responses import Response
 
 from pbxsense_agent import main as agent_main
 from pbxsense_agent.connectors import MockConnector
+from pbxsense_agent.snapshot_runtime import SnapshotRuntime
 from pbxsense_agent.diagnostics import (
     ami_diagnostic_statuses,
     connector_diagnostic_statuses,
@@ -118,14 +120,12 @@ class MainRouteStructureTest(unittest.TestCase):
             self.assertNotEqual(first, changed)
 
     def test_home_payload_is_cached_until_the_snapshot_refreshes(self) -> None:
-        original_connector = agent_main.connector
-        original_state = agent_main._cached_home_state
-        original_payloads = dict(agent_main._cached_home_payloads)
-        try:
-            agent_main.connector = MockConnector()
-            with agent_main._snapshot_lock:
-                agent_main._cached_home_state = None
-                agent_main._cached_home_payloads.clear()
+        runtime = SnapshotRuntime(
+            collect=lambda: agent_main._collect_home_state(),
+            build_payload=lambda state, hours: agent_main._home_payload_from_state(state, moment_hours=hours),
+            stale_after=10, stall_after=60,
+        )
+        with patch.object(agent_main, "connector", MockConnector()), patch.object(agent_main, "_snapshot_runtime", runtime):
             first = agent_main._home_payload()
             second = agent_main._home_payload()
             self.assertIs(first, second)
@@ -133,29 +133,14 @@ class MainRouteStructureTest(unittest.TestCase):
             agent_main._refresh_home_state()
             third = agent_main._home_payload()
             self.assertIsNot(first, third)
-        finally:
-            agent_main.connector = original_connector
-            with agent_main._snapshot_lock:
-                agent_main._cached_home_state = original_state
-                agent_main._cached_home_payloads.clear()
-                agent_main._cached_home_payloads.update(original_payloads)
 
-    def test_refresh_home_state_returns_a_snapshot_tuple(self) -> None:
-        # Regression: the snapshot loop reads state[0] to find the snapshot,
-        # so _refresh_home_state must return the state tuple (it previously
-        # dropped the return value, making every poll fail with
-        # "TypeError: 'NoneType' object is not subscriptable").
-        original_connector = agent_main.connector
-        try:
-            agent_main.connector = MockConnector()
-            with agent_main._snapshot_lock:
-                agent_main._cached_home_state = None
+    def test_refresh_home_state_returns_a_named_snapshot_state(self) -> None:
+        # Regression: refresh must return the published state for the poll loop.
+        from pbxsense_agent.collected_state import CollectedHomeState
+        with patch.object(agent_main, "connector", MockConnector()):
             state = agent_main._refresh_home_state()
-            self.assertIsInstance(state, tuple)
-            self.assertGreaterEqual(len(state), 10)
-            self.assertTrue(state[0].reachable)
-        finally:
-            agent_main.connector = original_connector
+            self.assertIsInstance(state, CollectedHomeState)
+            self.assertTrue(state.snapshot.reachable)
 
     def test_liveness_and_readiness_are_separate(self) -> None:
         self.assertEqual(agent_main.health_live()["status"], "ok")
@@ -324,17 +309,19 @@ class MainRouteStructureTest(unittest.TestCase):
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            '@app.post("/v1/agents/{agent_id}/devices/{device_id}/registration")',
-            source,
+            '("POST", "/v1/agents/{agent_id}/devices/{device_id}/registration", "register_own_device", None)',
+            Path("push_relay/routes.py").read_text(encoding="utf-8"),
         )
         self.assertIn("_authenticate_relay_device(agent_id, device_id, request)", source)
         self.assertIn('return {"delivered": True, "deviceId": device_id}', source)
 
     def test_push_relay_has_cost_and_enrollment_guardrails(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        source += Path("push_relay/usage_report.py").read_text(encoding="utf-8")
+        routes = Path("push_relay/routes.py").read_text(encoding="utf-8")
 
         self.assertIn("PBXSENSE_RELAY_ENROLLMENT_MODE", source)
-        self.assertIn('"/v1/internal/enrollment-tickets"', source)
+        self.assertIn('"/v1/internal/enrollment-tickets"', routes)
         self.assertIn("MAX_DEVICES_PER_AGENT", source)
         self.assertIn("MAX_EVENTS_PER_AGENT_PER_HOUR", source)
         self.assertIn("MAX_AGENTS_PER_ACCOUNT", source)
@@ -346,16 +333,19 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn('"activation:"', source)
         self.assertIn("limit=12", source)
         self.assertIn("_verify_public_key_request(public_key, request)", source)
-        self.assertIn('@app.get("/v1/internal/usage")', source)
-        self.assertIn('@app.get("/admin/usage"', source)
+        self.assertIn('("GET", "/v1/internal/usage", "relay_usage", None)', routes)
+        self.assertIn('("GET", "/admin/usage", "usage_dashboard", HTMLResponse)', routes)
         self.assertIn("def _usage_update", source)
-        self.assertIn('db.collection("usageDaily")', source)
-        self.assertIn("usageArchivedDate", source)
+        accounting = Path("push_relay/usage_accounting.py").read_text(encoding="utf-8")
+        self.assertIn('db.collection("usageDaily")', accounting)
+        self.assertIn("usageArchivedDate", accounting)
         self.assertIn("PBXSENSE_RELAY_REMOTE_APP_POLL_SECONDS", source)
         self.assertIn('"privacy": "Agent identifiers are one-way hashes;', source)
 
     def test_relay_operations_dashboard_exposes_actionable_safe_metrics(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        source += Path("push_relay/usage_report.py").read_text(encoding="utf-8")
+        source += Path("push_relay/usage_dashboard.py").read_text(encoding="utf-8")
 
         self.assertIn("def _record_notification_usage", source)
         self.assertIn("notificationAccepted", source)
@@ -373,11 +363,12 @@ class MainRouteStructureTest(unittest.TestCase):
 
     def test_relay_mutations_are_atomic_replay_safe_and_secret_separated(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
-        agent = Path("pbxsense_agent/relay.py").read_text(encoding="utf-8")
+        source += Path("push_relay/authentication.py").read_text(encoding="utf-8")
+        agent = Path("pbxsense_agent/relay_transport.py").read_text(encoding="utf-8")
 
         self.assertIn("@firestore.transactional\ndef _claim_activation_transaction", source)
         self.assertIn("@firestore.transactional\ndef _register_agent_device_transaction", source)
-        self.assertIn("_require_replay_protected_signature(agent_id, agent, request)", source)
+        self.assertIn("self.require_replay_protected_signature(agent_id, agent, request)", source)
         self.assertIn("Replayed secure Agent request", source)
         self.assertIn("PBXSENSE_RELAY_TICKET_SECRET must differ", source)
         self.assertIn("_admin_cookie_value()", source)
@@ -388,12 +379,13 @@ class MainRouteStructureTest(unittest.TestCase):
 
     def test_push_relay_deduplicates_tokens_and_tags_notification_episodes(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        delivery = Path("push_relay/notification_delivery.py").read_text(encoding="utf-8")
 
-        self.assertIn("def _unique_devices_by_token", source)
-        self.assertGreaterEqual(source.count("_unique_devices_by_token(["), 2)
-        self.assertIn('"notificationId": event_id', source)
+        self.assertIn("def _unique_devices_by_token", delivery)
+        self.assertGreaterEqual((source + delivery).count("_unique_devices_by_token(["), 2)
+        self.assertIn('"notificationId": event_id', delivery)
         self.assertIn('_optional_identifier(event.get("notificationTag")) or event_id', source)
-        self.assertIn("messaging.AndroidNotification(tag=notification_tag)", source)
+        self.assertIn("messaging.AndroidNotification(tag=notification_tag)", delivery)
 
     def test_live_websocket_sends_quiet_heartbeats(self) -> None:
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")

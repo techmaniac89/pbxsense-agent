@@ -226,7 +226,7 @@ security workflow audits both hashed dependency locks, runs CodeQL's extended
 Python queries, builds the production container, and verifies its configured
 runtime user is non-root. Keep every action pinned to a full commit SHA; accept
 Dependabot action updates only after reviewing the upstream release and commit.
-# Reliability contract (Agent 0.6.26-beta / Relay 0.5.21)
+# Reliability contract (Agent 0.6.27-beta / Relay 0.5.21)
 
 Encrypted relay snapshots preserve `connection.kind=reconnecting` when the PBX
 is unavailable. The additive `connection.transport=internetRelay` describes the
@@ -249,7 +249,7 @@ checkpointing, a retry can repeat it. Stable notification IDs/tags limit visible
 duplicates; FCM acceptance does not prove delivery to the handset. No database
 transaction can atomically commit an external FCM send.
 
-## Collection and backend concurrency (0.6.26-beta / Relay 0.5.21)
+## Collection and backend concurrency (0.6.27-beta / Relay 0.5.21)
 
 The collector exclusively owns connector/history/tracker mutation, but does not
 hold the snapshot publication lock while doing I/O. Readers continue to use the
@@ -272,3 +272,74 @@ per instance. Request streams are never read from worker event loops. Waiting
 requests yield to the server loop, and the in-memory event limiter is protected
 against concurrent worker access. Existing Firestore transactions remain the
 cross-instance authority for quotas and delivery ownership.
+
+## Snapshot runtime extraction
+
+Agent 0.6.27-beta delegates collection ownership, snapshot publication, payload
+caching, freshness and collection diagnostics to `SnapshotRuntime`. PBX and
+history policies remain callbacks in `main.py`. See
+[the architecture stages](ARCHITECTURE.md) for the completed boundary, preserved
+contract, regression expectations and the next small refactors.
+
+Agent 0.6.28-beta extracts `RelayHttpTransport` from the relay client. It accepts
+a signing callback rather than owning an identity, and keeps reusable delivery
+connections separate from disposable heartbeat connections. The external
+protocol and persisted identity/outbox format are unchanged; the cloud relay
+does not need redeployment for this Agent-only extraction.
+
+Agent 0.6.29-beta extracts `RelayStateStore` for encrypted identity/outbox files.
+The relay client retains state mutation and notification policy. Envelope format,
+key derivation, legacy migration, atomic replacement and permissions are
+unchanged. Independent persistence tests supplement the existing delivery
+regressions; neither the Flutter app nor cloud relay needs a version/deployment
+change for this internal boundary.
+
+Agent 0.6.30-beta extracts `RelayNotificationPolicy` for notification eligibility,
+deduplication and endpoint incident transitions. Its state and time are supplied
+by the caller, and synchronous event callbacks preserve the original durable
+queue write points. Enrollment, outbox limits, persistence and delivery remain
+in `AgentRelay`. Notification timers, wording and public contracts are unchanged.
+
+Relay 0.5.22 separates signed-request cryptographic verification into
+`push_relay/request_auth.py`. Firebase identity lookup, nonce replay claims and
+presence updates remain in the application in their original order. The new
+module is independently tested and copied into the Cloud Run image; deployment
+is separate from Agent/app updates. See the architecture stages for scope.
+
+Relay 0.5.23 extracts event notification coordination into
+`push_relay/notification_delivery.py`. Database quota/lease transactions remain
+in `app.py`, and synchronous callbacks preserve checkpoint, cleanup and usage
+reporting order. The component is independently tested without Firebase.
+Agent-status sending is not moved in this step; its shared token helper is.
+
+Relay 0.5.24 moves Agent-status sending into `AgentStatusDelivery` and
+notification outcome counters into `NotificationUsageRecorder`. Identity lookup,
+heartbeat state transitions, daily usage aggregation and event quota ownership
+remain in the application. Injected services permit focused tests without
+Firebase; public payloads, preference semantics and write order are unchanged.
+
+Relay 0.5.25 separates `UsageAccounting` and pure dashboard rendering. Database
+and clock dependencies are injected into accounting; the renderer consumes the
+existing report with a version and cost callback. UTC rollover/archive paths,
+counter fields, daily bounds and display sections are preserved. Cost formulas,
+report query orchestration and administrator authentication stay in `app.py`.
+
+Relay 0.5.26 moves report query orchestration into `UsageReporter` and cost
+configuration/formulas into `RelayCostModel`. Existing query/output limits,
+report fields, environment variables, units and projection rules are retained.
+Administrator authorization stays at the route boundary. These modules can be
+tested without Firebase initialization; both are included in the relay image.
+
+Relay 0.5.27 completes the local cloud-boundary extraction: `routes.py` registers
+the existing handlers without changing their signatures/workers, while
+`RelayAuthentication` owns identity/replay/device/ticket/admin coordination.
+Domain operations, middleware and quota/delivery transactions remain in
+`app.py`. The 21-route contract and unauthorized request paths are tested with
+mocked cloud services. Deployment and real-device verification remain separate.
+
+Agent 0.6.33-beta completes the local snapshot-domain extraction with
+`HistoryCollector` and `SignalCollector`. Named history records and fingerprints
+are committed together only after successful reads; tracker order, timers and
+payload fields are preserved. SnapshotRuntime serializes these services. Tests
+inject clocks/readers/trackers without a PBX or local history mount; integration
+checks verify that history enrichment precedes signal observation.

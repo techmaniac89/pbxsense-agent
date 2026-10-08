@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from threading import Lock
 from uuid import uuid4
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
 from .engine import build_engine_signals
 from .history import CdrCall, SecurityEvent, VoicemailMessage, interpreted_call_kind
 
@@ -42,61 +43,11 @@ class SignalNotificationEpisodeTracker:
                 signal["notificationId"] = notification_id
 
 
-@dataclass(frozen=True)
-class AmiChannel:
-    channel: str
-    extension: str
-    caller: str
-    connected: str
-    state: str
-    endpoint: str = ""
-    caller_number: str = ""
-    connected_number: str = ""
-    duration: str = ""
-    unique_id: str = ""
-    linked_id: str = ""
-
-
-@dataclass(frozen=True)
-class AmiEndpoint:
-    extension: str
-    device_state: str
-    active_channels: int = 0
-    label: str = ""
-    role: str = "extension"
-    connection_type: str = ""
-    number: str = ""
-    # A PBX-provided presence state, such as DND or Away. This is kept apart
-    # from device_state: a phone can be registered while its owner is away.
-    presence: str = ""
-    ip_address: str = ""
-    health_status: str = ""
-    health_confidence: str = ""
-    health_evidence: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class AmiQueue:
-    name: str
-    waiting_callers: int = 0
-    longest_wait_seconds: int = 0
-    available_members: int = 0
-    busy_members: int = 0
-    paused_members: int = 0
-    total_members: int = 0
-
-
-@dataclass(frozen=True)
-class AmiSnapshot:
-    reachable: bool
-    agent_version: str
-    channels: list[AmiChannel] = field(default_factory=list)
-    endpoints: list[AmiEndpoint] = field(default_factory=list)
-    queues: list[AmiQueue] = field(default_factory=list)
-    recent_calls: list[CdrCall] = field(default_factory=list)
-    voicemails: list[VoicemailMessage] = field(default_factory=list)
-    security_events: list[SecurityEvent] = field(default_factory=list)
-    error: str | None = None
+# Compatibility aliases: these are the same classes, not wrappers/subclasses.
+AmiChannel = PbxChannel
+AmiEndpoint = PbxEndpoint
+AmiQueue = PbxQueue
+AmiSnapshot = PbxSnapshot
 
 
 @dataclass(frozen=True)
@@ -135,7 +86,7 @@ class ActivityTracker:
         self._recovered_trunks_waiting_for_call: set[str] = set()
         self._lock = Lock()
 
-    def observe(self, snapshot: AmiSnapshot, now: datetime) -> list[dict]:
+    def observe(self, snapshot: PbxSnapshot, now: datetime) -> list[dict]:
         current = _moment_state(snapshot)
         with self._lock:
             if current.reachable:
@@ -332,7 +283,7 @@ class _EndpointSignalState:
     signal_visible: bool = False
     notification_id: str = ""
     missing_started_at: datetime | None = None
-    last_unavailable_endpoint: AmiEndpoint | None = None
+    last_unavailable_endpoint: PbxEndpoint | None = None
 
 
 class EndpointAvailabilitySignalTracker:
@@ -351,7 +302,7 @@ class EndpointAvailabilitySignalTracker:
         self._states: dict[str, _EndpointSignalState] = {}
         self._lock = Lock()
 
-    def observe(self, snapshot: AmiSnapshot, now: datetime) -> set[str]:
+    def observe(self, snapshot: PbxSnapshot, now: datetime) -> set[str]:
         """Return endpoints whose unavailable Signal is ready to be shown.
 
         A phone has to remain unavailable for the outage confirmation period.
@@ -459,7 +410,7 @@ class EndpointAvailabilitySignalTracker:
                 if state.signal_visible and state.notification_id
             }
 
-    def signal_endpoints(self) -> dict[str, AmiEndpoint]:
+    def signal_endpoints(self) -> dict[str, PbxEndpoint]:
         """Return stable evidence for visible incidents, including inventory gaps."""
         with self._lock:
             return {
@@ -486,8 +437,8 @@ class EndpointAvailabilitySignalTracker:
 
 
 def uncertain_trunks(
-    endpoints: list[AmiEndpoint], evidence: str
-) -> list[AmiEndpoint]:
+    endpoints: list[PbxEndpoint], evidence: str
+) -> list[PbxEndpoint]:
     """Retain known trunk identities without asserting recovery or failure."""
     return [
         replace(
@@ -510,7 +461,7 @@ class EndpointAggregateTipTracker:
         self._started_at: datetime | None = None
         self._lock = Lock()
 
-    def observe(self, snapshot: AmiSnapshot, now: datetime) -> bool:
+    def observe(self, snapshot: PbxSnapshot, now: datetime) -> bool:
         unavailable = sum(
             endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
             for endpoint in snapshot.endpoints
@@ -523,7 +474,7 @@ class EndpointAggregateTipTracker:
             return now - self._started_at >= self._delay
 
 
-def _moment_state(snapshot: AmiSnapshot) -> _MomentState:
+def _moment_state(snapshot: PbxSnapshot) -> _MomentState:
     queue_waiting = tuple(
         sorted((queue.name, max(0, queue.waiting_callers)) for queue in snapshot.queues)
     )
@@ -595,7 +546,7 @@ def _activity_event_is_still_current(event: dict, current: _MomentState) -> bool
 
 
 def build_home_payload(
-    snapshot: AmiSnapshot,
+    snapshot: PbxSnapshot,
     *,
     display_name: str,
     extension_names: dict[str, str],
@@ -607,7 +558,7 @@ def build_home_payload(
     moment_hours: int = 24,
     moment_events: list[dict] | None = None,
     endpoint_unavailability_signals: set[str] | None = None,
-    endpoint_unavailability_evidence: dict[str, AmiEndpoint] | None = None,
+    endpoint_unavailability_evidence: dict[str, PbxEndpoint] | None = None,
     trunk_unavailability_signals: set[str] | None = None,
     endpoint_notification_ids: dict[str, str] | None = None,
     endpoint_signal_lifecycle: dict[str, dict[str, str]] | None = None,
@@ -713,8 +664,8 @@ def build_home_payload(
 
 
 def _build_people(
-    endpoints: list[AmiEndpoint],
-    active_channels: list[AmiChannel],
+    endpoints: list[PbxEndpoint],
+    active_channels: list[PbxChannel],
     extension_names: dict[str, str],
     endpoint_last_active: dict[str, datetime],
 ) -> list[dict]:
@@ -768,7 +719,7 @@ def _build_people(
 
 
 def _person_presence(
-    endpoint: AmiEndpoint,
+    endpoint: PbxEndpoint,
     *,
     is_talking: bool,
 ) -> tuple[str, str]:
@@ -814,7 +765,7 @@ def _normalized_presence(raw: str) -> tuple[str, str] | None:
 
 
 def _build_trunks(
-    endpoints: list[AmiEndpoint],
+    endpoints: list[PbxEndpoint],
     extension_names: dict[str, str],
 ) -> list[dict]:
     trunks: list[dict] = []
@@ -862,7 +813,7 @@ def _build_trunks(
     return trunks
 
 
-def _build_queues(queues: list[AmiQueue]) -> list[dict]:
+def _build_queues(queues: list[PbxQueue]) -> list[dict]:
     result: list[dict] = []
     for queue in sorted(queues, key=lambda item: item.name):
         waiting = max(0, queue.waiting_callers)
@@ -927,8 +878,8 @@ def _wait_label(seconds: int) -> str:
 
 
 def _build_signals(
-    snapshot: AmiSnapshot,
-    active_channels: list[AmiChannel],
+    snapshot: PbxSnapshot,
+    active_channels: list[PbxChannel],
     extension_names: dict[str, str],
     endpoint_labels: dict[str, str],
     endpoint_roles: dict[str, str],
@@ -937,7 +888,7 @@ def _build_signals(
     moment_hours: int,
     moment_events: list[dict],
     endpoint_unavailability_signals: set[str] | None,
-    endpoint_unavailability_evidence: dict[str, AmiEndpoint],
+    endpoint_unavailability_evidence: dict[str, PbxEndpoint],
     endpoint_notification_ids: dict[str, str],
     endpoint_signal_lifecycle: dict[str, dict[str, str]],
     trunk_unavailability_signals: set[str] | None,
@@ -1136,8 +1087,8 @@ def _build_signals(
 
 
 def _activity_signals(
-    snapshot: AmiSnapshot,
-    active_channels: list[AmiChannel],
+    snapshot: PbxSnapshot,
+    active_channels: list[PbxChannel],
     now: datetime,
     moment_hours: int,
     moment_events: list[dict],
@@ -1204,7 +1155,7 @@ def _valid_moment_hours(hours: int) -> int:
 
 
 def _trunk_signals(
-    endpoint: AmiEndpoint,
+    endpoint: PbxEndpoint,
     extension_names: dict[str, str],
 ) -> list[dict]:
     name = _extension_name(endpoint.extension, extension_names, endpoint.label)
@@ -1286,7 +1237,7 @@ def _trunk_signals(
 
 
 def _call_from_channel(
-    channel: AmiChannel,
+    channel: PbxChannel,
     extension_names: dict[str, str],
     endpoint_labels: dict[str, str],
     endpoint_roles: dict[str, str],
@@ -1484,7 +1435,7 @@ def _looks_like_extension(value: str, extension: str) -> bool:
     }
 
 
-def _quiet_now(snapshot: AmiSnapshot) -> dict:
+def _quiet_now(snapshot: PbxSnapshot) -> dict:
     if snapshot.reachable:
         return {
             "title": "No calls right now.",
@@ -1504,8 +1455,8 @@ def _quiet_now(snapshot: AmiSnapshot) -> dict:
 
 
 def _mood(
-    snapshot: AmiSnapshot,
-    active_channels: list[AmiChannel],
+    snapshot: PbxSnapshot,
+    active_channels: list[PbxChannel],
     signals: list[dict],
 ) -> str:
     if not snapshot.reachable:
@@ -1517,8 +1468,8 @@ def _mood(
     return "Everything looks healthy."
 
 
-def _dedupe_call_channels(channels: list[AmiChannel]) -> list[AmiChannel]:
-    groups: dict[str, list[AmiChannel]] = {}
+def _dedupe_call_channels(channels: list[PbxChannel]) -> list[PbxChannel]:
+    groups: dict[str, list[PbxChannel]] = {}
     order: list[str] = []
     for channel in channels:
         key = _call_group_key(channel)
@@ -1530,7 +1481,7 @@ def _dedupe_call_channels(channels: list[AmiChannel]) -> list[AmiChannel]:
     return [_preferred_call_channel(groups[key]) for key in order]
 
 
-def _call_group_key(channel: AmiChannel) -> str:
+def _call_group_key(channel: PbxChannel) -> str:
     if channel.linked_id:
         return f"linked:{channel.linked_id}"
     parties = _call_party_key(channel)
@@ -1539,7 +1490,7 @@ def _call_group_key(channel: AmiChannel) -> str:
     return f"channel:{channel.channel}"
 
 
-def _preferred_call_channel(channels: list[AmiChannel]) -> AmiChannel:
+def _preferred_call_channel(channels: list[PbxChannel]) -> PbxChannel:
     for channel in channels:
         if channel.caller_number and _person_endpoint(channel) == channel.caller_number:
             return channel
@@ -1549,13 +1500,13 @@ def _preferred_call_channel(channels: list[AmiChannel]) -> AmiChannel:
     return channels[0]
 
 
-def _call_party_key(channel: AmiChannel) -> frozenset[str]:
+def _call_party_key(channel: PbxChannel) -> frozenset[str]:
     person = _person_endpoint(channel)
     peer = _peer_endpoint(channel, person)
     return frozenset(party for party in (person, peer) if party)
 
 
-def _peer_endpoint(channel: AmiChannel, person_endpoint: str) -> str:
+def _peer_endpoint(channel: PbxChannel, person_endpoint: str) -> str:
     for candidate in (
         channel.connected_number,
         channel.extension,
@@ -1566,7 +1517,7 @@ def _peer_endpoint(channel: AmiChannel, person_endpoint: str) -> str:
     return ""
 
 
-def _connection_detail(snapshot: AmiSnapshot, display_name: str) -> str:
+def _connection_detail(snapshot: PbxSnapshot, display_name: str) -> str:
     if snapshot.reachable:
         return f"{display_name} answered the Agent snapshot request."
     return snapshot.error or "The Agent has not connected to the PBX yet."
@@ -1580,18 +1531,18 @@ def _greeting(now: datetime) -> str:
     return "Good evening"
 
 
-def _is_active_channel(channel: AmiChannel) -> bool:
+def _is_active_channel(channel: PbxChannel) -> bool:
     state = channel.state.lower()
     return state in {"up", "ring", "ringing"} or bool(channel.connected)
 
 
-def _endpoint_unavailable(endpoint: AmiEndpoint) -> bool:
+def _endpoint_unavailable(endpoint: PbxEndpoint) -> bool:
     if endpoint.role == "trunk":
         return _trunk_health_state(endpoint) == "down"
     return _device_state_is_unavailable(endpoint.device_state)
 
 
-def _trunk_health_state(endpoint: AmiEndpoint) -> str:
+def _trunk_health_state(endpoint: PbxEndpoint) -> str:
     explicit = endpoint.health_status.strip().lower()
     if explicit in {"healthy", "degraded", "down", "unknown"}:
         return explicit
@@ -1643,11 +1594,11 @@ def _registered_trunk_detail(device_state: str) -> str:
     return state
 
 
-def _caller_name(channel: AmiChannel) -> str:
+def _caller_name(channel: PbxChannel) -> str:
     return channel.caller or channel.connected or "a caller"
 
 
-def _trunk_call_title(channel: AmiChannel, trunk_number: str = "") -> str:
+def _trunk_call_title(channel: PbxChannel, trunk_number: str = "") -> str:
     caller = _trunk_call_caller(channel)
     destination = _trunk_call_destination(channel, trunk_number)
     if destination:
@@ -1655,7 +1606,7 @@ def _trunk_call_title(channel: AmiChannel, trunk_number: str = "") -> str:
     return f"{caller} is using the SIP trunk."
 
 
-def _trunk_call_caller(channel: AmiChannel) -> str:
+def _trunk_call_caller(channel: PbxChannel) -> str:
     return (
         _clean_unknown(channel.caller_number)
         or _clean_unknown(channel.caller)
@@ -1664,7 +1615,7 @@ def _trunk_call_caller(channel: AmiChannel) -> str:
     )
 
 
-def _trunk_call_destination(channel: AmiChannel, trunk_number: str = "") -> str:
+def _trunk_call_destination(channel: PbxChannel, trunk_number: str = "") -> str:
     trunk_endpoint = channel.endpoint or _endpoint_from_channel(channel.channel)
     for candidate in (
         channel.connected_number,
@@ -1694,7 +1645,7 @@ def _looks_like_callable_number(value: str) -> bool:
     return len(digits) >= 3 or stripped.startswith("+")
 
 
-def _person_endpoint(channel: AmiChannel) -> str:
+def _person_endpoint(channel: PbxChannel) -> str:
     return channel.endpoint or _endpoint_from_channel(channel.channel) or channel.extension
 
 
@@ -1706,7 +1657,7 @@ def _endpoint_from_channel(channel: str) -> str:
 
 
 def _peer_name(
-    channel: AmiChannel,
+    channel: PbxChannel,
     *,
     person_endpoint: str,
     extension_names: dict[str, str],

@@ -8,6 +8,15 @@ COPY requirements.lock .
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY app.py .
 COPY backend_worker.py .
+COPY request_auth.py .
+COPY notification_delivery.py .
+COPY notification_usage.py .
+COPY usage_accounting.py .
+COPY usage_dashboard.py .
+COPY cost_model.py .
+COPY usage_report.py .
+COPY authentication.py .
+COPY routes.py .
 
 RUN adduser --disabled-password --gecos "" pbxsense-relay
 USER pbxsense-relay

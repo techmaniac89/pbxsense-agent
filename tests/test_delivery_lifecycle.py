@@ -14,6 +14,9 @@ from unittest.mock import MagicMock, AsyncMock
 from fastapi import HTTPException
 from pbxsense_agent.live import home_live_events
 from pbxsense_agent.relay import _secure_snapshot_projection
+from push_relay.notification_delivery import (
+    NotificationDelivery, _recipient_digest, _retryable_fcm_failure,
+)
 
 
 class DeliveryLifecycleTest(unittest.TestCase):
@@ -28,7 +31,10 @@ class DeliveryLifecycleTest(unittest.TestCase):
                        timezone=timezone, hashlib=hashlib, json=json, secrets=secrets,
                        time=time, HTTPException=HTTPException,
                        firestore=SimpleNamespace(SERVER_TIMESTAMP="server-time"),
-                       MAX_EVENTS_PER_AGENT_PER_HOUR=60)
+                       MAX_EVENTS_PER_AGENT_PER_HOUR=60,
+                       NotificationDelivery=NotificationDelivery,
+                       _recipient_digest=_recipient_digest,
+                       _retryable_fcm_failure=_retryable_fcm_failure)
         exec(compile(ast.Module(nodes, type_ignores=[]), "delivery", "exec"), self.ns)
 
     def test_relay_keeps_pbx_failure_separate_from_transport(self):

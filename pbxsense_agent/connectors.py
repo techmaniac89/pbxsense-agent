@@ -6,7 +6,7 @@ from .ami import AmiClient
 from .freeswitch import FreeSwitchClient
 from .grandstream import GrandstreamUcmClient
 from .mock import mock_snapshot
-from .pulse import AmiSnapshot
+from .observations import PbxSnapshot
 from .settings import AgentSettings
 from .yeastar import YeastarClient
 from .cucm import CucmClient
@@ -16,7 +16,7 @@ class PBXConnector(Protocol):
     name: str
     diagnostics_label: str
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         ...
 
     def diagnostics(self) -> dict:
@@ -27,7 +27,7 @@ class MockConnector:
     name = "mock"
     diagnostics_label = "Mock"
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         return mock_snapshot()
 
     def diagnostics(self) -> dict:

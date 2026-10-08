@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot, uncertain_trunks
+from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
+from .pulse import uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 from .socket_deadline import socket_deadline
@@ -42,12 +43,12 @@ class FreeSwitchClient:
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
-        self._known_trunks: list[AmiEndpoint] = []
+        self._known_trunks: list[PbxEndpoint] = []
         self._cached_recent_calls: list[CdrCall] = []
         self._cached_voicemails: list[VoicemailMessage] = []
         self._history_refresh_after = 0.0
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         try:
             channels = self._channels()
             endpoints = self._endpoints(channels)
@@ -61,7 +62,7 @@ class FreeSwitchClient:
                 )
             endpoints.extend(trunks)
             recent_calls, voicemails = self._history()
-            return AmiSnapshot(
+            return PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=channels,
@@ -71,7 +72,7 @@ class FreeSwitchClient:
                 voicemails=voicemails,
             )
         except OSError:
-            return AmiSnapshot(
+            return PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The FreeSWITCH ESL connection is unavailable.",
@@ -127,7 +128,7 @@ class FreeSwitchClient:
         result["ok"] = result["loginAccepted"] is True
         return result
 
-    def _channels(self) -> list[AmiChannel]:
+    def _channels(self) -> list[PbxChannel]:
         with self._connect() as sock:
             self._authenticate(sock)
             raw = self._api(sock, "show channels as json")
@@ -135,7 +136,7 @@ class FreeSwitchClient:
         rows = _rows(data)
         return [_channel_from_row(row) for row in rows]
 
-    def _endpoints(self, channels: list[AmiChannel]) -> list[AmiEndpoint]:
+    def _endpoints(self, channels: list[PbxChannel]) -> list[PbxEndpoint]:
         active = {item.extension: item for item in self._endpoints_from_channels(channels)}
         try:
             with self._connect() as sock:
@@ -144,13 +145,13 @@ class FreeSwitchClient:
         except OSError:
             return list(active.values())
 
-        endpoints: dict[str, AmiEndpoint] = dict(active)
+        endpoints: dict[str, PbxEndpoint] = dict(active)
         for row in rows:
             extension = _string(row, "reg_user", "user", "username")
             if not extension:
                 continue
             current = active.get(extension)
-            endpoints[extension] = AmiEndpoint(
+            endpoints[extension] = PbxEndpoint(
                 extension=extension,
                 device_state="Reachable",
                 active_channels=current.active_channels if current else 0,
@@ -165,13 +166,13 @@ class FreeSwitchClient:
             )
         return list(endpoints.values())
 
-    def _queues(self) -> list[AmiQueue]:
+    def _queues(self) -> list[PbxQueue]:
         try:
             with self._connect() as sock:
                 self._authenticate(sock)
                 names = _pipe_first_column(self._api(sock, "callcenter_config queue list"))
                 return [
-                    AmiQueue(
+                    PbxQueue(
                         name=name,
                         waiting_callers=_first_integer(
                             self._api(sock, f"callcenter_config queue count members {name}")
@@ -183,11 +184,11 @@ class FreeSwitchClient:
             # mod_callcenter is optional; live calls and presence still work.
             return []
 
-    def _trunks(self) -> list[AmiEndpoint]:
+    def _trunks(self) -> list[PbxEndpoint]:
         with self._connect() as sock:
             self._authenticate(sock)
             summary = self._api(sock, "sofia status")
-            trunks: list[AmiEndpoint] = []
+            trunks: list[PbxEndpoint] = []
             for name in _sofia_gateway_names(summary):
                 detail = self._api(sock, f"sofia status gateway {name}")
                 state = _detail_value(detail, "State")
@@ -195,7 +196,7 @@ class FreeSwitchClient:
                 health, confidence, evidence = _freeswitch_gateway_health(
                     state, status
                 )
-                trunks.append(AmiEndpoint(
+                trunks.append(PbxEndpoint(
                     extension=name,
                     device_state=" / ".join(filter(None, (state, status))),
                     label=name.split("::", 1)[-1],
@@ -296,8 +297,8 @@ class FreeSwitchClient:
             raise FreeSwitchError(f"{phase} body timed out") from exc
         return b"".join(chunks)
 
-    def _endpoints_from_channels(self, channels: list[AmiChannel]) -> list[AmiEndpoint]:
-        endpoints: dict[str, AmiEndpoint] = {}
+    def _endpoints_from_channels(self, channels: list[PbxChannel]) -> list[PbxEndpoint]:
+        endpoints: dict[str, PbxEndpoint] = {}
         for channel in channels:
             # A FreeSWITCH call normally has both an internal phone leg and an
             # external gateway leg.  Only extension-facing channel types belong
@@ -310,7 +311,7 @@ class FreeSwitchClient:
                 continue
             existing = endpoints.get(endpoint)
             active_channels = (existing.active_channels if existing else 0) + 1
-            endpoints[endpoint] = AmiEndpoint(
+            endpoints[endpoint] = PbxEndpoint(
                 extension=endpoint,
                 device_state="Reachable",
                 active_channels=active_channels,
@@ -413,14 +414,14 @@ def _freeswitch_gateway_health(
     return "unknown", "low", evidence
 
 
-def _channel_from_row(row: dict[str, Any]) -> AmiChannel:
+def _channel_from_row(row: dict[str, Any]) -> PbxChannel:
     name = _string(row, "name", "uuid")
     endpoint = _endpoint_from_channel(name)
     caller_number = _string(row, "cid_num", "cid_number", "caller_id_number")
     caller = _string(row, "cid_name", "caller_id_name", "cid_num")
     destination = _string(row, "dest", "callee_num", "presence_id")
     state = _string(row, "state", "callstate")
-    return AmiChannel(
+    return PbxChannel(
         channel=name,
         extension=destination or endpoint,
         caller=caller or caller_number,

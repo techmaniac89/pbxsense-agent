@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
+from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
 from .version import AGENT_VERSION
 
 
-def mock_snapshot() -> AmiSnapshot:
-    return AmiSnapshot(
+def mock_snapshot() -> PbxSnapshot:
+    return PbxSnapshot(
         reachable=True,
         agent_version=AGENT_VERSION,
         channels=[
-            AmiChannel(
+            PbxChannel(
                 channel="PJSIP/101-00000042",
                 extension="101",
                 caller="Maria",
@@ -19,26 +19,26 @@ def mock_snapshot() -> AmiSnapshot:
             )
         ],
         endpoints=[
-            AmiEndpoint(
+            PbxEndpoint(
                 extension="101",
                 device_state="Reachable",
                 active_channels=1,
                 label="Reception",
             ),
-            AmiEndpoint(
+            PbxEndpoint(
                 extension="120",
                 device_state="Reachable",
                 label="Support",
                 presence="Away",
             ),
-            AmiEndpoint(
+            PbxEndpoint(
                 extension="130",
                 device_state="Reachable",
                 label="Sales",
                 presence="Do Not Disturb",
             ),
-            AmiEndpoint(extension="200", device_state="Unavailable", label="Warehouse"),
-            AmiEndpoint(
+            PbxEndpoint(extension="200", device_state="Unavailable", label="Warehouse"),
+            PbxEndpoint(
                 extension="sip-provider",
                 device_state="Reachable",
                 label="Main SIP trunk",
@@ -47,7 +47,7 @@ def mock_snapshot() -> AmiSnapshot:
             ),
         ],
         queues=[
-            AmiQueue(
+            PbxQueue(
                 name="support",
                 waiting_callers=2,
                 longest_wait_seconds=94,

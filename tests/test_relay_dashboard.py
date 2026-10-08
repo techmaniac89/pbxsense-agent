@@ -7,6 +7,8 @@ import hmac
 import time
 import unittest
 from pathlib import Path
+from push_relay.cost_model import RelayCostModel
+from push_relay.authentication import RelayAuthentication
 
 
 class RelayDashboardTest(unittest.TestCase):
@@ -27,6 +29,12 @@ class RelayDashboardTest(unittest.TestCase):
             "ADMIN_COOKIE_TTL_SECONDS": 8 * 60 * 60,
         }
         exec(compile(ast.Module(functions, type_ignores=[]), "cookie", "exec"), namespace)
+        namespace["_relay_auth"] = lambda: RelayAuthentication(
+            db=None, server_timestamp=None, already_exists=RuntimeError,
+            identifier=lambda value, field: str(value), max_snapshot_bytes=1024,
+            admin_token="operator-secret", ticket_secret="", admin_cookie="admin",
+            admin_cookie_ttl=8 * 60 * 60, clock=time.time, now=lambda: None,
+        )
         cookie = namespace["_admin_cookie_value"](200)
 
         self.assertTrue(namespace["_admin_cookie_valid"](cookie, 199))
@@ -37,18 +45,7 @@ class RelayDashboardTest(unittest.TestCase):
     def test_operations_dashboard_renders_complete_metric_sections(self) -> None:
         source = Path("push_relay/app.py").read_text(encoding="utf-8")
         module = ast.parse(source)
-        selected = {
-            "_human_age",
-            "_human_bytes",
-            "_daily_workload",
-            "_estimated_relay_cost",
-            "_money",
-            "_usage_dashboard_page",
-            "_percent_text",
-            "_latency_text",
-            "_usage_css",
-            "_usage_identity",
-        }
+        selected = {"_estimated_relay_cost"}
         functions = [
             node
             for node in module.body
@@ -56,6 +53,7 @@ class RelayDashboardTest(unittest.TestCase):
         ]
         namespace = {
             "html": html,
+            "_cost_model": RelayCostModel(),
             "RELAY_VERSION": "test",
             "CLOUD_RUN_REQUEST_USD": 0.0000004,
             "CLOUD_RUN_VCPU_SECOND_USD": 0.000024,
@@ -163,7 +161,10 @@ class RelayDashboardTest(unittest.TestCase):
             "privacy": "Hashed identifiers only.",
         }
 
-        rendered = namespace["_usage_dashboard_page"](report)
+        from push_relay.usage_dashboard import _usage_dashboard_page
+        rendered = _usage_dashboard_page(
+            report, relay_version="test", cost_estimator=namespace["_estimated_relay_cost"],
+        )
         cards = rendered.split('<section class="cards">', 1)[1].split("</section>", 1)[0]
 
         self.assertIn("Operations dashboard", rendered)
@@ -182,9 +183,16 @@ class RelayDashboardTest(unittest.TestCase):
         self.assertNotIn("currently inactive", rendered)
         self.assertIn("Metric notes", rendered)
         self.assertNotIn("FCM token", rendered)
+        report["privacy"] = "<script>unsafe()</script>"
+        escaped = _usage_dashboard_page(
+            report, relay_version="<test>", cost_estimator=namespace["_estimated_relay_cost"],
+        )
+        self.assertIn("&lt;script&gt;unsafe()&lt;/script&gt;", escaped)
+        self.assertIn("&lt;test&gt;", escaped)
+        self.assertNotIn("<script>unsafe()</script>", escaped)
 
     def test_usage_identity_is_stable_and_separates_agents_from_apps(self) -> None:
-        source = Path("push_relay/app.py").read_text(encoding="utf-8")
+        source = Path("push_relay/usage_accounting.py").read_text(encoding="utf-8")
         module = ast.parse(source)
         function = next(
             node
@@ -208,6 +216,7 @@ class RelayDashboardTest(unittest.TestCase):
         )
         namespace = {
             "CLOUD_RUN_REQUEST_USD": 0.0000004,
+            "_cost_model": RelayCostModel(),
             "CLOUD_RUN_VCPU_SECOND_USD": 0.000024,
             "CLOUD_RUN_GIB_SECOND_USD": 0.0000025,
             "AVERAGE_REQUEST_SECONDS": 0.05,

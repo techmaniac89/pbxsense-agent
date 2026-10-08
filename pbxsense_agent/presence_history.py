@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 
-from .pulse import AmiSnapshot, _endpoint_unavailable
+from .observations import PbxSnapshot
+from .pulse import _endpoint_unavailable
 
 
 class EndpointLastActiveTracker:
@@ -18,7 +19,7 @@ class EndpointLastActiveTracker:
         self._last_active = self._load()
         self._was_available: dict[str, bool] = {}
 
-    def observe(self, snapshot: AmiSnapshot, now: datetime) -> dict[str, datetime]:
+    def observe(self, snapshot: PbxSnapshot, now: datetime) -> dict[str, datetime]:
         if not snapshot.reachable:
             return self.snapshot()
         changed = False

@@ -155,7 +155,7 @@ authentication state and rate-limit documents are short-lived quota counters;
 both are safe to delete after their enforcement windows.
 
 Deploy compatibility note: Agent `0.6.0-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.21`,
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.27`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -209,11 +209,11 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.21` adds an activation ID to the owning Agent's authenticated
-device list. Agent `0.6.26-beta` uses it to revoke an Internet-paired app's LAN
+Relay service `0.5.27` adds an activation ID to the owning Agent's authenticated
+device list. Agent `0.6.34-beta` uses it to revoke an Internet-paired app's LAN
 credential individually. Deploy this relay version before that Agent upgrade.
 
-Relay service `0.5.21` provides the encrypted Internet Relay data path and
+Relay service `0.5.27` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -237,7 +237,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.21 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.27 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the
@@ -250,7 +250,7 @@ heartbeat, so cost tuning never weakens Agent-down detection.
 
 Open `/admin/usage` and enter the Relay administrator token for the private
 operator dashboard. It shows current fleet presence, the remotely delivered
-policy, per-day counters, and hashed Agent activity. Relay `0.5.21` also shows
+policy, per-day counters, and hashed Agent activity. Relay `0.5.27` also shows
 Firebase acceptance/failure and latency, notification-quota pressure,
 heartbeat-scheduler freshness, remote-snapshot availability, encrypted-data
 coverage, expiring registrations, retention expectations, and a seven-day
@@ -334,7 +334,7 @@ An administrator can verify an enabled Agent session with an authenticated
 `POST /v1/internal/agents/{agent_id}/secure/ping`. The Agent returns `pong` on
 its following outbound exchange; inspect the `secureCommands` document for its
 completed state. This endpoint is an operator smoke test, not an app API.
-# Notification retry lifecycle (0.5.21)
+# Notification retry lifecycle (0.5.27)
 
 Signal delivery uses durable event leases and completed recipient hashes.
 Transient FCM recipient failures return 503; the Agent's persisted outbox retries
@@ -349,8 +349,87 @@ between FCM acceptance and checkpointing can repeat a send. Stable notification
 IDs and Android tags reduce visible duplicates. Deploy this relay release to
 activate the cloud-side fixes; rebuilding only the Agent does not update it.
 
-Relay 0.5.21 runs blocking Firebase-backed route work in a bounded worker pool
+Relay 0.5.27 runs blocking Firebase-backed route work in a bounded worker pool
 (16 active backend requests per instance), keeping the ASGI event loop available
 while database or FCM calls wait. Request bodies remain bounded and are cached on
 the main loop before dispatch. Cloud Run's existing request/instance limits are
 unchanged; this release must be deployed separately from Agent updates.
+
+## Request authentication boundary (0.5.27)
+
+Signed Agent and activation request verification now lives in `request_auth.py`,
+without Firebase initialization or database access. Identity/revocation checks,
+durable replay nonce claims and presence updates stay in `app.py`, in the same
+order. Both existing signature formats, timestamp limits, nonce scope and HTTP
+errors are preserved. Enrollment mode, ticket behavior, quotas and notification
+delivery are unchanged. Deploy Relay 0.5.27 separately to apply this internal
+refactor; Agent 0.6.34-beta and the app require no compatibility changes.
+
+## Event delivery boundary (0.5.27)
+
+`notification_delivery.py` coordinates event recipient filtering, FCM sends,
+retryable/permanent outcomes and delivery checkpoint callbacks. Atomic quota
+charging, lease acquisition/ownership and database writes remain in `app.py`.
+Preferences, expiry, notification tags, successful-recipient deduplication,
+invalid-token cleanup and reporting order are unchanged. Agent-status sending
+remains in the application and shares the extracted token helper.
+
+This remains at-least-once delivery. Local tests use mocked messaging/database
+services and do not verify actual handset delivery. Deploy Relay 0.5.27
+separately to apply the refactor; Agent/app versions do not change.
+
+## Agent-status and outcome reporting boundaries (0.5.27)
+
+`AgentStatusDelivery` now coordinates lost/restored Agent sends with the same
+meaningful-notification preference, expiry, token deduplication and high-priority
+`agent_connection` payload. Loss detection and identity lookup remain in
+`app.py`; status notifications do not acquire event leases or charge event quotas.
+
+`notification_usage.py` writes the existing privacy-safe notification counters
+through injected database/rollup services. Daily aggregation remains in the
+application. Counter definitions, no-recipient attempts, optional quota fields,
+cleanup/reporting order and exception propagation are preserved. Local tests
+mock cloud services; deploy Relay 0.5.27 separately to apply these changes.
+
+## Daily accounting and dashboard boundaries (0.5.27)
+
+`usage_accounting.py` separates UTC counter rollover, deterministic hashed
+daily archives and rollup reads with injected database/clock operations.
+Archive-before-marker order, same-day increments and 90-day retention remain
+unchanged; the refactor does not make rollover transactional.
+
+`usage_dashboard.py` renders the existing report without database access.
+Administrator authentication, report queries and configurable cost formulas
+remain in the application. Dashboard sections and escaped text are preserved.
+Deploy Relay 0.5.27 separately; local mocked tests are not live billing or
+handset validation. Agent/app versions do not change.
+
+## Report queries and cost configuration (0.5.27)
+
+`usage_report.py` builds the existing operations report through injected
+database/accounting/policy services. It retains the 1,000-Agent query limit,
+100-row workload-sorted output, presence/retention/quota thresholds and hashed
+Agent identifiers. Administrator authorization remains in the application.
+
+`cost_model.py` reads the same cost environment variables and applies the
+unchanged estimate/projection formulas. The currency setting is a label, not
+automatic currency conversion. Costs remain gross workload estimates rather
+than invoices. Deploy Relay 0.5.27 separately to apply this refactor; no
+Agent/app compatibility changes are required.
+
+## Route and authentication boundaries (0.5.27)
+
+`routes.py` registers all 21 existing endpoints using the original handlers,
+response classes and backend workers. `authentication.py` coordinates Agent
+identity/signatures/replay claims, paired-app credentials, activation replay
+claims, enrollment tickets and administrator sessions through injected services.
+
+Public paths, payloads, enrollment mode, ticket behavior and authorization
+rules are unchanged. Replay nonce writes precede optional presence updates;
+internal administrator APIs still require the header token rather than a
+dashboard cookie. Middleware, domain operations and Firestore quota/delivery
+transactions remain in the application.
+
+This completes the local architectural separation work, not a cloud rollout.
+Deploy Relay 0.5.27 separately. Local tests mock Firebase/FCM and do not confirm
+real-phone delivery; Agent/app versions do not change for this refactor.

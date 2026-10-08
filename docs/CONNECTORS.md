@@ -12,6 +12,21 @@ responsible for PBX-specific access, authentication, parsing, and diagnostics.
 Everything they return should already be shaped for the Agent engine, not for a
 specific vendor UI or raw protocol feed.
 
+The internal contract is `PbxSnapshot`, containing `PbxChannel`, `PbxEndpoint`
+and `PbxQueue` observations from `pbxsense_agent.observations`. These neutral
+types are shared by all connectors; they are not the app's JSON schema.
+Legacy `pulse.AmiSnapshot`, `AmiChannel`, `AmiEndpoint` and `AmiQueue` imports
+remain exact aliases for compatibility. New connectors should import the
+neutral types directly. Preserve health confidence, unknown states and optional
+history evidence rather than inventing capabilities a PBX cannot report.
+
+`HistoryCollector` merges configured local history for Asterisk/Grandstream and
+CUCM at `history_poll_seconds`, without changing the live snapshot interval.
+FreeSWITCH and Yeastar keep their connector-owned history collection. Failed
+local reads do not advance cache fingerprints, allowing the next collection to
+retry. `SignalCollector` observes the enriched snapshot under the runtime's
+collection lock; connector code must not call trackers independently.
+
 ```text
 PBX connector
   -> channels, endpoints, trunks, extension presence, history evidence

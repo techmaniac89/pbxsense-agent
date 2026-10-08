@@ -18,16 +18,17 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from starlette.responses import Response, StreamingResponse
 
 from .connectors import connector_for_settings
+from .collected_state import CollectedHomeState
 from .credentials import AppCredentials
-from .cucm import enrich_cucm_trunks_with_history
+from .history_collection import (
+    HistoryCollector, file_signature as _file_signature,
+    voicemail_signature as _voicemail_signature, history_paths, security_log_path,
+)
+from .signal_collection import SignalCollector
 from .diagnostics import connector_diagnostic_statuses
 from .history import (
     cucm_history_diagnostics,
     history_diagnostics,
-    read_recent_cdr_calls,
-    read_recent_cucm_calls,
-    read_recent_security_events,
-    read_recent_voicemails,
     security_diagnostics,
 )
 from .internet_relay import SecureInternetRelay
@@ -48,6 +49,7 @@ from .relay import AgentRelay
 from .relay import PRESENCE_HEARTBEAT_INTERVAL_SECONDS
 from .settings import AgentSettings
 from .version import AGENT_RELEASE_CHANNEL, AGENT_VERSION
+from .snapshot_runtime import SnapshotRuntime
 
 settings = AgentSettings.from_env()
 logger = logging.getLogger("pbxsense_agent.runtime")
@@ -79,6 +81,11 @@ endpoint_aggregate_tip_tracker = EndpointAggregateTipTracker(
     timedelta(seconds=max(0, settings.quality_frequency_seconds))
 )
 endpoint_last_active_tracker = EndpointLastActiveTracker(settings.endpoint_activity_path)
+_signal_collector = SignalCollector(
+    activity=activity_tracker, endpoints=endpoint_availability_tracker,
+    trunks=trunk_availability_tracker, aggregate_tip=endpoint_aggregate_tip_tracker,
+    last_active=endpoint_last_active_tracker,
+)
 signal_notification_episode_tracker = SignalNotificationEpisodeTracker()
 push_relay = AgentRelay(
     url=settings.relay_url,
@@ -112,23 +119,18 @@ _relay_publish_task: asyncio.Task[None] | None = None
 _relay_heartbeat_task: asyncio.Task[None] | None = None
 _internet_relay_task: asyncio.Task[None] | None = None
 _watchdog_task: asyncio.Task[None] | None = None
-_snapshot_lock = threading.Lock()
-_collection_lock = threading.Lock()
-_payload_lock = threading.Lock()
+_snapshot_runtime: SnapshotRuntime[CollectedHomeState] = SnapshotRuntime(
+    collect=lambda: _collect_home_state(),
+    build_payload=lambda state, hours: _home_payload_from_state(state, moment_hours=hours),
+    stale_after=max(10.0, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds),
+    stall_after=max(30.0, settings.timeout_seconds * 20),
+)
 _browser_bootstrap_lock = threading.Lock()
 _app_credentials: AppCredentials | None = None
 _app_credentials_lock = threading.Lock()
-_cached_home_state: tuple | None = None
-_snapshot_published_at_monotonic = 0.0
-_collection_started_monotonic = 0.0
-_cached_history: tuple[list, list, list] = ([], [], [])
-_history_refreshed_at = 0.0
-_cdr_history_signature: tuple[str, int, int] | None = None
-_voicemail_history_signature: tuple[tuple[str, int, int], ...] | None = None
-_security_history_signature: tuple[str, int, int] | None = None
+_history_collector = HistoryCollector(poll_interval=HISTORY_POLL_INTERVAL_SECONDS)
 _runtime_lock = threading.Lock()
 _runtime_state: dict[str, dict[str, object]] = {}
-_cached_home_payloads: dict[int, dict[str, object]] = {}
 RUNTIME_ERROR_LOG_INTERVAL_SECONDS = 60
 WATCHDOG_INTERVAL_SECONDS = 5
 
@@ -205,7 +207,7 @@ async def _snapshot_loop() -> None:
     while True:
         try:
             state = await asyncio.to_thread(_refresh_home_state)
-            snapshot = state[0]
+            snapshot = state.snapshot
             _record_runtime_result(
                 "snapshot",
                 ok=bool(snapshot.reachable),
@@ -344,13 +346,7 @@ def _record_runtime_result(
 def _runtime_diagnostics() -> dict[str, object]:
     with _runtime_lock:
         result = {name: dict(value) for name, value in _runtime_state.items()}
-    started = _collection_started_monotonic
-    elapsed = max(0.0, time.monotonic() - started) if started else 0.0
-    result.setdefault("snapshot", {}).update({
-        "collectionInProgress": bool(started),
-        "collectionElapsedSeconds": round(elapsed, 2),
-        "collectionStalled": elapsed > max(30.0, settings.timeout_seconds * 20),
-    })
+    result.setdefault("snapshot", {}).update(_snapshot_runtime.diagnostics())
     return result
 
 
@@ -1266,203 +1262,40 @@ async def live(websocket: WebSocket) -> None:
 
 
 def _home_payload(*, moment_hours: int = 24) -> dict:
-    with _snapshot_lock:
-        state = _cached_home_state
-        cached = _cached_home_payloads.get(moment_hours)
-    if state is None:
-        _refresh_home_state(only_if_missing=True)
-    if cached is not None:
-        return _with_snapshot_freshness(cached)
-    with _payload_lock:
-        with _snapshot_lock:
-            state = _cached_home_state
-            cached = _cached_home_payloads.get(moment_hours)
-        if cached is None:
-            cached = _home_payload_from_state(state, moment_hours=moment_hours)
-            with _snapshot_lock:
-                if state is _cached_home_state:
-                    _cached_home_payloads[moment_hours] = cached
-        return _with_snapshot_freshness(cached)
+    return _snapshot_runtime.home(moment_hours=moment_hours)
 
 
-def _with_snapshot_freshness(payload: dict) -> dict:
-    with _snapshot_lock:
-        published = _snapshot_published_at_monotonic
-    stale_after = max(10.0, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds)
-    if not published or time.monotonic() - published <= stale_after:
-        return payload
-    # Never mutate a published object already held by a live client.
-    return {**payload, "snapshotStale": True, "connection": {
-        **payload.get("connection", {}), "kind": "reconnecting", "label": "Reconnecting",
-        "detail": "The last complete PBX snapshot is stale; collection is still pending.",
-    }}
+def _refresh_home_state(*, only_if_missing: bool = False) -> CollectedHomeState:
+    return _snapshot_runtime.refresh(only_if_missing=only_if_missing)
 
 
-def _refresh_home_state(*, only_if_missing: bool = False) -> tuple:
-    global _collection_started_monotonic
-    # Only one collector owns connector sessions/history/trackers. Readers do
-    # not take this lock and continue to serve the last complete snapshot.
-    with _collection_lock:
-        if only_if_missing:
-            with _snapshot_lock:
-                if _cached_home_state is not None:
-                    return _cached_home_state
-        _collection_started_monotonic = time.monotonic()
-        try:
-            return _refresh_home_state_locked()
-        finally:
-            _collection_started_monotonic = 0.0
+def _collect_home_state() -> CollectedHomeState:
+    snapshot = _history_collector.enrich(connector.snapshot(), settings)
+    return _signal_collector.collect(snapshot, _now(settings.timezone))
 
 
-def _refresh_home_state_locked() -> tuple:
-    global _cached_home_state, _cached_history, _history_refreshed_at
-    global _snapshot_published_at_monotonic
-    global _cdr_history_signature, _security_history_signature
-    global _voicemail_history_signature
-    snapshot = connector.snapshot()
-    if settings.pbx_type in {"asterisk", "grandstream", "cucm"}:
-        now_monotonic = time.monotonic()
-        if (
-            _history_refreshed_at == 0
-            or now_monotonic - _history_refreshed_at >= HISTORY_POLL_INTERVAL_SECONDS
-        ):
-            if settings.pbx_type == "cucm":
-                _cached_history = (
-                    read_recent_cucm_calls(
-                        settings.cucm_cdr_path,
-                        settings.cucm_cmr_path,
-                        limit=1000,
-                    ),
-                    [],
-                    [],
-                )
-            else:
-                cdr_path, voicemail_path = _history_paths()
-                recent_calls, voicemails, security_events = _cached_history
-                cdr_signature = _file_signature(cdr_path)
-                if _cdr_history_signature != cdr_signature:
-                    recent_calls = read_recent_cdr_calls(cdr_path, limit=1000)
-                    _cdr_history_signature = cdr_signature
-                voicemail_signature = _voicemail_signature(voicemail_path)
-                if _voicemail_history_signature != voicemail_signature:
-                    voicemails = read_recent_voicemails(voicemail_path)
-                    _voicemail_history_signature = voicemail_signature
-                security_path = _security_log_path()
-                security_signature = _file_signature(security_path)
-                if _security_history_signature != security_signature:
-                    security_events = read_recent_security_events(security_path)
-                    _security_history_signature = security_signature
-                else:
-                    security_cutoff = datetime.now() - timedelta(minutes=15)
-                    security_events = [
-                        event for event in security_events
-                        if event.occurred_at is not None
-                        and event.occurred_at >= security_cutoff
-                    ]
-                _cached_history = (
-                    recent_calls,
-                    voicemails,
-                    security_events,
-                )
-            _history_refreshed_at = now_monotonic
-        recent_calls, voicemails, security_events = _cached_history
-        endpoints = snapshot.endpoints
-        if settings.pbx_type == "cucm":
-            endpoints = enrich_cucm_trunks_with_history(endpoints, recent_calls)
-        snapshot = snapshot.__class__(
-            reachable=snapshot.reachable,
-            agent_version=snapshot.agent_version,
-            channels=snapshot.channels,
-            endpoints=endpoints,
-            queues=snapshot.queues,
-            recent_calls=recent_calls,
-            voicemails=voicemails,
-            security_events=security_events,
-            error=snapshot.error,
-        )
-    observed_at = _now(settings.timezone)
-    moment_events = activity_tracker.observe(snapshot, observed_at)
-    endpoint_unavailability_signals = endpoint_availability_tracker.observe(
-        snapshot,
-        observed_at,
-    )
-    endpoint_notification_ids = endpoint_availability_tracker.notification_ids()
-    endpoint_unavailability_evidence = endpoint_availability_tracker.signal_endpoints()
-    endpoint_signal_lifecycle = endpoint_availability_tracker.signal_lifecycle()
-    trunk_unavailability_signals = trunk_availability_tracker.observe(
-        snapshot,
-        observed_at,
-    )
-    show_aggregate_tip = endpoint_aggregate_tip_tracker.observe(snapshot, observed_at)
-    endpoint_last_active = endpoint_last_active_tracker.observe(snapshot, observed_at)
-    state = (
-        snapshot,
-        observed_at,
-        moment_events,
-        endpoint_unavailability_signals,
-        endpoint_notification_ids,
-        endpoint_unavailability_evidence,
-        endpoint_signal_lifecycle,
-        trunk_unavailability_signals,
-        show_aggregate_tip,
-        endpoint_last_active,
-    )
-    with _snapshot_lock:
-        _cached_home_state = state
-        _snapshot_published_at_monotonic = time.monotonic()
-        _cached_home_payloads.clear()
-    return state
-
-
-def _file_signature(path: str) -> tuple[str, int, int]:
-    """Return cheap change evidence for an append-oriented history file."""
-    if not path:
-        return ("", 0, 0)
-    try:
-        stat = Path(path).stat()
-        return (path, stat.st_size, stat.st_mtime_ns)
-    except OSError:
-        return (path, 0, 0)
-
-
-def _voicemail_signature(path: str) -> tuple[tuple[str, int, int], ...]:
-    """Fingerprint voicemail metadata without reopening message contents."""
-    if not path:
-        return ()
-    root = Path(path)
-    try:
-        entries = []
-        for item in root.glob("**/INBOX/msg*.txt"):
-            stat = item.stat()
-            entries.append((str(item), stat.st_size, stat.st_mtime_ns))
-        return tuple(sorted(entries))
-    except OSError:
-        return ()
-
-
-def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
-    snapshot, observed_at, moment_events, endpoint_signals, endpoint_notification_ids, endpoint_unavailability_evidence, endpoint_signal_lifecycle, trunk_signals, show_aggregate_tip, endpoint_last_active = state
+def _home_payload_from_state(state: CollectedHomeState, *, moment_hours: int) -> dict:
     payload = build_home_payload(
-        snapshot,
+        state.snapshot,
         display_name=settings.display_name,
         extension_names=settings.extension_names,
-        now=observed_at,
+        now=state.observed_at,
         timezone_name=settings.timezone,
         pbx_type=settings.pbx_type,
         pbx_host=_pbx_host(),
         pbx_port=_pbx_port(),
         moment_hours=moment_hours,
-        moment_events=moment_events,
-        endpoint_unavailability_signals=endpoint_signals,
-        endpoint_notification_ids=endpoint_notification_ids,
-        endpoint_unavailability_evidence=endpoint_unavailability_evidence,
-        endpoint_signal_lifecycle=endpoint_signal_lifecycle,
-        trunk_unavailability_signals=trunk_signals,
-        endpoint_last_active=endpoint_last_active,
+        moment_events=state.moment_events,
+        endpoint_unavailability_signals=state.endpoint_unavailability_signals,
+        endpoint_notification_ids=state.endpoint_notification_ids,
+        endpoint_unavailability_evidence=state.endpoint_unavailability_evidence,
+        endpoint_signal_lifecycle=state.endpoint_signal_lifecycle,
+        trunk_unavailability_signals=state.trunk_unavailability_signals,
+        endpoint_last_active=state.endpoint_last_active,
     )
-    payload["snapshotObservedAt"] = observed_at.isoformat()
+    payload["snapshotObservedAt"] = state.observed_at.isoformat()
     payload["snapshotStale"] = False
-    if not show_aggregate_tip:
+    if not state.show_aggregate_tip:
         payload["signals"] = [
             signal for signal in payload["signals"]
             if signal.get("id") != "sig_tip_multiple_endpoints_unavailable"
@@ -1649,9 +1482,7 @@ def _pbx_port() -> int | str:
 
 
 def _history_paths() -> tuple[str, str]:
-    if settings.pbx_type == "grandstream":
-        return settings.grandstream_cdr_csv_path, settings.grandstream_voicemail_path
-    return settings.cdr_csv_path, settings.voicemail_path
+    return history_paths(settings)
 
 
 def _recordings_path() -> str:
@@ -1663,9 +1494,7 @@ def _recordings_path() -> str:
 
 
 def _security_log_path() -> str:
-    if settings.pbx_type == "grandstream":
-        return settings.grandstream_security_log_path
-    return settings.asterisk_security_log_path
+    return security_log_path(settings)
 
 
 def _brand_html() -> str:

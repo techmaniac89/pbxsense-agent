@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .pulse import AmiChannel
+from .observations import PbxChannel
 from .settings import AgentSettings
 
 
@@ -32,7 +32,7 @@ class JtapiBridge:
     def configured(self) -> bool:
         return bool(self._settings.cucm_jtapi_enabled and self._settings.cucm_jtapi_classpath)
 
-    def channels(self) -> list[AmiChannel]:
+    def channels(self) -> list[PbxChannel]:
         if not self.configured:
             return []
         self._ensure_running()
@@ -163,12 +163,12 @@ class JtapiBridge:
                     self._last_error = message[:500]
 
 
-def _channel_from_call(call: dict[str, Any]) -> AmiChannel:
+def _channel_from_call(call: dict[str, Any]) -> PbxChannel:
     call_id = str(call.get("id", "")).strip()
     caller = str(call.get("caller", "")).strip()
     destination = str(call.get("destination", "")).strip()
     extension = str(call.get("extension", "")).strip() or caller
-    return AmiChannel(
+    return PbxChannel(
         channel=f"JTAPI/{call_id}",
         extension=extension,
         caller=caller,

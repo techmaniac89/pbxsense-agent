@@ -11,7 +11,8 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .history import CdrCall, VoicemailMessage
-from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot, uncertain_trunks
+from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
+from .pulse import uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 
@@ -47,11 +48,11 @@ class YeastarClient:
         self._settings = settings
         self._access_token = ""
         self._token_expires_at = 0.0
-        self._cached_snapshot: AmiSnapshot | None = None
+        self._cached_snapshot: PbxSnapshot | None = None
         self._snapshot_refresh_after = 0.0
-        self._known_trunks: list[AmiEndpoint] = []
+        self._known_trunks: list[PbxEndpoint] = []
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         if self._cached_snapshot and time.monotonic() < self._snapshot_refresh_after:
             return self._cached_snapshot
         try:
@@ -65,7 +66,7 @@ class YeastarClient:
                     "Yeastar trunk evidence is temporarily unavailable",
                 )
             endpoints.extend(trunks)
-            snapshot = AmiSnapshot(
+            snapshot = PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=self._channels(),
@@ -75,7 +76,7 @@ class YeastarClient:
                 voicemails=self._voicemails(endpoints),
             )
         except OSError:
-            snapshot = AmiSnapshot(
+            snapshot = PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The Yeastar API connection is unavailable.",
@@ -143,9 +144,9 @@ class YeastarClient:
         except (HTTPError, URLError, TimeoutError) as exc:
             raise YeastarError(f"Yeastar recording download failed: {exc}") from exc
 
-    def _endpoints(self) -> list[AmiEndpoint]:
+    def _endpoints(self) -> list[PbxEndpoint]:
         response = self._api("extension/search", {"page": 1, "page_size": 1000})
-        endpoints: list[AmiEndpoint] = []
+        endpoints: list[PbxEndpoint] = []
         for row in _rows(response):
             number = _string(row, "number")
             if not number:
@@ -157,7 +158,7 @@ class YeastarClient:
             status_items = _list(row.get("status_list"))
             status_item = _object(status_items[0]) if status_items else {}
             endpoints.append(
-                AmiEndpoint(
+                PbxEndpoint(
                     extension=number,
                     device_state="Reachable" if online else "Unavailable",
                     label=_string(row, "caller_id_name", "name"),
@@ -177,19 +178,19 @@ class YeastarClient:
             )
         return endpoints
 
-    def _channels(self) -> list[AmiChannel]:
-        channels: list[AmiChannel] = []
+    def _channels(self) -> list[PbxChannel]:
+        channels: list[PbxChannel] = []
         for call_type in ("inbound", "outbound", "internal"):
             response = self._api("call/query", {"type": call_type})
             channels.extend(_channels_from_call_response(response))
         return channels
 
-    def _trunks(self) -> list[AmiEndpoint]:
+    def _trunks(self) -> list[PbxEndpoint]:
         response = self._api(
             "trunk/list",
             {"page": 1, "page_size": 1000, "sort_by": "id", "order_by": "asc"},
         )
-        trunks: list[AmiEndpoint] = []
+        trunks: list[PbxEndpoint] = []
         for row in _rows(response):
             trunk_id = _integer(row.get("id"))
             name = _string(row, "name")
@@ -197,7 +198,7 @@ class YeastarClient:
                 continue
             status = _integer(row.get("status"))
             health, confidence, evidence = _yeastar_trunk_health(status)
-            trunks.append(AmiEndpoint(
+            trunks.append(PbxEndpoint(
                 extension=name or f"trunk-{trunk_id}",
                 number=_string(row, "def_outbound_cid", "username"),
                 label=name,
@@ -211,12 +212,12 @@ class YeastarClient:
             ))
         return trunks
 
-    def _queues(self) -> list[AmiQueue]:
+    def _queues(self) -> list[PbxQueue]:
         try:
             response = self._api("queue/search", {"page": 1, "page_size": 1000})
         except OSError:
             return []
-        queues: list[AmiQueue] = []
+        queues: list[PbxQueue] = []
         for row in _rows(response):
             queue_id = _integer(row.get("id"))
             if queue_id <= 0:
@@ -227,7 +228,7 @@ class YeastarClient:
                 continue
             waiting_list = _list(status.get("waiting_list"))
             queues.append(
-                AmiQueue(
+                PbxQueue(
                     name=_string(row, "number", "name") or str(queue_id),
                     waiting_callers=max(
                         _integer(status.get("waiting_calls")),
@@ -260,7 +261,7 @@ class YeastarClient:
             )
         return calls
 
-    def _voicemails(self, endpoints: list[AmiEndpoint]) -> list[VoicemailMessage]:
+    def _voicemails(self, endpoints: list[PbxEndpoint]) -> list[VoicemailMessage]:
         numbers = [endpoint.extension for endpoint in endpoints]
         if not numbers:
             return []
@@ -360,8 +361,8 @@ def _validated_http_url(value: str) -> str:
     return value
 
 
-def _channels_from_call_response(response: dict[str, Any]) -> list[AmiChannel]:
-    channels: list[AmiChannel] = []
+def _channels_from_call_response(response: dict[str, Any]) -> list[PbxChannel]:
+    channels: list[PbxChannel] = []
     for call in _rows(response):
         call_id = _string(call, "call_id")
         for member in _list(call.get("members")):
@@ -372,7 +373,7 @@ def _channels_from_call_response(response: dict[str, Any]) -> list[AmiChannel]:
                 number = _string(details, "number", "to", "from")
                 peer = _string(details, "to", "from")
                 channels.append(
-                    AmiChannel(
+                    PbxChannel(
                         channel=_string(details, "channel_id") or call_id,
                         extension=number,
                         caller=_string(details, "from", "number"),

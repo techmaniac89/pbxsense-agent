@@ -13,7 +13,8 @@ from urllib.request import Request, urlopen
 
 from defusedxml import ElementTree as ET
 
-from .pulse import AmiEndpoint, AmiSnapshot, uncertain_trunks
+from .observations import PbxEndpoint, PbxSnapshot
+from .pulse import uncertain_trunks
 from .history import CdrCall
 from .jtapi import JtapiBridge
 from .settings import AgentSettings
@@ -40,16 +41,16 @@ class CucmClient:
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
-        self._cached_snapshot: AmiSnapshot | None = None
+        self._cached_snapshot: PbxSnapshot | None = None
         self._refresh_after = 0.0
         self._jtapi = JtapiBridge(settings)
         self._trunk_error = ""
         self._perfmon_error = ""
         self._perfmon_attempted = False
         self._previous_perfmon: dict[str, int] = {}
-        self._known_trunks: list[AmiEndpoint] = []
+        self._known_trunks: list[PbxEndpoint] = []
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         if self._cached_snapshot and time.monotonic() < self._refresh_after:
             return replace(self._cached_snapshot, channels=self._jtapi.channels())
         try:
@@ -69,13 +70,13 @@ class CucmClient:
                     self._known_trunks,
                     "CUCM trunk serviceability evidence is temporarily unavailable",
                 ))
-            result = AmiSnapshot(
+            result = PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 endpoints=endpoints,
             )
         except OSError:
-            result = AmiSnapshot(
+            result = PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The CUCM Core connection is unavailable.",
@@ -185,14 +186,14 @@ class CucmClient:
         )
         return _risport_devices(root)
 
-    def _trunk_endpoints(self) -> list[AmiEndpoint]:
+    def _trunk_endpoints(self) -> list[PbxEndpoint]:
         inventory = self._sip_trunk_inventory()
         if not inventory:
             return []
         names = [item["name"] for item in inventory if item.get("name")]
         service = self._trunk_registration_status(names)
         perfmon = self._sip_perfmon_counters() if self._settings.cucm_perfmon_enabled else {}
-        endpoints: list[AmiEndpoint] = []
+        endpoints: list[PbxEndpoint] = []
         for item in inventory:
             name = item["name"]
             status = service.get(name, {})
@@ -225,7 +226,7 @@ class CucmClient:
                 if counter in counters:
                     evidence.append(f"PerfMon {counter}: {counters[counter]}")
                     self._previous_perfmon[f"{name}|{counter}"] = counters[counter]
-            endpoints.append(AmiEndpoint(
+            endpoints.append(PbxEndpoint(
                 extension=name,
                 device_state=status.get("status", "Unknown") or "Unknown",
                 active_channels=max(0, active),
@@ -407,11 +408,11 @@ def _validated_cucm_host(value: str) -> str:
 
 def _merge_inventory_and_registration(
     inventory: list[dict[str, str]], registration: dict[str, dict[str, str]]
-) -> list[AmiEndpoint]:
+) -> list[PbxEndpoint]:
     lines: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in inventory:
         lines[row["extension"]].append(row)
-    endpoints: list[AmiEndpoint] = []
+    endpoints: list[PbxEndpoint] = []
     for extension, rows in sorted(lines.items()):
         states = [registration.get(row["device_name"], {}) for row in rows]
         registered = any(state.get("status", "").lower() == "registered" for state in states)
@@ -421,7 +422,7 @@ def _merge_inventory_and_registration(
             "",
         )
         ip = next((state.get("ip", "") for state in states if state.get("ip")), "")
-        endpoints.append(AmiEndpoint(
+        endpoints.append(PbxEndpoint(
             extension=extension,
             number=extension,
             label=label,
@@ -432,12 +433,12 @@ def _merge_inventory_and_registration(
 
 
 def enrich_cucm_trunks_with_history(
-    endpoints: list[AmiEndpoint],
+    endpoints: list[PbxEndpoint],
     calls: list[CdrCall],
     *,
     now: datetime | None = None,
     evidence_window: timedelta = timedelta(minutes=15),
-) -> list[AmiEndpoint]:
+) -> list[PbxEndpoint]:
     """Corroborate SIP-trunk health with recent completed CUCM CDRs.
 
     A completed call proves that the trunk processed traffic recently, but it
@@ -461,7 +462,7 @@ def enrich_cucm_trunks_with_history(
                 value for value in (call.channel, call.destination_channel) if value
             )
 
-    enriched: list[AmiEndpoint] = []
+    enriched: list[PbxEndpoint] = []
     for endpoint in endpoints:
         matched = endpoint.role == "trunk" and any(
             _same_cucm_identity(endpoint.extension, device)

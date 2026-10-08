@@ -152,7 +152,7 @@ class RelayTest(unittest.TestCase):
             connection = MagicMock()
             connection.getresponse.return_value = response
 
-            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=connection) as factory:
+            with patch("pbxsense_agent.relay_transport.http.client.HTTPSConnection", return_value=connection) as factory:
                 relay._request("/v1/first", {}, signed=False)
                 relay._request("/v1/second", {}, signed=False)
 
@@ -170,12 +170,12 @@ class RelayTest(unittest.TestCase):
             connection = MagicMock()
             connection.getresponse.side_effect = http.client.RemoteDisconnected()
 
-            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=connection):
+            with patch("pbxsense_agent.relay_transport.http.client.HTTPSConnection", return_value=connection):
                 with self.assertRaises(OSError):
                     relay._request("/v1/heartbeat", {}, signed=False)
 
             connection.close.assert_called_once()
-            self.assertIsNone(relay._http_connection)
+            self.assertIsNone(relay._transport._connection)
 
     def test_new_relay_activation_is_signed_and_carries_provisioned_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -981,17 +981,17 @@ class RelayTest(unittest.TestCase):
             relay._state["agent_id"] = "agent-test"
             relay._private_key()
             shared = MagicMock()
-            relay._http_connection = shared
+            relay._transport._connection = shared
             dedicated = MagicMock()
             dedicated.getresponse.return_value.status = 200
             dedicated.getresponse.return_value.read.return_value = b"{}"
-            with patch("pbxsense_agent.relay.http.client.HTTPSConnection", return_value=dedicated):
+            with patch("pbxsense_agent.relay_transport.http.client.HTTPSConnection", return_value=dedicated):
                 self.assertTrue(relay.heartbeat())
             dedicated.request.assert_called_once()
             dedicated.close.assert_called_once()
             shared.request.assert_not_called()
             shared.close.assert_not_called()
-            self.assertIs(relay._http_connection, shared)
+            self.assertIs(relay._transport._connection, shared)
 
     def test_flush_leaves_backlog_for_later_batches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

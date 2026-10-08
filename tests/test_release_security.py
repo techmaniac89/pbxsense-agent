@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
 
 
 class ReleaseSecurityTest(unittest.TestCase):
+    def test_cloud_image_includes_transitive_local_python_dependencies(self) -> None:
+        root = Path("push_relay")
+        modules = {path.stem: path for path in root.glob("*.py")}
+        required, pending = set(), ["app"]
+        while pending:
+            name = pending.pop()
+            if name in required:
+                continue
+            required.add(name)
+            tree = ast.parse(modules[name].read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module in modules:
+                    pending.append(node.module)
+                elif isinstance(node, ast.Import):
+                    pending.extend(alias.name for alias in node.names if alias.name in modules)
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        copied = set(re.findall(r"^COPY\s+([\w]+)\.py\s", dockerfile, re.MULTILINE))
+        self.assertFalse(required - copied, f"Relay image misses modules: {sorted(required - copied)}")
+
     def test_security_workflow_covers_dependencies_code_and_containers(self) -> None:
         source = Path(".github/workflows/security.yml").read_text(encoding="utf-8")
 

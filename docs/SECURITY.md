@@ -6,13 +6,13 @@ internet.
 
 ## Network Boundaries
 
-Agent 0.6.26-beta also reports failed relay heartbeat, notification delivery,
+Agent 0.6.34-beta also reports failed relay heartbeat, notification delivery,
 and Internet Relay attempts as runtime failures rather than successful polls.
 Disabled relay features are skipped. Malformed Asterisk CSV records no longer
 abort live snapshots, and malformed presence-history JSON or individual dates
 are safely ignored while valid last-active entries are retained.
 
-### Revocable app access (Agent 0.6.26-beta)
+### Revocable app access (Agent 0.6.34-beta)
 
 Pairing QR codes now contain an individual app credential, never the shared
 Agent administrator token. App credentials allow snapshots, diagnostics,
@@ -25,7 +25,7 @@ old administrator cookies. Pair existing apps again and run `ensure_token.py`
 followed by an Agent restart to obtain a fresh browser setup link. The current
 app understands the unchanged QR `token` field; no app parser update is needed.
 
-Deploy Relay 0.5.21 before upgrading the Agent when using Internet pairing.
+Deploy Relay 0.5.27 before upgrading the Agent when using Internet pairing.
 The relay's authenticated device list links each registration to its QR
 activation so Internet-only apps receive individually revocable LAN access.
 Older relays cannot establish that ownership, so cloud-scoped LAN registration
@@ -159,7 +159,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.26-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.34-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 
