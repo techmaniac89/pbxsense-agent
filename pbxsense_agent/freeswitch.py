@@ -16,6 +16,7 @@ from .history import CdrCall, VoicemailMessage
 from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot, uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
+from .socket_deadline import socket_deadline
 
 
 MAX_ESL_HEADER_BYTES = 64 * 1024
@@ -226,41 +227,44 @@ class FreeSwitchClient:
             ) from exc
 
     def _authenticate(self, sock: socket.socket) -> None:
-        greeting = self._read_reply(sock, phase="FreeSWITCH ESL greeting")
-        if greeting.headers.get("content-type", "").lower() != "auth/request":
-            raise FreeSwitchError("FreeSWITCH ESL did not request authentication")
-        if not self._settings.freeswitch_password:
-            raise FreeSwitchError("FreeSWITCH ESL password is not configured")
-        self._send(sock, f"auth {self._settings.freeswitch_password}")
-        reply = self._read_reply(sock, phase="FreeSWITCH ESL auth")
-        reply_text = reply.headers.get("reply-text", "")
-        if "+OK" not in reply_text and "+OK" not in reply.body:
-            raise FreeSwitchError("FreeSWITCH ESL authentication failed")
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            greeting = self._read_reply(sock, phase="FreeSWITCH ESL greeting")
+            if greeting.headers.get("content-type", "").lower() != "auth/request":
+                raise FreeSwitchError("FreeSWITCH ESL did not request authentication")
+            if not self._settings.freeswitch_password:
+                raise FreeSwitchError("FreeSWITCH ESL password is not configured")
+            self._send(sock, f"auth {self._settings.freeswitch_password}")
+            reply = self._read_reply(sock, phase="FreeSWITCH ESL auth")
+            reply_text = reply.headers.get("reply-text", "")
+            if "+OK" not in reply_text and "+OK" not in reply.body:
+                raise FreeSwitchError("FreeSWITCH ESL authentication failed")
 
     def _api(self, sock: socket.socket, command: str) -> str:
-        self._send(sock, f"api {command}")
-        reply = self._read_reply(sock, phase=f"FreeSWITCH ESL api {command}")
-        if reply.body.startswith("-ERR"):
-            raise FreeSwitchError(reply.body)
-        return reply.body
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            self._send(sock, f"api {command}")
+            reply = self._read_reply(sock, phase=f"FreeSWITCH ESL api {command}")
+            if reply.body.startswith("-ERR"):
+                raise FreeSwitchError(reply.body)
+            return reply.body
 
     def _send(self, sock: socket.socket, command: str) -> None:
         sock.sendall(f"{command}\n\n".encode("utf-8"))
 
     def _read_reply(self, sock: socket.socket, *, phase: str) -> FreeSwitchReply:
-        raw_headers = self._read_until(sock, b"\n\n", phase=phase)
-        headers = _parse_headers(raw_headers.decode("utf-8", errors="replace"))
-        try:
-            length = int(headers.get("content-length", "0") or "0")
-        except ValueError as exc:
-            raise FreeSwitchError(f"{phase} returned an invalid content length") from exc
-        if length < 0 or length > MAX_ESL_BODY_BYTES:
-            raise FreeSwitchError(f"{phase} response body exceeded the size limit")
-        body = self._read_exact(sock, length, phase=phase) if length else b""
-        return FreeSwitchReply(
-            headers=headers,
-            body=body.decode("utf-8", errors="replace").strip(),
-        )
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            raw_headers = self._read_until(sock, b"\n\n", phase=phase)
+            headers = _parse_headers(raw_headers.decode("utf-8", errors="replace"))
+            try:
+                length = int(headers.get("content-length", "0") or "0")
+            except ValueError as exc:
+                raise FreeSwitchError(f"{phase} returned an invalid content length") from exc
+            if length < 0 or length > MAX_ESL_BODY_BYTES:
+                raise FreeSwitchError(f"{phase} response body exceeded the size limit")
+            body = self._read_exact(sock, length, phase=phase) if length else b""
+            return FreeSwitchReply(
+                headers=headers,
+                body=body.decode("utf-8", errors="replace").strip(),
+            )
 
     def _read_until(self, sock: socket.socket, marker: bytes, *, phase: str) -> bytes:
         chunks = bytearray()

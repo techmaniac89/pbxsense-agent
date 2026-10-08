@@ -7,6 +7,7 @@ WORKDIR /app
 COPY requirements.lock .
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY app.py .
+COPY backend_worker.py .
 
 RUN adduser --disabled-password --gecos "" pbxsense-relay
 USER pbxsense-relay

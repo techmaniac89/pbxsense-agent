@@ -27,7 +27,7 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` | generated | Installer-rotated, single-use credential printed only in the browser setup URL; it does not grant API access and expires after 15 minutes. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT` | generated | Unix expiry for the browser bootstrap credential. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_STATE_PATH` | `/var/lib/pbxsense-agent/browser_bootstrap_used` | Durable consumed-credential marker that prevents reuse after an Agent restart. |
-| `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP/login timeout in seconds. |
+| `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP timeout and absolute AMI/ESL command/login response deadline in seconds; each command gets its own budget. |
 | `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP or HTTPS port used by the Linux service and Docker container, including its health check and LAN port mapping. |
 | `PBXSENSE_AGENT_TLS_CERTFILE` | empty | PEM certificate chain for native Agent HTTPS/WSS. Configure together with `PBXSENSE_AGENT_TLS_KEYFILE`; release apps require TLS for direct LAN/VPN access. |
 | `PBXSENSE_AGENT_TLS_KEYFILE` | empty | PEM private key for native Agent HTTPS/WSS. Keep it readable only by the Agent service account. |

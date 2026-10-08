@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import time
+import threading
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,9 +29,13 @@ from fastapi import FastAPI, HTTPException, Request
 from firebase_admin import firestore, messaging
 from google.api_core.exceptions import AlreadyExists
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+try:
+    from .backend_worker import backend_worker
+except ImportError:  # Cloud Run loads app.py as a top-level module.
+    from backend_worker import backend_worker
 
 
-RELAY_VERSION = "0.5.19"
+RELAY_VERSION = "0.5.21"
 app = FastAPI(title="PBXSense Push Relay", version=RELAY_VERSION)
 firebase_admin.initialize_app(options={"projectId": os.getenv("GOOGLE_CLOUD_PROJECT")})
 db = firestore.client()
@@ -122,6 +127,7 @@ EGRESS_GIB_USD = _bounded_cost_rate(
 )
 _request_windows: dict[str, deque[float]] = defaultdict(deque)
 _event_windows: dict[str, deque[float]] = defaultdict(deque)
+_window_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 _admin_cookie = "pbxsense_relay_admin"
 _trust_forwarded_for = bool(os.getenv("K_SERVICE")) or os.getenv(
@@ -202,6 +208,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/v1/internal/usage")
+@backend_worker
 async def relay_usage(request: Request) -> dict[str, object]:
     """Return privacy-safe fleet usage and durable daily rollups."""
     _require_admin(request)
@@ -209,6 +216,7 @@ async def relay_usage(request: Request) -> dict[str, object]:
 
 
 @app.get("/admin/usage", response_class=HTMLResponse)
+@backend_worker
 async def usage_dashboard(request: Request) -> HTMLResponse:
     """Render the private operator dashboard without exposing PBX content."""
     if not _admin_authenticated(request):
@@ -224,6 +232,7 @@ async def usage_dashboard(request: Request) -> HTMLResponse:
 
 
 @app.post("/admin/usage")
+@backend_worker
 async def usage_dashboard_login(request: Request) -> Any:
     body = (await request.body()).decode("utf-8", errors="replace")
     supplied = parse_qs(body).get("token", [""])[0]
@@ -250,6 +259,7 @@ async def usage_dashboard_login(request: Request) -> Any:
 
 
 @app.post("/v1/internal/enrollment-tickets")
+@backend_worker
 async def create_enrollment_ticket(request: Request) -> dict[str, str]:
     """Issue a short-lived bootstrap capability from trusted billing/admin code."""
     _require_admin(request)
@@ -271,6 +281,7 @@ async def create_enrollment_ticket(request: Request) -> dict[str, str]:
 
 
 @app.post("/v1/activations")
+@backend_worker
 async def create_activation(request: Request) -> dict[str, str]:
     """Create the opaque, short-lived capability embedded in the Agent QR."""
     body = await _json_body(request)
@@ -320,6 +331,7 @@ async def create_activation(request: Request) -> dict[str, str]:
 
 
 @app.post("/v1/activations/{activation_id}/claim")
+@backend_worker
 async def claim_activation(activation_id: str, request: Request) -> dict[str, str]:
     body = await _json_body(request)
     secret = _bounded_text(body.get("activationSecret"), "activationSecret", 200)
@@ -492,6 +504,7 @@ def _claim_activation_transaction(
 
 
 @app.post("/v1/activations/{activation_id}/status")
+@backend_worker
 async def activation_status(activation_id: str, request: Request) -> dict[str, object]:
     body = await _json_body(request)
     secret = _bounded_text(body.get("activationSecret"), "activationSecret", 200)
@@ -511,6 +524,7 @@ async def activation_status(activation_id: str, request: Request) -> dict[str, o
 
 
 @app.post("/v1/agents/{agent_id}/devices")
+@backend_worker
 async def register_device(agent_id: str, request: Request) -> dict[str, str]:
     body, agent = await _authenticate_agent(agent_id, request)
     fcm_token = _bounded_text(body.get("fcmToken"), "fcmToken", 4096)
@@ -636,6 +650,7 @@ def _device_path_reference(path: str) -> Any | None:
 
 
 @app.post("/v1/agents/{agent_id}/devices/list")
+@backend_worker
 async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
     """Return device metadata to its owning Agent without exposing FCM tokens."""
     _, _ = await _authenticate_agent(agent_id, request, touch_presence=False)
@@ -671,6 +686,7 @@ async def list_devices(agent_id: str, request: Request) -> dict[str, object]:
 
 
 @app.post("/v1/agents/{agent_id}/devices/revoke")
+@backend_worker
 async def revoke_device(agent_id: str, request: Request) -> dict[str, str]:
     body, _ = await _authenticate_agent(agent_id, request)
     requested_device_id = _optional_identifier(body.get("relayDeviceId"))
@@ -683,6 +699,7 @@ async def revoke_device(agent_id: str, request: Request) -> dict[str, str]:
 
 
 @app.post("/v1/agents/{agent_id}/heartbeat")
+@backend_worker
 async def heartbeat(agent_id: str, request: Request) -> dict[str, object]:
     _, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
     agent_ref = db.collection("agents").document(agent_id)
@@ -698,6 +715,7 @@ async def heartbeat(agent_id: str, request: Request) -> dict[str, object]:
 
 
 @app.post("/v1/agents/{agent_id}/secure/exchange")
+@backend_worker
 async def secure_exchange(agent_id: str, request: Request) -> dict[str, object]:
     """Exchange bounded control frames over an outbound-only Agent session."""
     body, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
@@ -769,6 +787,7 @@ async def secure_exchange(agent_id: str, request: Request) -> dict[str, object]:
 
 
 @app.post("/v1/agents/{agent_id}/secure/snapshots")
+@backend_worker
 async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str, int]:
     body, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
     envelopes = body.get("envelopes", [])
@@ -822,6 +841,7 @@ async def publish_secure_snapshots(agent_id: str, request: Request) -> dict[str,
 
 
 @app.post("/v1/agents/{agent_id}/devices/{device_id}/secure-snapshot")
+@backend_worker
 async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) -> dict[str, object]:
     device_ref, device = _authenticate_relay_device(agent_id, device_id, request)
     agent_snapshot = db.collection("agents").document(agent_id).get()
@@ -878,6 +898,7 @@ async def read_secure_snapshot(agent_id: str, device_id: str, request: Request) 
 
 
 @app.post("/v1/agents/{agent_id}/devices/{device_id}/registration")
+@backend_worker
 async def register_own_device(
     agent_id: str, device_id: str, request: Request
 ) -> dict[str, object]:
@@ -913,6 +934,7 @@ async def register_own_device(
 
 
 @app.delete("/v1/agents/{agent_id}/devices/{device_id}")
+@backend_worker
 async def revoke_own_device(
     agent_id: str, device_id: str, request: Request
 ) -> dict[str, str]:
@@ -937,6 +959,7 @@ async def revoke_own_device(
 
 
 @app.post("/v1/internal/agents/{agent_id}/secure/ping")
+@backend_worker
 async def queue_secure_ping(agent_id: str, request: Request) -> dict[str, str]:
     """Operator smoke test for the outbound secure session."""
     _require_admin(request)
@@ -955,6 +978,7 @@ async def queue_secure_ping(agent_id: str, request: Request) -> dict[str, str]:
 
 
 @app.post("/v1/internal/sweep-agent-heartbeats")
+@backend_worker
 async def sweep_agent_heartbeats(request: Request) -> dict[str, int]:
     """Invoke every minute from Cloud Scheduler with the admin secret."""
     _require_admin(request)
@@ -982,6 +1006,7 @@ async def sweep_agent_heartbeats(request: Request) -> dict[str, int]:
 
 
 @app.delete("/v1/agents/{agent_id}/devices")
+@backend_worker
 async def remove_device(agent_id: str, request: Request) -> dict[str, str]:
     body, _ = await _authenticate_agent(agent_id, request, touch_presence=False)
     fcm_token = _bounded_text(body.get("fcmToken"), "fcmToken", 4096)
@@ -991,6 +1016,7 @@ async def remove_device(agent_id: str, request: Request) -> dict[str, str]:
 
 
 @app.post("/v1/agents/{agent_id}/events")
+@backend_worker
 async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
     event, agent = await _authenticate_agent(agent_id, request, touch_presence=False)
     if not _consume_window(
@@ -1012,26 +1038,19 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         return {"status": "ignored", "reason": "tips_are_feed_only"}
 
     event_ref = db.collection("sites").document(agent["siteId"]).collection("events").document(event_id)
-    try:
-        event_ref.create(
-            {
-                "agentId": agent_id,
-                "category": category,
-                "importance": importance,
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "expiresAt": datetime.now(timezone.utc) + timedelta(days=2),
-            }
-        )
-    except AlreadyExists:
+    now = datetime.now(timezone.utc)
+    owner = secrets.token_urlsafe(18)
+    fingerprint = hashlib.sha256(json.dumps(
+        [signal_id, title, body, category, importance, notification_tag],
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    quota_ref = db.collection("agents").document(agent_id).collection("rateLimits").document(f"events_{now:%Y%m%d%H}")
+    delivery = _claim_event_delivery(db.transaction(), event_ref, quota_ref,
+                                     agent_id, fingerprint, owner, now)
+    if delivery is None:
         return {"status": "duplicate", "sent": 0}
-
-    try:
-        quota_count = _consume_durable_event_quota(agent_id)
-    except Exception:
-        # A rejected request must remain retryable after the quota window
-        # changes or Firestore recovers.
-        event_ref.delete()
-        raise
+    quota_count = int(delivery["quotaCount"])
+    completed = set(delivery.get("completedRecipients", []))
 
     devices = [_device_record(document) for document in
         db.collection("agents").document(agent_id).collection("devices").stream()]
@@ -1042,9 +1061,11 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         if _device_wants_event(device, category, importance, signal_id)
         and device.get("expiresAt", now) >= now
         and device.get("fcmToken")
+        and _recipient_digest(str(device["fcmToken"])) not in completed
     ])
     tokens = [str(device["fcmToken"]) for device in eligible_devices]
     if not tokens:
+        _finish_event_delivery(db.transaction(), event_ref, owner, completed, True)
         _record_notification_usage(
             agent_id,
             agent,
@@ -1089,10 +1110,16 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
             transport_errors=1,
             quota_count=quota_count,
         )
-        # Do not let the idempotency record turn a temporary FCM outage into a
-        # permanently dropped event. The Agent's durable outbox will retry it.
-        event_ref.delete()
+        _finish_event_delivery(db.transaction(), event_ref, owner, completed, False)
         raise
+    retryable = len(response.responses) != len(eligible_devices)
+    for device, outcome in zip(eligible_devices, response.responses):
+        if outcome.success or not _retryable_fcm_failure(outcome.exception):
+            completed.add(_recipient_digest(str(device["fcmToken"])))
+        else:
+            retryable = True
+    # Persist delivery results before usage reporting, which may itself fail.
+    _finish_event_delivery(db.transaction(), event_ref, owner, completed, not retryable)
     invalid_tokens = _remove_invalid_tokens(agent_id, eligible_devices, response.responses)
     latency_ms = max(0, round((time.monotonic() - started) * 1000))
     _record_notification_usage(
@@ -1113,7 +1140,66 @@ async def publish_event(agent_id: str, request: Request) -> dict[str, Any]:
         response.failure_count,
         invalid_tokens,
     )
+    if retryable:
+        raise HTTPException(status_code=503, detail="Some notification recipients require retry")
     return {"status": "accepted", "sent": response.success_count, "failed": response.failure_count}
+
+
+def _recipient_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _retryable_fcm_failure(error: Any) -> bool:
+    # Unknown failures are retryable; only known permanent errors are terminal.
+    return str(getattr(error, "code", "")).lower() not in {
+        "invalid-argument", "not-found", "unregistered", "sender-id-mismatch",
+    }
+
+
+@firestore.transactional
+def _claim_event_delivery(transaction: Any, event_ref: Any, quota_ref: Any,
+                          agent_id: str, fingerprint: str, owner: str,
+                          now: datetime) -> dict[str, Any] | None:
+    snapshot = event_ref.get(transaction=transaction)
+    row = (snapshot.to_dict() or {}) if snapshot.exists else {}
+    if snapshot.exists:
+        if row.get("agentId") != agent_id:
+            raise HTTPException(status_code=409, detail="Event belongs to another Agent")
+        # Legacy records lack a lifecycle and remain deduplicated during upgrade.
+        if row.get("state", "completed") == "completed":
+            return None
+        if row.get("fingerprint") != fingerprint:
+            raise HTTPException(status_code=409, detail="Event payload changed")
+        if row.get("leaseUntil", now) > now:
+            raise HTTPException(status_code=503, detail="Event delivery is in progress")
+    else:
+        quota = quota_ref.get(transaction=transaction)
+        count = int((quota.to_dict() or {}).get("count", 0)) if quota.exists else 0
+        if count >= MAX_EVENTS_PER_AGENT_PER_HOUR:
+            raise HTTPException(status_code=429, detail="Agent notification quota exceeded")
+        transaction.set(quota_ref, {"count": count + 1,
+                                   "updatedAt": firestore.SERVER_TIMESTAMP,
+                                   "expiresAt": now + timedelta(hours=2)})
+        row = {"agentId": agent_id, "fingerprint": fingerprint,
+               "quotaCount": count + 1, "completedRecipients": [],
+               "createdAt": firestore.SERVER_TIMESTAMP,
+               "expiresAt": now + timedelta(days=2)}
+    row.update({"state": "sending", "owner": owner,
+                "leaseUntil": now + timedelta(seconds=60)})
+    transaction.set(event_ref, row)
+    return row
+
+
+@firestore.transactional
+def _finish_event_delivery(transaction: Any, event_ref: Any, owner: str,
+                           completed: set[str], done: bool) -> None:
+    snapshot = event_ref.get(transaction=transaction)
+    row = snapshot.to_dict() or {}
+    if row.get("owner") != owner:
+        raise HTTPException(status_code=503, detail="Event delivery lease changed")
+    transaction.update(event_ref, {"completedRecipients": sorted(completed),
+                                  "state": "completed" if done else "pending",
+                                  "leaseUntil": datetime.now(timezone.utc)})
 
 
 async def _authenticate_agent(
@@ -1242,14 +1328,15 @@ def _client_key(request: Request) -> str:
 def _consume_window(
     window: deque[float], *, limit: int, seconds: int
 ) -> bool:
-    now = time.monotonic()
-    cutoff = now - seconds
-    while window and window[0] <= cutoff:
-        window.popleft()
-    if len(window) >= limit:
-        return False
-    window.append(now)
-    return True
+    with _window_lock:
+        now = time.monotonic()
+        cutoff = now - seconds
+        while window and window[0] <= cutoff:
+            window.popleft()
+        if len(window) >= limit:
+            return False
+        window.append(now)
+        return True
 
 
 def _client_window(client: str) -> deque[float]:

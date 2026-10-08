@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from .pulse import AmiChannel, AmiEndpoint, AmiQueue, AmiSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
+from .socket_deadline import socket_deadline
 
 
 MAX_AMI_PACKET_BYTES = 256 * 1024
@@ -232,20 +233,21 @@ class AmiClient:
         return self._settings.password
 
     def _login(self, sock: socket.socket) -> dict[str, str]:
-        self._send_action(
-            sock,
-            {
-                "Action": "Login",
-                "Username": self._ami_username(),
-                "Secret": self._ami_password(),
-                "Events": "off",
-            },
-        )
-        response = self._read_until_response(sock, phase="AMI login")
-        if response.get("Response") != "Success":
-            message = response.get("Message", "unknown AMI login error")
-            raise AmiError(f"AMI login failed: {message}")
-        return response
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            self._send_action(
+                sock,
+                {
+                    "Action": "Login",
+                    "Username": self._ami_username(),
+                    "Secret": self._ami_password(),
+                    "Events": "off",
+                },
+            )
+            response = self._read_until_response(sock, phase="AMI login")
+            if response.get("Response") != "Success":
+                message = response.get("Message", "unknown AMI login error")
+                raise AmiError(f"AMI login failed: {message}")
+            return response
 
     def _collect_action_events(
         self,
@@ -254,32 +256,33 @@ class AmiClient:
         action: str,
         complete_event: str,
     ) -> list[AmiEvent]:
-        self._send_action(sock, {"Action": action})
-        events: list[AmiEvent] = []
-        received_bytes = 0
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            self._send_action(sock, {"Action": action})
+            events: list[AmiEvent] = []
+            received_bytes = 0
 
-        while True:
-            packet = self._read_packet(sock, phase=action)
-            received_bytes += sum(
-                len(key.encode("utf-8")) + len(value.encode("utf-8")) + 4
-                for key, value in packet.items()
-            )
-            if received_bytes > MAX_AMI_ACTION_BYTES:
-                raise AmiError(f"AMI action {action} exceeded the response size limit")
-            if not packet:
-                continue
-            if packet.get("Response") == "Error":
-                raise AmiActionResponseError(
-                    f"AMI action {action} failed: "
-                    f"{packet.get('Message', 'unsupported action')}"
+            while True:
+                packet = self._read_packet(sock, phase=action)
+                received_bytes += sum(
+                    len(key.encode("utf-8")) + len(value.encode("utf-8")) + 4
+                    for key, value in packet.items()
                 )
-            event_name = packet.get("Event", "")
-            if event_name == complete_event:
-                return events
-            if event_name:
-                if len(events) >= MAX_AMI_EVENTS_PER_ACTION:
-                    raise AmiError(f"AMI action {action} returned too many events")
-                events.append(AmiEvent(name=event_name, fields=packet))
+                if received_bytes > MAX_AMI_ACTION_BYTES:
+                    raise AmiError(f"AMI action {action} exceeded the response size limit")
+                if not packet:
+                    continue
+                if packet.get("Response") == "Error":
+                    raise AmiActionResponseError(
+                        f"AMI action {action} failed: "
+                        f"{packet.get('Message', 'unsupported action')}"
+                    )
+                event_name = packet.get("Event", "")
+                if event_name == complete_event:
+                    return events
+                if event_name:
+                    if len(events) >= MAX_AMI_EVENTS_PER_ACTION:
+                        raise AmiError(f"AMI action {action} returned too many events")
+                    events.append(AmiEvent(name=event_name, fields=packet))
 
     def _collect_optional_action_events(
         self,
@@ -298,22 +301,24 @@ class AmiClient:
             return []
 
     def _read_until_response(self, sock: socket.socket, *, phase: str) -> dict[str, str]:
-        for _ in range(MAX_AMI_RESPONSE_PACKETS):
-            packet = self._read_packet(sock, phase=phase)
-            if "Response" in packet:
-                return packet
-        raise AmiError(f"{phase} returned too many packets before its response")
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            for _ in range(MAX_AMI_RESPONSE_PACKETS):
+                packet = self._read_packet(sock, phase=phase)
+                if "Response" in packet:
+                    return packet
+            raise AmiError(f"{phase} returned too many packets before its response")
 
     def _send_action(self, sock: socket.socket, fields: dict[str, str]) -> None:
         payload = "".join(f"{key}: {value}\r\n" for key, value in fields.items())
         sock.sendall(f"{payload}\r\n".encode("utf-8"))
 
     def _read_banner(self, sock: socket.socket) -> str:
-        try:
-            raw = _recv_through(sock, b"\n")
-        except TimeoutError as exc:
-            raise AmiError("AMI banner timed out") from exc
-        return raw.decode("utf-8", errors="replace").strip()
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            try:
+                raw = _recv_through(sock, b"\n")
+            except TimeoutError as exc:
+                raise AmiError("AMI banner timed out") from exc
+            return raw.decode("utf-8", errors="replace").strip()
 
     def _read_optional_banner(self, sock: socket.socket) -> tuple[str, str | None]:
         try:
@@ -322,20 +327,21 @@ class AmiClient:
             return "", "The AMI banner could not be read."
 
     def _read_packet(self, sock: socket.socket, *, phase: str) -> dict[str, str]:
-        try:
-            packet = _recv_through(sock, b"\r\n\r\n")
-        except TimeoutError as exc:
-            raise AmiError(f"{phase} timed out") from exc
-        if not packet:
-            raise AmiError(f"{phase} connection closed before the response completed")
-        raw = packet.decode("utf-8", errors="replace")
-        fields: dict[str, str] = {}
-        for line in raw.splitlines():
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            fields[key.strip()] = value.strip()
-        return fields
+        with socket_deadline(sock, self._settings.timeout_seconds) as sock:
+            try:
+                packet = _recv_through(sock, b"\r\n\r\n")
+            except TimeoutError as exc:
+                raise AmiError(f"{phase} timed out") from exc
+            if not packet:
+                raise AmiError(f"{phase} connection closed before the response completed")
+            raw = packet.decode("utf-8", errors="replace")
+            fields: dict[str, str] = {}
+            for line in raw.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                fields[key.strip()] = value.strip()
+            return fields
 
 
 def _recv_through(

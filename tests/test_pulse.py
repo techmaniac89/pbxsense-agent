@@ -109,7 +109,7 @@ class PulseMappingTest(unittest.TestCase):
         writer.close()
         try:
             with self.assertRaisesRegex(AmiError, "connection closed"):
-                AmiClient.__new__(AmiClient)._read_packet(reader, phase="QueueStatus")
+                AmiClient(AgentSettings.from_env())._read_packet(reader, phase="QueueStatus")
         finally:
             reader.close()
 
@@ -120,7 +120,7 @@ class PulseMappingTest(unittest.TestCase):
                 b"Response: Success\r\nMessage: one\r\n\r\n"
                 b"Event: Complete\r\nMessage: two\r\n\r\n"
             )
-            client = AmiClient.__new__(AmiClient)
+            client = AmiClient(AgentSettings.from_env())
             self.assertEqual(client._read_packet(reader, phase="one")["Message"], "one")
             self.assertEqual(client._read_packet(reader, phase="two")["Message"], "two")
         finally:
@@ -198,7 +198,7 @@ class PulseMappingTest(unittest.TestCase):
         try:
             writer.sendall(b"Content-Length: 999999999\n\n")
             with self.assertRaisesRegex(FreeSwitchError, "size limit"):
-                FreeSwitchClient.__new__(FreeSwitchClient)._read_reply(
+                FreeSwitchClient(AgentSettings.from_env())._read_reply(
                     reader, phase="FreeSWITCH test"
                 )
         finally:
@@ -232,7 +232,9 @@ class PulseMappingTest(unittest.TestCase):
         ):
             client._authenticate(sock)
 
-        send.assert_called_once_with(sock, "auth secret")
+        send.assert_called_once()
+        self.assertIs(send.call_args.args[0].sock, sock)
+        self.assertEqual(send.call_args.args[1], "auth secret")
 
     def test_freeswitch_authentication_rejects_error_reply_text_header(self) -> None:
         with patch.dict(

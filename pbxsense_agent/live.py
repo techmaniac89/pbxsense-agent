@@ -2,6 +2,13 @@ from __future__ import annotations
 
 
 def home_live_events(previous: dict, current: dict) -> list[dict]:
+    # Older apps understand replacement snapshots but not entity-removal events.
+    # Replace the complete state before emitting any partial updates so removals
+    # cannot remain hidden behind unrelated deltas and keep-alive heartbeats.
+    for collection, key in (("people", "extension"), ("trunks", "endpoint"), ("queues", "queue")):
+        if _removed_collection_events(previous.get(collection, []), current.get(collection, []),
+                                      key=key, removed_type="removed"):
+            return [{"type": "home_snapshot", "data": current}]
     events: list[dict] = []
 
     if previous.get("connection") != current.get("connection"):

@@ -226,3 +226,49 @@ security workflow audits both hashed dependency locks, runs CodeQL's extended
 Python queries, builds the production container, and verifies its configured
 runtime user is non-root. Keep every action pinned to a full commit SHA; accept
 Dependabot action updates only after reviewing the upstream release and commit.
+# Reliability contract (Agent 0.6.26-beta / Relay 0.5.21)
+
+Encrypted relay snapshots preserve `connection.kind=reconnecting` when the PBX
+is unavailable. The additive `connection.transport=internetRelay` describes the
+working transport separately; `connection.pbxReachable` describes PBX health.
+Healthy remote snapshots retain the existing `kind=internetRelay` value.
+
+If people, trunks, or queues lose members, `/live` sends a complete
+`home_snapshot` instead of partial deltas. Existing consumers must replace all
+collections on that event, including when signals or calls also change.
+
+Notification events have a transactional delivery lease and durable completed
+recipient token hashes. The event and hourly quota are created atomically;
+retries do not charge the durable event quota again. Transient recipient errors
+return HTTP 503 so the Agent outbox retries only unfinished recipients. A crashed
+sender's lease can be reclaimed after 60 seconds. Permanent recipient failures
+are terminal, and legacy deduplication records remain terminal during upgrade.
+
+Delivery is at-least-once: if FCM accepts a send but the process dies before
+checkpointing, a retry can repeat it. Stable notification IDs/tags limit visible
+duplicates; FCM acceptance does not prove delivery to the handset. No database
+transaction can atomically commit an external FCM send.
+
+## Collection and backend concurrency (0.6.26-beta / Relay 0.5.21)
+
+The collector exclusively owns connector/history/tracker mutation, but does not
+hold the snapshot publication lock while doing I/O. Readers continue to use the
+last complete state. Payload builds are separately serialized and cached only
+if their source state is still current. Snapshots include `snapshotObservedAt`
+and `snapshotStale`; after the existing freshness window expires, cached data
+remains visible but the connection is marked reconnecting. The normal one-second
+polling cadence is unchanged.
+
+Diagnostics report collection-in-progress, elapsed seconds, and stalled status.
+The watchdog does not start overlapping collectors to replace stuck threads.
+AMI commands/login/frame reads and ESL authentication/API replies have absolute
+monotonic deadlines using `PBXSENSE_CONNECT_TIMEOUT`, not a fresh allowance for
+every incoming byte. A snapshot containing multiple commands can take multiple
+command budgets; filesystem work is not forcibly interrupted.
+
+Cloud relay async routes cache their bounded request body on the ASGI loop, then
+execute Firebase/database work in a worker with at most 16 backend jobs active
+per instance. Request streams are never read from worker event loops. Waiting
+requests yield to the server loop, and the in-memory event limiter is protected
+against concurrent worker access. Existing Firestore transactions remain the
+cross-instance authority for quotas and delivery ownership.

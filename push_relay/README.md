@@ -155,7 +155,7 @@ authentication state and rate-limit documents are short-lived quota counters;
 both are safe to delete after their enforcement windows.
 
 Deploy compatibility note: Agent `0.6.0-beta` sends both the legacy signature
-and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.19`,
+and the nonce-bound signature. Upgrade Agents first, then deploy Relay `0.5.21`,
 which requires nonce-bound signatures. Older Agents will receive HTTP 401 from
 signed Relay endpoints after that Relay upgrade.
 
@@ -209,11 +209,11 @@ access to Firestore itself.
 
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
-Relay service `0.5.19` adds an activation ID to the owning Agent's authenticated
-device list. Agent `0.6.24-beta` uses it to revoke an Internet-paired app's LAN
+Relay service `0.5.21` adds an activation ID to the owning Agent's authenticated
+device list. Agent `0.6.26-beta` uses it to revoke an Internet-paired app's LAN
 credential individually. Deploy this relay version before that Agent upgrade.
 
-Relay service `0.5.19` provides the encrypted Internet Relay data path and
+Relay service `0.5.21` provides the encrypted Internet Relay data path and
 cost/enrollment guardrails. Updated apps
 create an X25519 key during QR activation; the service returns a random,
 per-device access credential and stores only its hash. Agents publish a
@@ -237,7 +237,7 @@ The next registration removes older records carrying the same FCM token across
 Agent identities, migrating push-only pairings left behind by Agent rebuilds
 before scoped credentials existed.
 
-The 0.5.19 cost profile is local-first: Agents check for changed relay snapshots
+The 0.5.21 cost profile is local-first: Agents check for changed relay snapshots
 every 15 seconds, do not rewrite unchanged ciphertext, cache device lists for
 five minutes, and poll the bounded control channel at most every five minutes.
 Remote apps default to a server-controlled 60-second fallback interval when the
@@ -250,7 +250,7 @@ heartbeat, so cost tuning never weakens Agent-down detection.
 
 Open `/admin/usage` and enter the Relay administrator token for the private
 operator dashboard. It shows current fleet presence, the remotely delivered
-policy, per-day counters, and hashed Agent activity. Relay `0.5.19` also shows
+policy, per-day counters, and hashed Agent activity. Relay `0.5.21` also shows
 Firebase acceptance/failure and latency, notification-quota pressure,
 heartbeat-scheduler freshness, remote-snapshot availability, encrypted-data
 coverage, expiring registrations, retention expectations, and a seven-day
@@ -334,3 +334,23 @@ An administrator can verify an enabled Agent session with an authenticated
 `POST /v1/internal/agents/{agent_id}/secure/ping`. The Agent returns `pong` on
 its following outbound exchange; inspect the `secureCommands` document for its
 completed state. This endpoint is an operator smoke test, not an app API.
+# Notification retry lifecycle (0.5.21)
+
+Signal delivery uses durable event leases and completed recipient hashes.
+Transient FCM recipient failures return 503; the Agent's persisted outbox retries
+without resending to recipients already checkpointed as accepted or permanently
+failed. New events and their hourly quota charge are committed atomically;
+retrying an existing event does not charge that durable quota again. Abandoned
+leases become reclaimable after 60 seconds. Legacy event records retain their
+existing duplicate-suppression behavior.
+
+This provides at-least-once delivery, not exactly-once handset delivery: a crash
+between FCM acceptance and checkpointing can repeat a send. Stable notification
+IDs and Android tags reduce visible duplicates. Deploy this relay release to
+activate the cloud-side fixes; rebuilding only the Agent does not update it.
+
+Relay 0.5.21 runs blocking Firebase-backed route work in a bounded worker pool
+(16 active backend requests per instance), keeping the ASGI event loop available
+while database or FCM calls wait. Request bodies remain bounded and are cached on
+the main loop before dispatch. Cloud Run's existing request/instance limits are
+unchanged; this release must be deployed separately from Agent updates.

@@ -1159,8 +1159,11 @@ def _secure_snapshot_projection(snapshot: dict[str, object]) -> dict[str, object
     if isinstance(connection, dict):
         for key in ("pbxHost", "pbxPort", "pushRelayAgentId"):
             connection.pop(key, None)
-        connection["kind"] = "internetRelay"
-        connection["label"] = "Connected securely"
+        connection["transport"] = "internetRelay"
+        connection["pbxReachable"] = connection.get("kind") != "reconnecting"
+        if connection["pbxReachable"]:
+            connection["kind"] = "internetRelay"
+            connection["label"] = "Connected securely"
     calls = projected.get("calls")
     if isinstance(calls, list):
         for call in calls:

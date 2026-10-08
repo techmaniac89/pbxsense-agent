@@ -113,10 +113,14 @@ _relay_heartbeat_task: asyncio.Task[None] | None = None
 _internet_relay_task: asyncio.Task[None] | None = None
 _watchdog_task: asyncio.Task[None] | None = None
 _snapshot_lock = threading.Lock()
+_collection_lock = threading.Lock()
+_payload_lock = threading.Lock()
 _browser_bootstrap_lock = threading.Lock()
 _app_credentials: AppCredentials | None = None
 _app_credentials_lock = threading.Lock()
 _cached_home_state: tuple | None = None
+_snapshot_published_at_monotonic = 0.0
+_collection_started_monotonic = 0.0
 _cached_history: tuple[list, list, list] = ([], [], [])
 _history_refreshed_at = 0.0
 _cdr_history_signature: tuple[str, int, int] | None = None
@@ -339,7 +343,15 @@ def _record_runtime_result(
 
 def _runtime_diagnostics() -> dict[str, object]:
     with _runtime_lock:
-        return {name: dict(value) for name, value in _runtime_state.items()}
+        result = {name: dict(value) for name, value in _runtime_state.items()}
+    started = _collection_started_monotonic
+    elapsed = max(0.0, time.monotonic() - started) if started else 0.0
+    result.setdefault("snapshot", {}).update({
+        "collectionInProgress": bool(started),
+        "collectionElapsedSeconds": round(elapsed, 2),
+        "collectionStalled": elapsed > max(30.0, settings.timeout_seconds * 20),
+    })
+    return result
 
 
 def _readiness() -> tuple[bool, str]:
@@ -1254,25 +1266,57 @@ async def live(websocket: WebSocket) -> None:
 
 
 def _home_payload(*, moment_hours: int = 24) -> dict:
-    global _cached_home_state
     with _snapshot_lock:
-        if _cached_home_state is None:
-            _refresh_home_state_locked()
         state = _cached_home_state
         cached = _cached_home_payloads.get(moment_hours)
+    if state is None:
+        _refresh_home_state(only_if_missing=True)
+    if cached is not None:
+        return _with_snapshot_freshness(cached)
+    with _payload_lock:
+        with _snapshot_lock:
+            state = _cached_home_state
+            cached = _cached_home_payloads.get(moment_hours)
         if cached is None:
             cached = _home_payload_from_state(state, moment_hours=moment_hours)
-            _cached_home_payloads[moment_hours] = cached
-        return cached
+            with _snapshot_lock:
+                if state is _cached_home_state:
+                    _cached_home_payloads[moment_hours] = cached
+        return _with_snapshot_freshness(cached)
 
 
-def _refresh_home_state() -> tuple:
+def _with_snapshot_freshness(payload: dict) -> dict:
     with _snapshot_lock:
-        return _refresh_home_state_locked()
+        published = _snapshot_published_at_monotonic
+    stale_after = max(10.0, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds)
+    if not published or time.monotonic() - published <= stale_after:
+        return payload
+    # Never mutate a published object already held by a live client.
+    return {**payload, "snapshotStale": True, "connection": {
+        **payload.get("connection", {}), "kind": "reconnecting", "label": "Reconnecting",
+        "detail": "The last complete PBX snapshot is stale; collection is still pending.",
+    }}
+
+
+def _refresh_home_state(*, only_if_missing: bool = False) -> tuple:
+    global _collection_started_monotonic
+    # Only one collector owns connector sessions/history/trackers. Readers do
+    # not take this lock and continue to serve the last complete snapshot.
+    with _collection_lock:
+        if only_if_missing:
+            with _snapshot_lock:
+                if _cached_home_state is not None:
+                    return _cached_home_state
+        _collection_started_monotonic = time.monotonic()
+        try:
+            return _refresh_home_state_locked()
+        finally:
+            _collection_started_monotonic = 0.0
 
 
 def _refresh_home_state_locked() -> tuple:
     global _cached_home_state, _cached_history, _history_refreshed_at
+    global _snapshot_published_at_monotonic
     global _cdr_history_signature, _security_history_signature
     global _voicemail_history_signature
     snapshot = connector.snapshot()
@@ -1351,7 +1395,7 @@ def _refresh_home_state_locked() -> tuple:
     )
     show_aggregate_tip = endpoint_aggregate_tip_tracker.observe(snapshot, observed_at)
     endpoint_last_active = endpoint_last_active_tracker.observe(snapshot, observed_at)
-    _cached_home_state = (
+    state = (
         snapshot,
         observed_at,
         moment_events,
@@ -1363,8 +1407,11 @@ def _refresh_home_state_locked() -> tuple:
         show_aggregate_tip,
         endpoint_last_active,
     )
-    _cached_home_payloads.clear()
-    return _cached_home_state
+    with _snapshot_lock:
+        _cached_home_state = state
+        _snapshot_published_at_monotonic = time.monotonic()
+        _cached_home_payloads.clear()
+    return state
 
 
 def _file_signature(path: str) -> tuple[str, int, int]:
@@ -1413,6 +1460,8 @@ def _home_payload_from_state(state: tuple, *, moment_hours: int) -> dict:
         trunk_unavailability_signals=trunk_signals,
         endpoint_last_active=endpoint_last_active,
     )
+    payload["snapshotObservedAt"] = observed_at.isoformat()
+    payload["snapshotStale"] = False
     if not show_aggregate_tip:
         payload["signals"] = [
             signal for signal in payload["signals"]
