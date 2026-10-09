@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import time
 from typing import Callable
+from functools import partial
 
 from .cucm import enrich_cucm_trunks_with_history
 from .history import (
@@ -73,18 +74,18 @@ class HistoryCollector:
         self, *, poll_interval: float,
         monotonic: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = datetime.now,
-        read_calls: Callable[..., list[CdrCall]] = read_recent_cdr_calls,
-        read_cucm: Callable[..., list[CdrCall]] = read_recent_cucm_calls,
-        read_voicemails: Callable[..., list[VoicemailMessage]] = read_recent_voicemails,
-        read_security: Callable[..., list[SecurityEvent]] = read_recent_security_events,
+        read_calls: Callable[..., list[CdrCall]] | None = None,
+        read_cucm: Callable[..., list[CdrCall]] | None = None,
+        read_voicemails: Callable[..., list[VoicemailMessage]] | None = None,
+        read_security: Callable[..., list[SecurityEvent]] | None = None,
     ) -> None:
         self._poll_interval = poll_interval
         self._monotonic = monotonic
         self._now = now
-        self._read_calls = read_calls
-        self._read_cucm = read_cucm
-        self._read_voicemails = read_voicemails
-        self._read_security = read_security
+        self._read_calls = read_calls or partial(read_recent_cdr_calls, strict=True)
+        self._read_cucm = read_cucm or partial(read_recent_cucm_calls, strict=True)
+        self._read_voicemails = read_voicemails or partial(read_recent_voicemails, strict=True)
+        self._read_security = read_security or partial(read_recent_security_events, strict=True)
         self._records = HistoryRecords()
         self._refreshed_at: float | None = None
         self._cdr_signature = None
@@ -127,10 +128,13 @@ class HistoryCollector:
             self._sources.record("voicemail", "unsupported")
             self._sources.record("security", "unsupported")
             if self._available("cdr", settings.cucm_cdr_path):
-                self._records = HistoryRecords(calls=self._read_cucm(
-                    settings.cucm_cdr_path, settings.cucm_cmr_path, limit=1000,
-                ))
-                self._sources.record("cdr")
+                try:
+                    calls = self._read_cucm(settings.cucm_cdr_path, settings.cucm_cmr_path, limit=1000)
+                except OSError:
+                    self._sources.record("cdr", "temporarily_unavailable")
+                else:
+                    self._records = HistoryRecords(calls=calls)
+                    self._sources.record("cdr")
             return
         cdr_path, voicemail_path = history_paths(settings)
         cdr_signature = file_signature(cdr_path)
@@ -144,23 +148,42 @@ class HistoryCollector:
         voicemail_available = self._available("voicemail", voicemail_path)
         security_available = self._available("security", security_path)
         if cdr_available:
-            if self._cdr_signature != cdr_signature:
-                calls = self._read_calls(cdr_path, limit=1000)
-            self._sources.record("cdr")
+            try:
+                if self._cdr_signature != cdr_signature:
+                    calls = self._read_calls(cdr_path, limit=1000)
+            except OSError:
+                cdr_available = False
+                self._sources.record("cdr", "temporarily_unavailable")
+            else:
+                self._sources.record("cdr")
         if voicemail_available:
-            if self._voicemail_signature != voicemail_fingerprint:
-                voicemails = self._read_voicemails(voicemail_path)
-            self._sources.record("voicemail")
+            try:
+                if self._voicemail_signature != voicemail_fingerprint:
+                    voicemails = self._read_voicemails(voicemail_path)
+            except OSError:
+                voicemail_available = False
+                self._sources.record("voicemail", "temporarily_unavailable")
+            else:
+                self._sources.record("voicemail")
+        security_refreshed = False
         if security_available and self._security_signature != security_signature:
-            security_events = self._read_security(security_path)
-            self._sources.record("security")
+            try:
+                security_events = self._read_security(security_path)
+            except OSError:
+                security_available = False
+                self._sources.record("security", "temporarily_unavailable")
+            else:
+                self._sources.record("security")
+                security_refreshed = True
         else:
+            if security_available:
+                self._sources.record("security")
+        if not security_refreshed:
             cutoff = self._now() - timedelta(minutes=15)
             security_events = [event for event in security_events
                                if event.occurred_at is not None and event.occurred_at >= cutoff]
-            if security_available:
-                self._sources.record("security")
-        # Commit records and fingerprints only after every reader succeeded.
+        # Unexpected errors still abort the generation. Optional source read
+        # failures retain that source's records and do not advance its fingerprint.
         self._records = HistoryRecords(calls, voicemails, security_events)
         if cdr_available:
             self._cdr_signature = cdr_signature

@@ -318,6 +318,39 @@ runtime behavior change was found in this integration pass.
 
 ## Architectural extraction status
 
+### Persistent daily evidence (Agent 0.6.39-beta)
+
+`SignalCollector` owns `DailySummaryTracker` under the existing serialized
+collection boundary. It observes enriched snapshots once and publishes a copied
+summary alongside other collected state; payload construction is read-only.
+The engine no longer derives whole-day queue success, operating/service streaks,
+or daily/weekly/monthly volume targets from the latest 1,000 CDR records.
+
+A private SQLite transaction commits hashed event deduplication and aggregate
+counts together. Repeated/cached snapshots and restarts do not increment counters
+again. Coverage is deliberately separate from counts: failed sources, inventory
+changes, observation gaps, capped initial windows and lost CDR overlap suppress
+claims even when retained totals remain useful. Queue maximum wait persists
+after a queue empties. Batched deduplication reads run on fresh history evidence,
+not every live snapshot; no new PBX or Relay polling is introduced.
+
+Completed-day claims use PBX-local midnight plus a five-minute settling window.
+This is observed evidence, not vendor SLA certification or an audit of arbitrarily
+late CDRs. Retention, learning thresholds, storage failure and timing limits are
+documented in `CONFIGURATION.md`. The existing signal kinds remain compatible;
+no companion app or Relay update is required for this correction.
+
+### Source failure handling update (Agent 0.6.38-beta)
+
+Optional history I/O failures now retain that source's cache/fingerprint and
+publish unavailable source metadata while core collection and signal observation
+continue. Strict production readers distinguish a failed read from a successful
+empty read; best-effort diagnostic helpers keep their legacy interface.
+Unexpected programming errors still abort the generation atomically.
+Queue responses require complete schema evidence before cache replacement.
+The coordinated app 0.6.7-beta+284 renders unknown queue/live-call evidence
+without presenting it as a successful empty observation.
+
 The planned snapshot, relay, neutral-model and history/tracker extraction
 bullets are complete locally. Deployment and real-PBX/device validation remain
 separate; passing local regressions is not a production-readiness declaration.

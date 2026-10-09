@@ -35,6 +35,38 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_EXTENSION_NAMES` | empty | Optional friendly-name map such as `101=Reception,120=Support`. |
 | `PBXSENSE_SNAPSHOT_POLL_SECONDS` | `1` | Fast polling cadence while calls or queue demand are active, the PBX is reconnecting, or state recently changed; clamped to at least 0.5 seconds. |
 | `PBXSENSE_HISTORY_POLL_SECONDS` | `30` | CDR, voicemail, recording, and security-history refresh cadence, clamped to at least 5 seconds. |
+| `PBXSENSE_DAILY_SUMMARY_PATH` | `/var/lib/pbxsense-agent/daily_summary.sqlite3` | Private persistent daily counters and coverage evidence for day/streak/adaptive-volume Moments. Preserve in the Agent data volume. |
+
+### Daily evidence and learning (Agent 0.6.39-beta)
+
+Days follow midnight in `PBXSENSE_TIMEZONE`, not an assumed 17:00 closing time.
+A first installation or a lost summary database starts with a partial day;
+tracking must begin within 60 seconds of midnight to qualify that day. Queue
+gaps above `max(10, snapshot interval * 3 + connector timeout)` seconds, changed
+queue inventories, unavailable sources, history gaps above
+`max(120, history interval * 3)` seconds, and loss of overlap between successive
+recent-CDR windows invalidate the affected evidence. Midday restarts preserve
+counts, but an observation gap can still invalidate a day.
+
+Completed-day Moments wait at least five minutes after midnight. Call-based
+day/streak claims additionally require a successful history refresh after that
+settling period. They describe observed CDR outcomes, not a guarantee against
+arbitrarily delayed vendor CDR delivery. Queue-target Moments require a covered
+day, empty queues at its end, and no observed wait over 60 seconds. Sampling
+cannot prove the absence of shorter between-poll breaches.
+
+Daily volume targets require three complete active historical days; weekly and
+monthly targets require two fully covered previous calendar periods. Every day
+in a week/month must be known, including zero-call days. No-call days cannot
+earn a no-missed-call Moment or extend an operating/service streak. Partial
+periods never train targets or qualify as current milestone evidence.
+
+The database retains 370 days of aggregate counts/coverage, plus at most 100,000
+hashed recent-event keys for deduplication and two-day late-arrival reconciliation.
+It contains no raw caller or destination numbers; queue names and timestamps
+are retained. Storage failures suppress these Moments. Corrupt or foreign-PBX
+state starts fresh; losing the file requires learning again. Existing Docker
+data-volume mounts cover the default path. Mock mode does not train this ledger.
 
 The Agent caches Home and Signal serialization until a new snapshot arrives.
 Relay evaluation follows snapshot completion with a one-second stagger and a

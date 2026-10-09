@@ -7,6 +7,7 @@ from .collected_state import CollectedHomeState
 from .observations import PbxSnapshot
 from .presence_history import EndpointLastActiveTracker
 from .pulse import ActivityTracker, EndpointAvailabilitySignalTracker, EndpointAggregateTipTracker
+from .daily_summary import DailySummaryTracker
 
 
 class SignalCollector:
@@ -22,12 +23,14 @@ class SignalCollector:
         trunks: EndpointAvailabilitySignalTracker,
         aggregate_tip: EndpointAggregateTipTracker,
         last_active: EndpointLastActiveTracker,
+        daily: DailySummaryTracker | None = None,
     ) -> None:
         self._activity = activity
         self._endpoints = endpoints
         self._trunks = trunks
         self._aggregate_tip = aggregate_tip
         self._last_active = last_active
+        self._daily = daily
 
     def collect(self, snapshot: PbxSnapshot, observed_at: datetime) -> CollectedHomeState:
         moment_events = self._activity.observe(snapshot, observed_at)
@@ -38,6 +41,7 @@ class SignalCollector:
         trunk_signals = self._trunks.observe(snapshot, observed_at)
         show_tip = self._aggregate_tip.observe(snapshot, observed_at)
         last_active = self._last_active.observe(snapshot, observed_at)
+        daily = self._daily.observe(snapshot, observed_at) if self._daily else {}
         return CollectedHomeState(
             snapshot=snapshot, observed_at=observed_at, moment_events=moment_events,
             endpoint_unavailability_signals=endpoint_signals,
@@ -46,4 +50,5 @@ class SignalCollector:
             endpoint_signal_lifecycle=lifecycle,
             trunk_unavailability_signals=trunk_signals,
             show_aggregate_tip=show_tip, endpoint_last_active=last_active,
+            daily_summaries=daily,
         )

@@ -100,8 +100,13 @@ class FreeSwitchClient:
                 elif not _is_dir(path) or not os.access(path, os.R_OK | os.X_OK):
                     self._sources.record(name, "temporarily_unavailable")
                 else:
-                    setattr(self, attribute, reader(path))
-                    self._sources.record(name)
+                    try:
+                        records = reader(path, strict=True)
+                    except OSError:
+                        self._sources.record(name, "temporarily_unavailable")
+                    else:
+                        setattr(self, attribute, records)
+                        self._sources.record(name)
             self._history_refresh_after = now + max(
                 1, self._settings.history_poll_seconds
             )
@@ -527,20 +532,24 @@ def _channel_from_row(row: dict[str, Any]) -> PbxChannel:
     )
 
 
-def _read_json_cdr_calls(path: str, *, limit: int = 1000) -> list[CdrCall]:
+def _read_json_cdr_calls(path: str, *, limit: int = 1000, strict: bool = False) -> list[CdrCall]:
     root = Path(path) if path else None
     if root is None or not _safe_is_dir(root):
+        if strict:
+            raise OSError("FreeSWITCH CDR source is unavailable")
         return []
 
-    files = _recent_files(root, "*.json", limit * 3)
+    files = _recent_files(root, "*.json", limit * 3, strict=strict)
     calls: list[CdrCall] = []
     for file in files:
         try:
-            text = _read_bounded_text(file, MAX_CDR_JSON_FILE_BYTES)
+            text = _read_bounded_text(file, MAX_CDR_JSON_FILE_BYTES, strict=strict)
             if text is None:
                 continue
             data = json.loads(text)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            if strict and isinstance(exc, OSError):
+                raise
             continue
         row = _flatten_json_cdr(data)
         calls.append(
@@ -574,14 +583,16 @@ def _read_json_cdr_calls(path: str, *, limit: int = 1000) -> list[CdrCall]:
     return calls[:limit]
 
 
-def _read_voicemails(path: str, *, limit: int = 100) -> list[VoicemailMessage]:
+def _read_voicemails(path: str, *, limit: int = 100, strict: bool = False) -> list[VoicemailMessage]:
     root = Path(path) if path else None
     if root is None or not _safe_is_dir(root):
+        if strict:
+            raise OSError("FreeSWITCH voicemail source is unavailable")
         return []
 
     messages: list[VoicemailMessage] = []
-    for file in _recent_files(root, "*.txt", limit):
-        metadata = _key_value_file(file)
+    for file in _recent_files(root, "*.txt", limit, strict=strict):
+        metadata = _key_value_file(file, strict=strict)
         mailbox = _string(metadata, "username", "mailbox", "extension") or file.parent.name
         caller = _string(metadata, "caller_id_name", "caller_id_number", "caller")
         messages.append(
@@ -630,7 +641,7 @@ def _cdr_disposition(row: dict[str, Any]) -> str:
     return "ANSWERED" if raw else "ANSWERED"
 
 
-def _recent_files(root: Path, pattern: str, limit: int) -> list[Path]:
+def _recent_files(root: Path, pattern: str, limit: int, *, strict: bool = False) -> list[Path]:
     if limit <= 0:
         return []
     newest: list[tuple[float, int, Path]] = []
@@ -655,6 +666,8 @@ def _recent_files(root: Path, pattern: str, limit: int) -> list[Path]:
                             continue
                         modified = entry.stat(follow_symlinks=False).st_mtime
                     except OSError:
+                        if strict:
+                            raise
                         continue
                     candidate = (modified, sequence, Path(entry.path))
                     sequence += 1
@@ -663,14 +676,16 @@ def _recent_files(root: Path, pattern: str, limit: int) -> list[Path]:
                     elif candidate[:2] > newest[0][:2]:
                         heapq.heapreplace(newest, candidate)
         except OSError:
+            if strict:
+                raise
             continue
     newest.sort(reverse=True)
     return [item[2] for item in newest]
 
 
-def _key_value_file(path: Path) -> dict[str, str]:
+def _key_value_file(path: Path, *, strict: bool = False) -> dict[str, str]:
     result: dict[str, str] = {}
-    text = _read_bounded_text(path, MAX_VOICEMAIL_METADATA_BYTES)
+    text = _read_bounded_text(path, MAX_VOICEMAIL_METADATA_BYTES, strict=strict)
     if text is None:
         return result
     lines = text.splitlines()
@@ -682,11 +697,13 @@ def _key_value_file(path: Path) -> dict[str, str]:
     return result
 
 
-def _read_bounded_text(path: Path, maximum_bytes: int) -> str | None:
+def _read_bounded_text(path: Path, maximum_bytes: int, *, strict: bool = False) -> str | None:
     try:
         with path.open("rb") as handle:
             raw = handle.read(maximum_bytes + 1)
     except OSError:
+        if strict:
+            raise
         return None
     if len(raw) > maximum_bytes:
         return None

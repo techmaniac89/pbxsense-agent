@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from pbxsense_agent import main
+from pbxsense_agent.daily_summary import DailySummaryTracker
+from pbxsense_agent.history import CdrCall
 from pbxsense_agent.history_collection import HistoryCollector
 from pbxsense_agent.observations import PbxEndpoint, PbxSnapshot
 from pbxsense_agent.presence_history import EndpointLastActiveTracker
@@ -33,6 +35,7 @@ class SnapshotPipelineTest(unittest.TestCase):
             trunks=EndpointAvailabilitySignalTracker(role="trunk", recovery_confirmation=timedelta(0)),
             aggregate_tip=EndpointAggregateTipTracker(timedelta(seconds=180)),
             last_active=EndpointLastActiveTracker(str(Path(directory) / "activity.json")),
+            daily=DailySummaryTracker(str(Path(directory) / "daily.sqlite3")),
         )
         self.runtime = SnapshotRuntime(
             collect=main._collect_home_state,
@@ -62,6 +65,22 @@ class SnapshotPipelineTest(unittest.TestCase):
 
     def health(self, payload):
         return [signal for signal in payload["signals"] if signal["kind"] == "endpoint_unavailable"]
+
+    def test_daily_evidence_flows_through_collector_and_home_publication(self):
+        self.origin = self.origin.replace(hour=0)
+        first = CdrCall('101', '102', 'ANSWERED', self.origin, 30)
+        self.connector.snapshot.return_value = replace(self.snapshot(), recent_calls=[first])
+        self.runtime.refresh()
+        original = self.runtime.home()
+        moment = next(s for s in original['signals'] if s['kind'] == 'first_answered_call_of_day')
+        self.assertEqual(moment['technical']['answered_at'], '00:00')
+        self.seconds = 1
+        self.connector.snapshot.return_value = replace(self.snapshot(), recent_calls=[first,
+            CdrCall('103', '102', 'ANSWERED', self.origin + timedelta(seconds=1), 30)])
+        self.runtime.refresh()
+        state = self.signals.collect(self.connector.snapshot.return_value, self.origin + timedelta(seconds=1))
+        self.assertEqual(state.daily_summaries['days']['2026-10-09']['answered'], 2)
+        self.assertEqual(moment['technical']['answered_at'], '00:00')
 
     def test_phone_incident_confirmation_recovery_and_rearming_across_pipeline(self):
         self.publish(0)
@@ -99,7 +118,7 @@ class SnapshotPipelineTest(unittest.TestCase):
         self.assertEqual(activity["technical"]["remaining_unavailable_extensions"], "102")
         self.assertNotIn("All monitored", activity["title"])
 
-    def test_history_failure_preserves_publication_then_recovers_without_signal_observation(self):
+    def test_optional_history_failure_keeps_core_publication_and_recovers(self):
         self.stack.enter_context(patch.object(main, "settings", replace(
             main.settings, pbx_type="asterisk", cdr_csv_path="", voicemail_path="", asterisk_security_log_path="",
         )))
@@ -115,17 +134,18 @@ class SnapshotPipelineTest(unittest.TestCase):
         self.seconds = 30
         with patch("pbxsense_agent.history_collection.file_signature", return_value=("changed", 1, 1)), \
                 patch.object(self.signals, "collect", wraps=self.signals.collect) as observe:
-            with self.assertRaisesRegex(OSError, "history unavailable"):
-                self.runtime.refresh()
-            observe.assert_not_called()
-            stale = self.runtime.home()
-            self.assertTrue(stale["snapshotStale"])
-            self.assertEqual(stale["connection"]["kind"], "reconnecting")
-            self.assertEqual(stale["snapshotObservedAt"], initial["snapshotObservedAt"])
-            self.assertFalse(initial["snapshotStale"])
-            security.side_effect = None
             self.runtime.refresh()
             observe.assert_called_once()
+            stale = self.runtime.home()
+            self.assertFalse(stale["snapshotStale"])
+            self.assertEqual(stale["connection"]["kind"], "local")
+            self.assertEqual(stale["dataSources"]["security"]["state"], "temporarily_unavailable")
+            self.assertFalse(initial["snapshotStale"])
+            security.side_effect = None
+            self.seconds = 60
+            self.runtime.refresh()
+            self.assertEqual(observe.call_count, 2)
         recovered = self.runtime.home()
         self.assertFalse(recovered["snapshotStale"])
+        self.assertEqual(recovered["dataSources"]["security"]["state"], "ready")
         self.assertNotEqual(recovered["snapshotObservedAt"], initial["snapshotObservedAt"])

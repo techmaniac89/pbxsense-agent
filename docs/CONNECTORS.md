@@ -37,7 +37,15 @@ PBX connector
 
 ## Source availability and freshness
 
-Agent `0.6.37-beta` adds optional `dataSources` to `/home` (and therefore
+Agent `0.6.39-beta` consumes source availability/freshness in a persistent daily
+ledger. Connectors keep their existing bounded history windows; the shared
+collector accumulates newly observed outcomes across successive overlapping
+windows. A full first window or a lost overlap is not complete-day evidence.
+Failed queues/history and collection gaps invalidate affected coverage rather
+than certifying success from retained data. Queue/day/streak/volume Moments now
+require this evidence; see `CONFIGURATION.md` for warm-up and sampling limits.
+
+Agent `0.6.38-beta` adds optional `dataSources` to `/home` (and therefore
 `/live`) and `/diagnostics`. Each source reports `state` and
 `lastSuccessAgeSeconds`. States are `ready`, `partial`, `unsupported`,
 `not_configured`, `permission_denied`, or `temporarily_unavailable`.
@@ -45,7 +53,25 @@ An age of `null` means no successful observation yet; zero is a fresh read,
 not an assertion that the last call or history file was created recently.
 Missing keys are unspecified, not proof of support. This is additive:
 existing apps can ignore it, and no app version change is needed. A future app
-UI can label retained queue/history values as stale using these fields.
+UI can label retained history values as stale using these fields.
+
+Agent `0.6.38-beta` and app `0.6.7-beta+284` coordinate source-aware queue and
+current-call display. Queue rows add optional `sourceState` and `membersKnown`;
+`status: unknown` means the retained values are not a current observation.
+Unsupported member coverage does not imply zero available agents. The app shows
+unavailable queues neutrally, and unconfigured/unavailable live-call monitoring
+does not claim that there are no calls. Update the app alongside this Agent for
+the new queue display; older apps ignore the metadata and may still label an
+unknown queue as ready. Missing metadata retains legacy parsing behavior.
+
+Production history collection uses strict read-error reporting. Real filesystem
+read/scan failures retain the last successful source records and fingerprints,
+mark that source unavailable, and retry at the next history interval without
+taking the PBX core offline. Best-effort diagnostic readers remain compatible.
+Malformed individual JSON/CSV records and oversized files are still skipped
+within the existing bounded-reader safeguards. Yeastar queue inventory and
+status structures are validated before replacing the complete queue cache;
+only a valid empty list or explicit zero count can confirm emptiness.
 
 - A successful empty read means zero. Failed optional queue reads retain the
   last complete queue generation and report unavailable instead of silently

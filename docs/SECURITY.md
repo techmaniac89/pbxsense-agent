@@ -2,7 +2,7 @@
 
 ### New-browser authorization
 
-Agent 0.6.37-beta provides a non-sensitive authorization page for browser GET
+Agent 0.6.38-beta provides a non-sensitive authorization page for browser GET
 requests denied administrator access. JSON/API errors remain unchanged.
 Only an existing administrator cookie plus the existing same-origin mutation
 check can mint browser access codes; paired app credentials cannot mint them.
@@ -19,13 +19,20 @@ internet.
 
 ## Network Boundaries
 
-Agent 0.6.37-beta also reports failed relay heartbeat, notification delivery,
+Agent 0.6.39-beta stores daily Moment evidence in a mode-0600 SQLite file within
+the Agent data directory. It retains bounded aggregate counts and coverage,
+queue names, timestamps and hashed recent-event identifiers, not raw caller or
+destination numbers. Deduplication and totals commit atomically. Storage errors
+suppress evidence-dependent claims; malformed or foreign-PBX state is not trusted.
+This is local state only and adds no Relay endpoint or new app permissions.
+
+Agent 0.6.38-beta also reports failed relay heartbeat, notification delivery,
 and Internet Relay attempts as runtime failures rather than successful polls.
 Disabled relay features are skipped. Malformed Asterisk CSV records no longer
 abort live snapshots, and malformed presence-history JSON or individual dates
 are safely ignored while valid last-active entries are retained.
 
-### Revocable app access (Agent 0.6.37-beta)
+### Revocable app access (Agent 0.6.38-beta)
 
 Pairing QR codes now contain an individual app credential, never the shared
 Agent administrator token. App credentials allow snapshots, diagnostics,
@@ -172,7 +179,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.37-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

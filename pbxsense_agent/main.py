@@ -19,6 +19,7 @@ from starlette.responses import Response, StreamingResponse
 
 from .connectors import connector_for_settings
 from .collected_state import CollectedHomeState
+from .daily_summary import DailySummaryTracker
 from .credentials import AppCredentials
 from .browser_access import BrowserAccessGrants
 from .history_collection import (
@@ -86,6 +87,10 @@ _signal_collector = SignalCollector(
     activity=activity_tracker, endpoints=endpoint_availability_tracker,
     trunks=trunk_availability_tracker, aggregate_tip=endpoint_aggregate_tip_tracker,
     last_active=endpoint_last_active_tracker,
+    daily=DailySummaryTracker(settings.daily_summary_path,
+        history_seconds=settings.history_poll_seconds,
+        queue_gap_seconds=max(10, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds),
+        identity=f"{settings.pbx_type}|{settings.host}|{settings.freeswitch_host}|{settings.yeastar_base_url}|{settings.cucm_host}|{settings.grandstream_ami_host}|{settings.timezone}") if settings.pbx_type != "mock" else None,
 )
 signal_notification_episode_tracker = SignalNotificationEpisodeTracker()
 push_relay = AgentRelay(
@@ -1368,6 +1373,7 @@ def _home_payload_from_state(state: CollectedHomeState, *, moment_hours: int) ->
         endpoint_signal_lifecycle=state.endpoint_signal_lifecycle,
         trunk_unavailability_signals=state.trunk_unavailability_signals,
         endpoint_last_active=state.endpoint_last_active,
+        daily_summaries=state.daily_summaries,
     )
     payload["snapshotObservedAt"] = state.observed_at.isoformat()
     payload["snapshotStale"] = False

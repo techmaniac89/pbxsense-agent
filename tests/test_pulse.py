@@ -1007,6 +1007,8 @@ external::backup gateway sip:user@backup.test NOREG
                     "name": "support",
                     "queue": "support",
                     "status": "needs_attention",
+                    "sourceState": "ready",
+                    "membersKnown": True,
                     "statusText": "2 callers waiting",
                     "detail": "Longest wait 1m 35s · No members available · 1 busy · 1 paused",
                     "waitingCallers": 2,
@@ -2042,9 +2044,8 @@ external::backup gateway sip:user@backup.test NOREG
             signal for signal in payload["signals"] if signal["category"] == "moment"
         ]
         by_kind = {moment["kind"]: moment for moment in moments}
-        self.assertIn("first_answered_call_of_day", by_kind)
-        self.assertIn("full_day_without_missed_calls", by_kind)
-        self.assertEqual(by_kind["first_answered_call_of_day"]["technical"]["answered_at"], "18:00")
+        self.assertNotIn("first_answered_call_of_day", by_kind)
+        self.assertNotIn("full_day_without_missed_calls", by_kind)
 
     def test_queue_pressure_insight_and_end_of_day_moment_use_live_queue_evidence(self) -> None:
         now = datetime(2026, 6, 26, 18, tzinfo=ZoneInfo("Europe/Athens"))
@@ -2060,7 +2061,7 @@ external::backup gateway sip:user@backup.test NOREG
                 AmiQueue(name="support", waiting_callers=0, longest_wait_seconds=42),
             ]), display_name="Office PBX", extension_names={}, now=now,
         )
-        self.assertIn("queues_finished_within_target", [s["kind"] for s in clear["signals"]])
+        self.assertNotIn("queues_finished_within_target", [s["kind"] for s in clear["signals"]])
 
     def test_call_volume_milestone_adapts_to_this_pbx_daily_average(self) -> None:
         now = datetime(2026, 6, 26, 12, tzinfo=ZoneInfo("Europe/Athens"))
@@ -2081,6 +2082,9 @@ external::backup gateway sip:user@backup.test NOREG
         payload = build_home_payload(
             AmiSnapshot(reachable=True, agent_version="test", recent_calls=calls),
             display_name="Office PBX", extension_names={}, now=now,
+            daily_summaries={"available": True, "lastHistoryAt": now.timestamp(), "days": {
+                (now.date() - timedelta(days=offset)).isoformat(): {"callsComplete": True, "answered": 4}
+                for offset in (0, 1, 2, 3)}},
         )
         milestone = next(s for s in payload["signals"] if s["kind"] == "adaptive_call_volume_milestone")
         self.assertEqual(milestone["technical"]["period"], "daily")

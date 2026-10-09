@@ -7,9 +7,10 @@ from unittest.mock import MagicMock, patch
 
 from pbxsense_agent.ami import AmiClient, AmiActionResponseError, AmiError
 from pbxsense_agent.engine import build_engine_signals
-from pbxsense_agent.freeswitch import FreeSwitchClient, FreeSwitchError, _pipe_rows, _queue_observation, _complete_rows
+from pbxsense_agent.freeswitch import FreeSwitchClient, FreeSwitchError, _pipe_rows, _queue_observation, _complete_rows, _read_json_cdr_calls
 from pbxsense_agent.grandstream import GrandstreamUcmClient
 from pbxsense_agent.history_collection import HistoryCollector
+from pbxsense_agent.history import read_recent_cdr_calls, read_recent_cucm_calls, read_recent_voicemails
 from pbxsense_agent.observations import PbxQueue, PbxSnapshot
 from pbxsense_agent.pulse import ActivityTracker, build_home_payload
 from pbxsense_agent.settings import AgentSettings
@@ -156,4 +157,89 @@ class SourceAvailabilityTest(unittest.TestCase):
                                  sources={"cdr":{"state":"not_configured"}}), now + timedelta(seconds=5))
         self.assertIn("pbx_queue_cleared_activity", {s["kind"] for s in result})
         self.assertNotIn("busy_period_completed_without_abandonment", {s["kind"] for s in result})
+
+    def test_real_cdr_reader_failure_retains_cache_without_committing_fingerprint(self):
+        clock = [0]
+        collector = HistoryCollector(poll_interval=30, monotonic=lambda: clock[0])
+        settings = replace(AgentSettings.from_env(), pbx_type="asterisk", cdr_csv_path="cdr", voicemail_path="", asterisk_security_log_path="")
+        row = ['', '101', '102', '', '', '', '', '', '', '2026-10-09 12:00:00', '', '', '30', '', 'ANSWERED']
+        with patch.object(collector, "_available", side_effect=lambda name, path: name == "cdr"), \
+             patch("pbxsense_agent.history._is_file", return_value=True), \
+             patch("pbxsense_agent.history._recent_cdr_rows", side_effect=[[row], PermissionError("denied"), []]) as reader, \
+             patch("pbxsense_agent.history_collection.file_signature", return_value=("cdr", 1, 1)):
+            first = collector.enrich(PbxSnapshot(True, "test"), settings)
+            old_signature = collector._cdr_signature
+            collector._cdr_signature = None
+            clock[0] = 30
+            failed = collector.enrich(PbxSnapshot(True, "test"), settings)
+            self.assertIs(failed.recent_calls, first.recent_calls)
+            self.assertIsNone(collector._cdr_signature)
+            self.assertEqual(failed.sources['cdr']['state'], 'temporarily_unavailable')
+            clock[0] = 60
+            recovered = collector.enrich(PbxSnapshot(True, "test"), settings)
+            self.assertEqual(recovered.recent_calls, [])
+            self.assertEqual(recovered.sources['cdr']['state'], 'ready')
+            self.assertEqual(collector._cdr_signature, old_signature)
+            self.assertEqual(reader.call_count, 3)
+
+    def test_legacy_reader_stays_best_effort_but_collector_reader_is_strict(self):
+        with patch("pbxsense_agent.history._is_file", return_value=True), \
+             patch("pbxsense_agent.history._recent_cdr_rows", side_effect=PermissionError("denied")):
+            self.assertEqual(read_recent_cdr_calls("cdr"), [])
+            with self.assertRaises(OSError):
+                read_recent_cdr_calls("cdr", strict=True)
+
+    def test_freeswitch_failed_disk_read_retains_last_records(self):
+        client = self.fs()
+        client._settings = replace(client._settings, freeswitch_cdr_json_path="cdr", freeswitch_voicemail_path="")
+        records = [MagicMock()]
+        client._cached_recent_calls = records
+        with patch("pbxsense_agent.freeswitch._is_dir", return_value=True), \
+             patch("pbxsense_agent.freeswitch.os.access", return_value=True), \
+             patch("pbxsense_agent.freeswitch._read_json_cdr_calls", side_effect=PermissionError("denied")):
+            self.assertEqual(client._history()[0], records)
+            self.assertEqual(client._sources.export()['cdr']['state'], 'temporarily_unavailable')
+
+    def test_yeastar_incomplete_queue_lists_and_statuses_do_not_clear_data(self):
+        bad_lists = [{}, {'data':{}}, {'data':[None]}, {'data':[{'id':0}]}]
+        bad_statuses = [{}, {'waiting_calls':None}, {'waiting_calls':-1}, {'waiting_list':{}}, {'waiting_list':[None]}]
+        for response in bad_lists:
+            client = YeastarClient(AgentSettings.from_env())
+            client._cached_queues = [PbxQueue('support', 3)]
+            client._api = MagicMock(return_value=response)
+            self.assertEqual(client._queues(), [PbxQueue('support', 3)])
+            self.assertEqual(client._sources.export()['queues']['state'], 'temporarily_unavailable')
+        for response in bad_statuses:
+            client._api = MagicMock(side_effect=[{'data':[{'id':1}]}, response])
+            self.assertEqual(client._queues(), [PbxQueue('support', 3)])
+        client._api = MagicMock(return_value={'data':[]})
+        self.assertEqual(client._queues(), [])
+        self.assertEqual(client._sources.export()['queues']['state'], 'ready')
+
+    def test_home_labels_unknown_queue_and_live_sources(self):
+        options = dict(display_name='PBX', extension_names={}, now=datetime(2026,10,9,12), timezone_name='UTC',
+                       pbx_type='cucm', pbx_host='localhost', pbx_port=8443)
+        snapshot = PbxSnapshot(True, 'test', queues=[PbxQueue('support', 0)], sources={
+            'queues':{'state':'temporarily_unavailable'}, 'liveCalls':{'state':'not_configured'}})
+        payload = build_home_payload(snapshot, **options)
+        self.assertEqual(payload['queues'][0]['status'], 'unknown')
+        self.assertNotIn('No callers', payload['queues'][0]['statusText'])
+        self.assertEqual(payload['now']['title'], 'Live calls are not monitored.')
+        payload = build_home_payload(replace(snapshot, queues=[PbxQueue('support', 2)],
+                                  sources={'queueMembers':{'state':'unsupported'}}), **options)
+        self.assertEqual(payload['queues'][0]['status'], 'waiting')
+        self.assertFalse(payload['queues'][0]['membersKnown'])
+        self.assertNotIn('No members', payload['queues'][0]['detail'])
+
+    def test_strict_directory_scan_failures_are_not_empty_history(self):
+        with patch('pbxsense_agent.history._is_dir', return_value=True), \
+             patch('pbxsense_agent.history.os.scandir', side_effect=PermissionError('denied')):
+            with self.assertRaises(OSError):
+                read_recent_cucm_calls('cdr', '', strict=True)
+            with self.assertRaises(OSError):
+                read_recent_voicemails('voicemail', strict=True)
+        with patch('pbxsense_agent.freeswitch._safe_is_dir', return_value=True), \
+             patch('pbxsense_agent.freeswitch.os.scandir', side_effect=PermissionError('denied')):
+            with self.assertRaises(OSError):
+                _read_json_cdr_calls('cdr', strict=True)
 

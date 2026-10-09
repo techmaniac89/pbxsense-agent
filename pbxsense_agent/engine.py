@@ -19,6 +19,7 @@ def build_engine_signals(
     extension_names: dict[str, str],
     now: datetime,
     data_sources: dict[str, dict] | None = None,
+    daily_summaries: dict | None = None,
 ) -> list[dict]:
     sources = data_sources or {}
     if sources.get("queues", {}).get("state", "ready") != "ready":
@@ -33,7 +34,7 @@ def build_engine_signals(
     signals.extend(_rhythm_insights(recent_calls, now))
     signals.extend(_call_quality_insights(recent_calls))
     signals.extend(_operational_insights(endpoints, queues, recent_calls, extension_names, now))
-    signals.extend(_operational_moments(queues, recent_calls, voicemails, now))
+    signals.extend(_operational_moments(queues, recent_calls, voicemails, now, daily_summaries))
     signals.extend(_missed_rate_recommendations(recent_calls, now))
     signals.extend(_endpoint_recommendations(endpoints, extension_names))
     signals.extend(_security_signals(recent_calls, security_events, now))
@@ -658,96 +659,101 @@ def _operational_insights(endpoints: list[Any], queues: list[Any], calls: list[C
     return signals
 
 
-def _operational_moments(queues: list[Any], calls: list[CdrCall], voicemails: list[VoicemailMessage], now: datetime) -> list[dict]:
+def _operational_moments(queues: list[Any], calls: list[CdrCall], voicemails: list[VoicemailMessage],
+                         now: datetime, summaries: dict | None = None) -> list[dict]:
+    if not summaries or not summaries.get("available"):
+        return []
+    days = summaries.get("days", {})
+    today = days.get(now.date().isoformat(), {})
+    previous_date = (now.date() - timedelta(days=1)).isoformat()
+    previous = days.get(previous_date, {})
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    settled = (now - midnight).total_seconds() >= 300
+    history_settled = summaries.get("lastHistoryAt", 0) >= midnight.timestamp() + 300
     signals: list[dict] = []
-    answered = sorted((c for c in _dated_calls(calls) if c.started_at.date() == now.date() and interpreted_call_kind(c) == "answered"), key=lambda c: c.started_at)
-    if answered:
-        first = answered[0]
+    if today.get("callsComplete") and today.get("firstAnswered"):
         signals.append(_signal("moment", "first_answered_call", "first_answered_call_of_day",
             "The first call of the day was answered.", "The day is under way with a connected caller.",
-            [f"The first visible answered call began at {first.started_at:%H:%M}."], {"answered_at": f"{first.started_at:%H:%M}"}))
-    signals.extend(_adaptive_volume_moments(calls, now))
-    if queues and now.hour >= 17 and all(q.waiting_callers == 0 and q.longest_wait_seconds <= 60 for q in queues):
+            ["The persistent daily ledger includes coverage from the start of the day."],
+            {"answered_at": today["firstAnswered"][:5], "day": now.date().isoformat()}))
+    # A closed calendar day, never a current empty queue after an arbitrary hour.
+    if settled and previous.get("queuesComplete") and previous.get("queueNames") and previous.get("queuesEmpty") and previous.get("maxWait", 0) <= 60:
         signals.append(_signal("moment", "queues_met_target", "queues_finished_within_target",
-            "All monitored queues finished within target.", "No callers remain waiting and observed waits stayed within 60 seconds.",
-            [f"PBXSense checked {len(queues)} monitored queue(s) near the end of the day."],
-            {"queues": len(queues), "target_seconds": 60}))
-    today_calls = [c for c in _dated_calls(calls) if c.started_at.date() == now.date()]
-    today_missed = _missed_count(today_calls)
-    if now.hour >= 17 and today_calls and today_missed == 0:
+            "All monitored queues finished within target.",
+            "Yesterday's continuously monitored queues closed empty, with observed waits within 60 seconds.",
+            ["Queue evidence was collected across the completed PBX-local calendar day."],
+            {"day": previous_date, "queues": len(previous["queueNames"]), "target_seconds": 60,
+             "maximum_observed_wait": previous.get("maxWait", 0)}))
+    if history_settled and previous.get("callsComplete") and previous.get("calls", 0) > 0 and previous.get("missed", 0) == 0:
         signals.append(_signal("moment", "day_without_missed_calls", "full_day_without_missed_calls",
-            "The working day finished without a missed call.",
-            "Every visible call avoided a missed-call outcome.",
-            [f"PBXSense checked {len(today_calls)} call(s); a no-call day never qualifies."],
-            {"visible_calls": len(today_calls), "missed_calls": 0}))
-
-    calls_by_date: dict[object, list[CdrCall]] = {}
-    for call in _dated_calls(calls):
-        calls_by_date.setdefault(call.started_at.date(), []).append(call)
-    clean_streak, clean_day = 0, now.date()
-    # Today counts only after the working day; earlier in the day start with yesterday.
-    if now.hour < 17:
-        clean_day -= timedelta(days=1)
-    while calls_by_date.get(clean_day) and _missed_count(calls_by_date[clean_day]) == 0:
-        clean_streak, clean_day = clean_streak + 1, clean_day - timedelta(days=1)
-    if clean_streak >= 2:
-        signals.append(_signal("moment", "clean_operating_streak", "clean_operating_day_streak",
-            f"A {clean_streak}-day clean operating streak is growing.",
-            "Each counted day had real call activity and no missed calls.",
-            ["No-call days and incomplete working days are excluded."], {"streak_days": clean_streak}))
-    activity_dates = {c.started_at.date() for c in _dated_calls(calls)}
-    voicemail_dates = {v.created_at.date() for v in voicemails if v.created_at is not None}
-    streak, day = 0, now.date()
-    while day in activity_dates and day not in voicemail_dates:
-        streak, day = streak + 1, day - timedelta(days=1)
-    if streak >= 2:
-        signals.append(_signal("moment", "voicemail_free_streak", "voicemail_free_service_streak",
-            f"A {streak}-day voicemail-free service streak is growing.",
-            "Calls were visible without a new voicemail on each counted day.",
-            ["The streak counts consecutive days represented in local call history."], {"streak_days": streak}))
+            "The completed day had no missed calls.",
+            "The persistent ledger recorded calls throughout yesterday without a missed-call outcome.",
+            ["Partial days, polling gaps, and no-call days do not qualify."],
+            {"day": previous_date, "visible_calls": previous["calls"], "missed_calls": 0}))
+    for field, kind, identifier, title, body in (
+        ("clean", "clean_operating_day_streak", "clean_operating_streak",
+         "A {count}-day clean operating streak is growing.", "Each counted day had complete call-history coverage and real call activity."),
+        ("voicemail", "voicemail_free_service_streak", "voicemail_free_streak",
+         "A {count}-day voicemail-free service streak is growing.", "Each counted day had call activity and complete observed voicemail coverage."),
+    ):
+        count, date = 0, now.date() - timedelta(days=1)
+        while True:
+            entry = days.get(date.isoformat(), {})
+            qualifies = entry.get("callsComplete") and entry.get("calls", 0) > 0
+            qualifies = qualifies and (entry.get("missed", 0) == 0 if field == "clean"
+                else entry.get("voicemailComplete") and entry.get("voicemail", 0) == 0)
+            if not qualifies:
+                break
+            count, date = count + 1, date - timedelta(days=1)
+        if history_settled and count >= 2:
+            signals.append(_signal("moment", identifier, kind, title.format(count=count), body,
+                ["Only completed, continuously covered days in the persistent ledger qualify."],
+                {"streak_days": count, "through_day": previous_date}))
+    volume_days = days if history_settled else {key: value for key, value in days.items() if key != previous_date}
+    signals.extend(_adaptive_volume_moments(volume_days, now))
     return signals
 
 
-def _adaptive_volume_moments(calls: list[CdrCall], now: datetime) -> list[dict]:
-    """Recognize volume relative to this PBX, never a universal call count."""
-    answered = [call for call in _dated_calls(calls) if interpreted_call_kind(call) == "answered"]
+def _adaptive_volume_moments(days: dict[str, dict], now: datetime) -> list[dict]:
     today = now.date()
+    current = days.get(today.isoformat(), {})
+    if not current.get("callsComplete"):
+        return []
     signals: list[dict] = []
+    baselines = [entry["answered"] for date, entry in days.items()
+                 if date < today.isoformat() and entry.get("callsComplete") and entry.get("answered", 0) > 0]
+    if len(baselines) >= 3:
+        signals.extend(_average_volume_moment("daily", current.get("answered", 0), baselines, len(baselines)))
 
-    daily_counts = Counter(call.started_at.date() for call in answered if call.started_at.date() != today)
-    current_daily = sum(call.started_at.date() == today for call in answered)
-    if len(daily_counts) >= 3:
-        signals.extend(_average_volume_moment("daily", current_daily, list(daily_counts.values()), len(daily_counts)))
+    def complete(start, end):
+        date, total = start, 0
+        while date < end:
+            entry = days.get(date.isoformat(), {})
+            if not entry.get("callsComplete"):
+                return None
+            total += entry.get("answered", 0)
+            date += timedelta(days=1)
+        return total
 
-    current_week = today.isocalendar()[:2]
-    weekly_calls: Counter[tuple[int, int]] = Counter()
-    weekly_days: dict[tuple[int, int], set[object]] = {}
-    current_week_count = 0
-    for call in answered:
-        week = call.started_at.date().isocalendar()[:2]
-        if week == current_week:
-            current_week_count += 1
-        else:
-            weekly_calls[week] += 1
-            weekly_days.setdefault(week, set()).add(call.started_at.date())
-    complete_weeks = [count for week, count in weekly_calls.items() if len(weekly_days.get(week, set())) >= 4]
-    if len(complete_weeks) >= 2:
-        signals.extend(_average_volume_moment("weekly", current_week_count, complete_weeks, len(complete_weeks)))
-
-    current_month = (today.year, today.month)
-    monthly_calls: Counter[tuple[int, int]] = Counter()
-    monthly_days: dict[tuple[int, int], set[object]] = {}
-    current_month_count = 0
-    for call in answered:
-        month = (call.started_at.year, call.started_at.month)
-        if month == current_month:
-            current_month_count += 1
-        else:
-            monthly_calls[month] += 1
-            monthly_days.setdefault(month, set()).add(call.started_at.date())
-    complete_months = [count for month, count in monthly_calls.items() if len(monthly_days.get(month, set())) >= 15]
-    if len(complete_months) >= 2:
-        signals.extend(_average_volume_moment("monthly", current_month_count, complete_months, len(complete_months)))
+    for period in ("weekly", "monthly"):
+        starts = set()
+        for value in days:
+            date = datetime.fromisoformat(value).date()
+            starts.add(date - timedelta(days=date.weekday()) if period == "weekly" else date.replace(day=1))
+        current_start = today - timedelta(days=today.weekday()) if period == "weekly" else today.replace(day=1)
+        current_count = complete(current_start, today + timedelta(days=1))
+        if current_count is None:
+            continue
+        samples = []
+        for start in sorted(starts):
+            end = start + timedelta(days=7) if period == "weekly" else (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            if end > current_start:
+                continue
+            total = complete(start, end)
+            if total is not None and total > 0:
+                samples.append(total)
+        if len(samples) >= 2:
+            signals.extend(_average_volume_moment(period, current_count, samples, len(samples)))
     return signals
 
 
@@ -815,7 +821,9 @@ def _short_trunk_name(name: str) -> str:
 
 
 def _history_window(recent_calls: list[CdrCall], now: datetime) -> str:
-    times = [call.started_at for call in recent_calls if call.started_at is not None]
+    times = [call.started_at.astimezone(now.tzinfo).replace(tzinfo=None)
+             if call.started_at.tzinfo else call.started_at
+             for call in recent_calls if call.started_at is not None]
     if not times:
         return "recent history"
     oldest = min(times)

@@ -210,7 +210,7 @@ access to Firestore itself.
 Cloud Logging records only FCM outcome counts (eligible, accepted, failed, and
 invalid registrations removed); it never logs FCM tokens.
 Relay service `0.5.27` adds an activation ID to the owning Agent's authenticated
-device list. Agent `0.6.37-beta` uses it to revoke an Internet-paired app's LAN
+device list. Agent `0.6.39-beta` uses it to revoke an Internet-paired app's LAN
 credential individually. Deploy this relay version before that Agent upgrade.
 
 Relay service `0.5.27` provides the encrypted Internet Relay data path and
@@ -363,7 +363,7 @@ durable replay nonce claims and presence updates stay in `app.py`, in the same
 order. Both existing signature formats, timestamp limits, nonce scope and HTTP
 errors are preserved. Enrollment mode, ticket behavior, quotas and notification
 delivery are unchanged. Deploy Relay 0.5.27 separately to apply this internal
-refactor; Agent 0.6.37-beta and the app require no compatibility changes.
+refactor; Agent 0.6.39-beta and the app require no compatibility changes.
 
 ## Event delivery boundary (0.5.27)
 

@@ -63,6 +63,7 @@ class AgentSettings:
     internet_relay_enabled: bool = True
     internet_relay_poll_seconds: float = 15
     endpoint_activity_path: str = "/var/lib/pbxsense-agent/endpoint_activity.json"
+    daily_summary_path: str = "/var/lib/pbxsense-agent/daily_summary.sqlite3"
     cucm_host: str = ""
     cucm_username: str = ""
     cucm_password: str = ""
@@ -219,6 +220,7 @@ class AgentSettings:
                 "PBXSENSE_ENDPOINT_ACTIVITY_PATH",
                 "/var/lib/pbxsense-agent/endpoint_activity.json",
             ).strip(),
+            daily_summary_path=os.getenv("PBXSENSE_DAILY_SUMMARY_PATH", "/var/lib/pbxsense-agent/daily_summary.sqlite3").strip(),
             cucm_host=os.getenv("CUCM_HOST", "").strip(),
             cucm_username=os.getenv("CUCM_USERNAME", "").strip(),
             cucm_password=os.getenv("CUCM_PASSWORD", ""),

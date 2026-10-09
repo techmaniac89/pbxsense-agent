@@ -1,7 +1,7 @@
 """Named domain state published by the snapshot runtime."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .observations import PbxEndpoint, PbxSnapshot
@@ -25,3 +25,4 @@ class CollectedHomeState:
     trunk_unavailability_signals: set[str]
     show_aggregate_tip: bool
     endpoint_last_active: dict[str, datetime]
+    daily_summaries: dict = field(default_factory=dict)

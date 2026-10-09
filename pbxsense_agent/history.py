@@ -62,14 +62,18 @@ _SUPPORTED_SECURITY_EVENTS = {
 }
 
 
-def read_recent_cdr_calls(path: str, *, limit: int = 30) -> list[CdrCall]:
+def read_recent_cdr_calls(path: str, *, limit: int = 30, strict: bool = False) -> list[CdrCall]:
     cdr_path = Path(path)
     if not _is_file(cdr_path):
+        if strict:
+            raise OSError("CDR source is unavailable")
         return []
 
     try:
         rows = _recent_cdr_rows(cdr_path, limit=limit)
     except (OSError, csv.Error):
+        if strict:
+            raise OSError("CDR source could not be read")
         return []
 
     calls: list[CdrCall] = []
@@ -97,12 +101,12 @@ def read_recent_cdr_calls(path: str, *, limit: int = 30) -> list[CdrCall]:
 
 
 def read_recent_cucm_calls(
-    cdr_path: str, cmr_path: str, *, limit: int = 1000
+    cdr_path: str, cmr_path: str, *, limit: int = 1000, strict: bool = False
 ) -> list[CdrCall]:
     """Read completed CUCM CDRs and attach matching CMR quality evidence."""
     quality = _cucm_quality_by_call(cmr_path)
     calls: list[CdrCall] = []
-    for row in _cucm_csv_rows(cdr_path, file_limit=40):
+    for row in _cucm_csv_rows(cdr_path, file_limit=40, strict=strict):
         started_at = _parse_timestamp(row.get("dateTimeOrigination", ""))
         duration = _parse_int(row.get("duration", ""))
         call_key = _cucm_call_key(row)
@@ -147,11 +151,13 @@ def cucm_history_diagnostics(cdr_path: str, cmr_path: str) -> dict[str, object]:
     }
 
 
-def _cucm_csv_rows(path: str, *, file_limit: int) -> list[dict[str, str]]:
+def _cucm_csv_rows(path: str, *, file_limit: int, strict: bool = False) -> list[dict[str, str]]:
     root = Path(path)
     if not _is_dir(root):
+        if strict:
+            raise OSError("CUCM CDR source is unavailable")
         return []
-    files = _recent_tree_files(root, "*.csv", file_limit)
+    files = _recent_tree_files(root, "*.csv", file_limit, strict=strict)
     rows: list[dict[str, str]] = []
     for item in files:
         try:
@@ -165,6 +171,8 @@ def _cucm_csv_rows(path: str, *, file_limit: int) -> list[dict[str, str]]:
                 if len(rows) >= MAX_CUCM_ROWS:
                     return rows
         except (OSError, csv.Error):
+            if strict:
+                raise OSError("CUCM CDR source could not be read")
             continue
     return rows
 
@@ -207,7 +215,7 @@ def _count_csv_files(root: Path) -> int:
         return 0
 
 
-def _recent_tree_files(root: Path, pattern: str, limit: int) -> list[Path]:
+def _recent_tree_files(root: Path, pattern: str, limit: int, *, strict: bool = False) -> list[Path]:
     if limit <= 0:
         return []
     newest: list[tuple[float, int, Path]] = []
@@ -232,6 +240,8 @@ def _recent_tree_files(root: Path, pattern: str, limit: int) -> list[Path]:
                             continue
                         modified = entry.stat(follow_symlinks=False).st_mtime
                     except OSError:
+                        if strict:
+                            raise
                         continue
                     candidate = (modified, sequence, Path(entry.path))
                     sequence += 1
@@ -240,6 +250,8 @@ def _recent_tree_files(root: Path, pattern: str, limit: int) -> list[Path]:
                     elif candidate[:2] > newest[0][:2]:
                         heapq.heapreplace(newest, candidate)
         except OSError:
+            if strict:
+                raise
             continue
     newest.sort(reverse=True)
     return [item[2] for item in newest]
@@ -313,23 +325,29 @@ def _looks_like_ivr_reached(call: CdrCall) -> bool:
     return "ivr" in last_data or "menu" in last_data
 
 
-def read_recent_voicemails(path: str, *, limit: int = 20) -> list[VoicemailMessage]:
+def read_recent_voicemails(path: str, *, limit: int = 20, strict: bool = False) -> list[VoicemailMessage]:
     voicemail_root = Path(path)
     if not _is_dir(voicemail_root):
+        if strict:
+            raise OSError("Voicemail source is unavailable")
         return []
 
     messages: list[VoicemailMessage] = []
     try:
-        message_files = sorted(
+        message_files = ([item for item in _recent_tree_files(
+            voicemail_root, "msg*.txt", MAX_CUCM_ENTRIES_SCANNED, strict=True)
+            if item.parent.name == "INBOX"] if strict else sorted(
             voicemail_root.glob("**/INBOX/msg*.txt"),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
-        )
+        ))
     except OSError:
+        if strict:
+            raise
         return []
 
     for message_file in message_files[:limit]:
-        metadata = _read_voicemail_metadata(message_file)
+        metadata = _read_voicemail_metadata(message_file, strict=strict)
         mailbox = _mailbox_from_path(message_file)
         messages.append(
             VoicemailMessage(
@@ -373,9 +391,12 @@ def read_recent_security_events(
     window_minutes: int = 15,
     limit: int = 100,
     now: datetime | None = None,
+    strict: bool = False,
 ) -> list[SecurityEvent]:
     security_path = Path(path)
     if not _is_file(security_path):
+        if strict:
+            raise OSError("Security source is unavailable")
         return []
     try:
         with security_path.open("rb") as handle:
@@ -384,6 +405,8 @@ def read_recent_security_events(
             handle.seek(max(0, size - 262_144))
             raw = handle.read().decode("utf-8", errors="replace")
     except OSError:
+        if strict:
+            raise
         return []
 
     cutoff = (now or datetime.now()) - timedelta(minutes=window_minutes)
@@ -437,7 +460,7 @@ def _security_log_time(line: str) -> datetime | None:
     return None
 
 
-def _read_voicemail_metadata(path: Path) -> dict[str, str]:
+def _read_voicemail_metadata(path: Path, *, strict: bool = False) -> dict[str, str]:
     metadata: dict[str, str] = {}
     try:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -446,6 +469,8 @@ def _read_voicemail_metadata(path: Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             metadata[key.strip()] = value.strip()
     except OSError:
+        if strict:
+            raise
         return {}
     return metadata
 

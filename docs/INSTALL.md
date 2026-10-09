@@ -21,6 +21,12 @@ require sharing or changing the long-lived `PBXSENSE_AGENT_TOKEN`.
 
 This guide covers the supported ways to run PBXSense Agent near a PBX.
 
+Keep `/var/lib/pbxsense-agent` persistent across updates and container recreation.
+Agent 0.6.39-beta adds `daily_summary.sqlite3` there alongside existing identity
+and app state. Losing it does not remove pairing, but resets daily Moment/volume
+learning; a fresh mid-day install cannot certify a complete day. A preserved
+database retains counts, while a long stop still invalidates coverage.
+
 Use the Linux service installer for most production deployments. Use Docker
 Compose when the PBX is already containerized or when container lifecycle
 management is preferred. Use development mode only for local testing.
@@ -34,11 +40,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.37-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.37-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.37-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.39-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where

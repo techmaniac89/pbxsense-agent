@@ -263,21 +263,33 @@ class YeastarClient:
 
     def _queues(self) -> list[PbxQueue]:
         try:
-            response = self._api("queue/search", {"page": 1, "page_size": 1000})
+            queues = self._read_queues()
         except OSError as exc:
             self._sources.record("queues", rejection_state(exc))
             return list(self._cached_queues)
+        self._sources.record("queueMembers", "unsupported")
+        self._sources.record("queues")
+        self._cached_queues = queues
+        return list(queues)
+
+    def _read_queues(self) -> list[PbxQueue]:
+        response = self._api("queue/search", {"page": 1, "page_size": 1000})
         queues: list[PbxQueue] = []
-        failed = False
-        for row in _rows(response):
+        rows = response.get("data")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise YeastarError("Incomplete queue inventory")
+        for row in rows:
             queue_id = _integer(row.get("id"))
             if queue_id <= 0:
-                continue
-            try:
-                status = self._api("queue/call_status", {"id": queue_id})
-            except OSError:
-                failed = True
-                continue
+                raise YeastarError("Invalid queue identity")
+            status = self._api("queue/call_status", {"id": queue_id})
+            if "waiting_calls" not in status and "waiting_list" not in status:
+                raise YeastarError("Missing queue status")
+            if "waiting_calls" in status and not str(status["waiting_calls"]).isdigit():
+                raise YeastarError("Invalid queue waiting count")
+            if "waiting_list" in status and (not isinstance(status["waiting_list"], list) or
+                    any(not isinstance(item, dict) for item in status["waiting_list"])):
+                raise YeastarError("Invalid queue member list")
             waiting_list = _list(status.get("waiting_list"))
             queues.append(
                 PbxQueue(
@@ -292,13 +304,7 @@ class YeastarClient:
                     ),
                 )
             )
-        self._sources.record("queueMembers", "unsupported")
-        if failed:
-            self._sources.record("queues", "temporarily_unavailable")
-            return list(self._cached_queues)
-        self._sources.record("queues")
-        self._cached_queues = queues
-        return list(queues)
+        return queues
 
     def _cdr_calls(self) -> list[CdrCall]:
         response = self._api(

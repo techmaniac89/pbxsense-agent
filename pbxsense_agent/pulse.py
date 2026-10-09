@@ -577,6 +577,7 @@ def build_home_payload(
     endpoint_notification_ids: dict[str, str] | None = None,
     endpoint_signal_lifecycle: dict[str, dict[str, str]] | None = None,
     endpoint_last_active: dict[str, datetime] | None = None,
+    daily_summaries: dict | None = None,
 ) -> dict:
     now = now or _now(timezone_name)
     moment_hours = _valid_moment_hours(moment_hours)
@@ -602,7 +603,7 @@ def build_home_payload(
         endpoint_last_active or {},
     )
     trunks = _build_trunks(snapshot.endpoints, extension_names)
-    queues = _build_queues(snapshot.queues)
+    queues = _build_queues(snapshot.queues, snapshot.sources)
     active_calls = [
         _call_from_channel(
             channel,
@@ -648,6 +649,7 @@ def build_home_payload(
             voicemails=snapshot.voicemails,
             security_events=snapshot.security_events,
             data_sources=snapshot.sources,
+            daily_summaries=daily_summaries,
             extension_names=extension_names,
             now=now,
         )
@@ -835,15 +837,21 @@ def _build_trunks(
     return trunks
 
 
-def _build_queues(queues: list[PbxQueue]) -> list[dict]:
+def _build_queues(queues: list[PbxQueue], sources: dict[str, dict] | None = None) -> list[dict]:
+    sources = sources or {}
+    source_state = sources.get("queues", {}).get("state", "ready")
+    members_known = sources.get("queueMembers", {}).get("state", "ready") == "ready"
     result: list[dict] = []
     for queue in sorted(queues, key=lambda item: item.name):
         waiting = max(0, queue.waiting_callers)
         available = max(0, queue.available_members)
-        if waiting == 0:
+        if source_state != "ready":
+            status = "unknown"
+            status_text = "Queue status unavailable"
+        elif waiting == 0:
             status = "ready"
             status_text = "No callers waiting"
-        elif available == 0:
+        elif available == 0 and members_known:
             status = "needs_attention"
             status_text = f"{waiting} {_caller_label(waiting)} waiting"
         else:
@@ -853,21 +861,24 @@ def _build_queues(queues: list[PbxQueue]) -> list[dict]:
         details = []
         if waiting:
             details.append(f"Longest wait {_wait_label(queue.longest_wait_seconds)}")
-        details.append(
-            f"{available} {_member_label(available)} available"
-            if available
-            else "No members available"
-        )
+        if members_known:
+            details.append(f"{available} {_member_label(available)} available" if available else "No members available")
+        else:
+            details.append("Agent availability not reported")
         if queue.busy_members:
             details.append(f"{queue.busy_members} busy")
         if queue.paused_members:
             details.append(f"{queue.paused_members} paused")
+        if source_state != "ready":
+            details = ["Last known queue data; waiting for a successful update"]
 
         result.append(
             {
                 "name": queue.name,
                 "queue": queue.name,
                 "status": status,
+                "sourceState": source_state,
+                "membersKnown": members_known,
                 "statusText": status_text,
                 "detail": " · ".join(details),
                 "waitingCallers": waiting,
@@ -1459,6 +1470,12 @@ def _looks_like_extension(value: str, extension: str) -> bool:
 
 def _quiet_now(snapshot: PbxSnapshot) -> dict:
     if snapshot.reachable:
+        state = snapshot.sources.get("liveCalls", {}).get("state", "ready")
+        if state != "ready":
+            return {"title": "Live calls are not monitored." if state in {"not_configured", "unsupported"}
+                    else "Waiting for live call status.",
+                    "body": "The PBX is reachable, but live call information is unavailable.",
+                    "timeLabel": "Now", "isActive": False, "kind": "answered"}
         return {
             "title": "No calls right now.",
             "body": "The PBX is reachable.",
