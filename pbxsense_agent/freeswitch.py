@@ -7,7 +7,7 @@ import os
 import re
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from .pulse import uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 from .socket_deadline import socket_deadline
+from .source_status import SourceStatus, rejection_state
 
 
 MAX_ESL_HEADER_BYTES = 64 * 1024
@@ -47,15 +48,21 @@ class FreeSwitchClient:
         self._cached_recent_calls: list[CdrCall] = []
         self._cached_voicemails: list[VoicemailMessage] = []
         self._history_refresh_after = 0.0
+        self._known_extensions: dict[str, PbxEndpoint] = {}
+        self._cached_queues: list[PbxQueue] = []
+        self._sources = SourceStatus()
 
     def snapshot(self) -> PbxSnapshot:
         try:
             channels = self._channels()
+            self._sources.record("liveCalls")
             endpoints = self._endpoints(channels)
             try:
                 trunks = self._trunks()
                 self._known_trunks = trunks
+                self._sources.record("trunks")
             except OSError:
+                self._sources.record("trunks", "temporarily_unavailable")
                 trunks = uncertain_trunks(
                     self._known_trunks,
                     "FreeSWITCH gateway evidence is temporarily unavailable",
@@ -70,23 +77,31 @@ class FreeSwitchClient:
                 queues=self._queues(),
                 recent_calls=recent_calls,
                 voicemails=voicemails,
+                sources=self._sources.export(),
             )
         except OSError:
+            self._sources.record("liveCalls", "temporarily_unavailable")
             return PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The FreeSWITCH ESL connection is unavailable.",
+                sources=self._sources.export(),
             )
 
     def _history(self) -> tuple[list[CdrCall], list[VoicemailMessage]]:
         now = time.monotonic()
         if now >= self._history_refresh_after:
-            self._cached_recent_calls = _read_json_cdr_calls(
-                self._settings.freeswitch_cdr_json_path,
-            )
-            self._cached_voicemails = _read_voicemails(
-                self._settings.freeswitch_voicemail_path,
-            )
+            for name, path, reader, attribute in (
+                ("cdr", self._settings.freeswitch_cdr_json_path, _read_json_cdr_calls, "_cached_recent_calls"),
+                ("voicemail", self._settings.freeswitch_voicemail_path, _read_voicemails, "_cached_voicemails"),
+            ):
+                if not path.strip():
+                    self._sources.record(name, "not_configured")
+                elif not _is_dir(path) or not os.access(path, os.R_OK | os.X_OK):
+                    self._sources.record(name, "temporarily_unavailable")
+                else:
+                    setattr(self, attribute, reader(path))
+                    self._sources.record(name)
             self._history_refresh_after = now + max(
                 1, self._settings.history_poll_seconds
             )
@@ -126,6 +141,7 @@ class FreeSwitchClient:
             result["error"] = "The FreeSWITCH ESL diagnostic check failed."
 
         result["ok"] = result["loginAccepted"] is True
+        result["dataSources"] = self._sources.export()
         return result
 
     def _channels(self) -> list[PbxChannel]:
@@ -133,7 +149,7 @@ class FreeSwitchClient:
             self._authenticate(sock)
             raw = self._api(sock, "show channels as json")
         data = _json_object(raw)
-        rows = _rows(data)
+        rows = _complete_rows(data)
         return [_channel_from_row(row) for row in rows]
 
     def _endpoints(self, channels: list[PbxChannel]) -> list[PbxEndpoint]:
@@ -141,9 +157,17 @@ class FreeSwitchClient:
         try:
             with self._connect() as sock:
                 self._authenticate(sock)
-                rows = _rows(_json_object(self._api(sock, "show registrations as json")))
-        except OSError:
-            return list(active.values())
+                data = _json_object(self._api(sock, "show registrations as json"))
+                rows = _complete_rows(data)
+                if any(not _string(row, "reg_user", "user", "username") for row in rows):
+                    raise FreeSwitchError("Incomplete registration inventory")
+        except (OSError, ValueError, TypeError):
+            self._sources.record("phones", "temporarily_unavailable")
+            endpoints = {key: replace(item, device_state="Unknown", active_channels=0,
+                         health_status="unknown", health_confidence="low")
+                         for key, item in self._known_extensions.items()}
+            endpoints.update(active)
+            return list(endpoints.values())
 
         endpoints: dict[str, PbxEndpoint] = dict(active)
         for row in rows:
@@ -164,25 +188,38 @@ class FreeSwitchClient:
                     "ip",
                 ),
             )
+        for key, item in endpoints.items():
+            if key in self._known_extensions or len(self._known_extensions) < 10000:
+                self._known_extensions[key] = item
+        for key, item in self._known_extensions.items():
+            if key not in endpoints:
+                endpoints[key] = replace(item, device_state="Unavailable", active_channels=0,
+                                         health_status="down", health_confidence="high")
+        self._sources.record("phones")
         return list(endpoints.values())
 
     def _queues(self) -> list[PbxQueue]:
         try:
             with self._connect() as sock:
                 self._authenticate(sock)
-                names = _pipe_first_column(self._api(sock, "callcenter_config queue list"))
-                return [
-                    PbxQueue(
-                        name=name,
-                        waiting_callers=_first_integer(
-                            self._api(sock, f"callcenter_config queue count members {name}")
-                        ),
-                    )
-                    for name in names
-                ]
-        except OSError:
+                raw = self._api(sock, "callcenter_config queue list")
+                if "+OK" not in raw:
+                    raise FreeSwitchError("Incomplete queue inventory")
+                names = _pipe_first_column(raw)
+                if len(names) > 1000 or any(not re.fullmatch(r"[\w.@:+-]+", name) for name in names):
+                    raise FreeSwitchError("Invalid queue inventory")
+                queues = []
+                for name in names:
+                    members = _pipe_rows(self._api(sock, f"callcenter_config queue list members {name}"))
+                    agents = _pipe_rows(self._api(sock, f"callcenter_config queue list agents {name}"))
+                    queues.append(_queue_observation(name, members, agents))
+                self._cached_queues = queues
+                self._sources.record("queues")
+                return list(queues)
+        except OSError as exc:
+            self._sources.record("queues", rejection_state(exc))
             # mod_callcenter is optional; live calls and presence still work.
-            return []
+            return list(self._cached_queues)
 
     def _trunks(self) -> list[PbxEndpoint]:
         with self._connect() as sock:
@@ -321,6 +358,47 @@ class FreeSwitchClient:
         return list(endpoints.values())
 
 
+def _pipe_rows(raw: str) -> list[dict[str, str]]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip() and not line.startswith("+OK")]
+    if not lines:
+        if "+OK" in raw:
+            return []
+        raise FreeSwitchError("Missing queue table")
+    header = lines[0].split("|")
+    if "state" not in header:
+        raise FreeSwitchError("Incomplete queue table")
+    result = []
+    for line in lines[1:]:
+        values = line.split("|")
+        if len(values) != len(header):
+            raise FreeSwitchError("Incomplete queue row")
+        result.append(dict(zip(header, values)))
+    return result
+
+
+def _queue_observation(name: str, members: list[dict], agents: list[dict]) -> PbxQueue:
+    now = int(time.time())
+    waiting = [row for row in members if row.get("state", "").lower() in {"waiting", "trying"}]
+    def integer(row: dict, key: str) -> int:
+        try:
+            return max(0, int(row.get(key, 0)))
+        except (TypeError, ValueError):
+            return 0
+    waits = [max(0, now - integer(row, "joined_epoch")) for row in waiting if integer(row, "joined_epoch")]
+    # A tier can refer to the same agent twice; count people, not tier rows.
+    unique = {row.get("name", str(index)): row for index, row in enumerate(agents)}.values()
+    available = busy = paused = 0
+    for row in unique:
+        status, state = row.get("status", "").lower(), row.get("state", "").lower()
+        if state in {"receiving", "in a queue call", "reserved"}:
+            busy += 1
+        elif status == "on break":
+            paused += 1
+        elif status in {"available", "available (on demand)"} and state == "waiting" and integer(row, "ready_time") <= now:
+            available += 1
+    return PbxQueue(name, len(waiting), max(waits, default=0), available, busy, paused, len(unique))
+
+
 def _parse_headers(raw: str) -> dict[str, str]:
     headers: dict[str, str] = {}
     for line in raw.splitlines():
@@ -337,6 +415,19 @@ def _json_object(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _complete_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    # FreeSWITCH emits only {"row_count": 0} for a genuine empty result.
+    rows = data.get("rows", [] if data.get("row_count") == 0 else None)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise FreeSwitchError("Incomplete JSON table")
+    try:
+        if int(data.get("row_count", len(rows))) != len(rows):
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise FreeSwitchError("Incomplete JSON table") from exc
+    return rows
 
 
 def _rows(data: dict[str, Any]) -> list[dict[str, Any]]:

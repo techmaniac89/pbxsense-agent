@@ -144,7 +144,7 @@ class PulseMappingTest(unittest.TestCase):
         sock.close.assert_called_once()
 
     def test_optional_ami_action_rejection_keeps_the_session_usable(self) -> None:
-        client = AmiClient.__new__(AmiClient)
+        client = AmiClient(AgentSettings.from_env())
         sock = MagicMock()
         with patch.object(
             client,
@@ -622,10 +622,14 @@ external::backup gateway sip:user@backup.test NOREG
             mode="freeswitch",
             pbx_type="freeswitch",
             history_poll_seconds=30,
+            freeswitch_cdr_json_path="/cdr",
+            freeswitch_voicemail_path="/voicemail",
         )
         client = FreeSwitchClient(settings)
         with (
             patch("pbxsense_agent.freeswitch.time.monotonic", return_value=100.0),
+            patch("pbxsense_agent.freeswitch._is_dir", return_value=True),
+            patch("pbxsense_agent.freeswitch.os.access", return_value=True),
             patch("pbxsense_agent.freeswitch._read_json_cdr_calls", return_value=[]) as calls,
             patch("pbxsense_agent.freeswitch._read_voicemails", return_value=[]) as voicemail,
         ):

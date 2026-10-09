@@ -89,6 +89,8 @@ class ActivityTracker:
     def observe(self, snapshot: PbxSnapshot, now: datetime) -> list[dict]:
         current = _moment_state(snapshot)
         with self._lock:
+            if self._previous is not None and snapshot.sources.get("queues", {}).get("state", "ready") != "ready":
+                current = replace(current, queue_waiting=self._previous.queue_waiting)
             if current.reachable:
                 self._phone_outage_started_at = {
                     extension: started_at
@@ -105,7 +107,10 @@ class ActivityTracker:
                         self._phone_recovery_started_at.pop(extension, None)
                         self._outstanding_phone_outages.add(extension)
                 if self._previous is not None:
-                    self._record_transitions(self._previous, current, now)
+                    history_ready = snapshot.sources.get("cdr", {}).get("state", "ready") == "ready"
+                    if not history_ready:
+                        self._busy_queues.clear()
+                    self._record_transitions(self._previous, current, now, history_ready=history_ready)
                 self._events = [
                     event
                     for event in self._events
@@ -131,14 +136,15 @@ class ActivityTracker:
         previous: _MomentState,
         current: _MomentState,
         now: datetime,
+        *, history_ready: bool = True,
     ) -> None:
         previous_queues = dict(previous.queue_waiting)
         current_queues = dict(current.queue_waiting)
         for queue, waiting in previous_queues.items():
-            if waiting >= 2:
+            if waiting >= 2 and history_ready:
                 self._busy_queues.setdefault(queue, previous.queue_abandonment_keys)
         for queue, waiting in current_queues.items():
-            if waiting >= 2:
+            if waiting >= 2 and history_ready:
                 self._busy_queues.setdefault(queue, current.queue_abandonment_keys)
         for queue, previous_waiting in previous_queues.items():
             if previous_waiting <= 0 or current_queues.get(queue, 0) != 0:
@@ -156,7 +162,7 @@ class ActivityTracker:
                 scope=queue,
             )
             abandonment_baseline = self._busy_queues.pop(queue, None)
-            if abandonment_baseline is not None and current.queue_abandonment_keys == abandonment_baseline:
+            if history_ready and abandonment_baseline is not None and current.queue_abandonment_keys == abandonment_baseline:
                 self._add_event(
                     now,
                     kind="busy_period_completed_without_abandonment",
@@ -349,6 +355,14 @@ class EndpointAvailabilitySignalTracker:
             for extension, endpoint in endpoints.items():
                 state = self._states.setdefault(extension, _EndpointSignalState())
                 state.missing_started_at = None
+                if endpoint.role != "trunk" and endpoint.health_status == "unknown":
+                    state.recovery_started_at = None
+                    if state.episode_notified:
+                        state.signal_visible = True
+                        visible.add(extension)
+                    else:
+                        state.outage_started_at = None
+                    continue
                 if self._role == "trunk" and _trunk_health_state(endpoint) == "unknown":
                     # Missing/ambiguous evidence must not declare recovery or
                     # start a new outage. Keep an already-confirmed incident
@@ -486,7 +500,7 @@ def _moment_state(snapshot: PbxSnapshot) -> _MomentState:
     monitored_extensions = frozenset(
         endpoint.extension
         for endpoint in snapshot.endpoints
-        if endpoint.role != "trunk"
+        if endpoint.role != "trunk" and endpoint.health_status != "unknown"
     )
     voicemail_keys = frozenset(
         f"{message.mailbox}|{message.caller}|{message.created_at.isoformat()}"
@@ -633,6 +647,7 @@ def build_home_payload(
             recent_calls=snapshot.recent_calls,
             voicemails=snapshot.voicemails,
             security_events=snapshot.security_events,
+            data_sources=snapshot.sources,
             extension_names=extension_names,
             now=now,
         )
@@ -643,6 +658,7 @@ def build_home_payload(
 
     return {
         "greeting": _greeting(now),
+        "dataSources": {name: dict(value) for name, value in snapshot.sources.items()},
         "mood": mood,
         "connection": {
             "kind": "local" if snapshot.reachable else "reconnecting",
@@ -693,6 +709,10 @@ def _build_people(
             status = "unavailable"
             status_text = "Unavailable"
             detail = endpoint.device_state or "Not reachable"
+        elif endpoint.health_status == "unknown":
+            status = "unavailable"
+            status_text = "Status unknown"
+            detail = "The PBX did not provide current registration evidence"
         else:
             status = "online"
             status_text = presence_label
@@ -731,6 +751,8 @@ def _person_presence(
     """
     if is_talking:
         return "on_call", "On a call"
+    if endpoint.health_status == "unknown":
+        return "unknown", "Unknown"
     device_presence = _normalized_presence(endpoint.device_state)
     # Do not let a stale user-set state conceal a phone that is unreachable,
     # ringing, or otherwise actively busy at the PBX right now.
@@ -1539,7 +1561,7 @@ def _is_active_channel(channel: PbxChannel) -> bool:
 def _endpoint_unavailable(endpoint: PbxEndpoint) -> bool:
     if endpoint.role == "trunk":
         return _trunk_health_state(endpoint) == "down"
-    return _device_state_is_unavailable(endpoint.device_state)
+    return endpoint.health_status != "unknown" and _device_state_is_unavailable(endpoint.device_state)
 
 
 def _trunk_health_state(endpoint: PbxEndpoint) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ssl
 import time
+from dataclasses import replace
 from datetime import datetime
 from collections.abc import Iterator
 from typing import Any
@@ -15,6 +16,7 @@ from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
 from .pulse import uncertain_trunks
 from .settings import AgentSettings
 from .version import AGENT_VERSION
+from .source_status import SourceStatus, rejection_state
 
 
 class YeastarError(OSError):
@@ -51,41 +53,80 @@ class YeastarClient:
         self._cached_snapshot: PbxSnapshot | None = None
         self._snapshot_refresh_after = 0.0
         self._known_trunks: list[PbxEndpoint] = []
+        self._cached_calls: list[CdrCall] = []
+        self._cached_voicemails: list[VoicemailMessage] = []
+        self._history_refresh_after = 0.0
+        self._history_errors: dict[str, str] = {}
+        self._history_success: dict[str, float] = {}
+        self._sources = SourceStatus()
+        self._cached_queues: list[PbxQueue] = []
 
     def snapshot(self) -> PbxSnapshot:
         if self._cached_snapshot and time.monotonic() < self._snapshot_refresh_after:
-            return self._cached_snapshot
+            return replace(self._cached_snapshot, sources=self._sources.export())
         try:
             endpoints = self._endpoints()
+            self._sources.record("phones")
             try:
                 trunks = self._trunks()
                 self._known_trunks = trunks
+                self._sources.record("trunks")
             except OSError:
+                self._sources.record("trunks", "temporarily_unavailable")
                 trunks = uncertain_trunks(
                     self._known_trunks,
                     "Yeastar trunk evidence is temporarily unavailable",
                 )
             endpoints.extend(trunks)
+            channels = self._channels()
+            self._sources.record("liveCalls")
+            queues = self._queues()
+            self._refresh_history(endpoints)
             snapshot = PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
-                channels=self._channels(),
+                channels=channels,
                 endpoints=endpoints,
-                queues=self._queues(),
-                recent_calls=self._cdr_calls(),
-                voicemails=self._voicemails(endpoints),
+                queues=queues,
+                recent_calls=self._cached_calls,
+                voicemails=self._cached_voicemails,
+                sources=self._sources.export(),
             )
         except OSError:
+            self._sources.record("phones", "temporarily_unavailable")
+            self._sources.record("liveCalls", "temporarily_unavailable")
+            self._sources.record("queues", "temporarily_unavailable")
             snapshot = PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The Yeastar API connection is unavailable.",
+                sources=self._sources.export(),
             )
         self._cached_snapshot = snapshot
         # The web UI checks for updates every second. Keep cloud polling modest
         # while preserving a near-live view without a user-configured interval.
         self._snapshot_refresh_after = time.monotonic() + 2
         return snapshot
+
+    def _refresh_history(self, endpoints: list[PbxEndpoint]) -> None:
+        now = time.monotonic()
+        if now < self._history_refresh_after:
+            return
+        for name, reader in (("cdr", self._cdr_calls), ("voicemail", lambda: self._voicemails(endpoints))):
+            try:
+                records = reader()
+            except OSError:
+                self._sources.record(name, "temporarily_unavailable")
+                self._history_errors[name] = f"Yeastar {name} history is temporarily unavailable; last successful data is retained."
+            else:
+                self._sources.record(name)
+                if name == "cdr":
+                    self._cached_calls = records
+                else:
+                    self._cached_voicemails = records
+                self._history_errors.pop(name, None)
+                self._history_success[name] = now
+        self._history_refresh_after = time.monotonic() + max(1, self._settings.history_poll_seconds)
 
     def diagnostics(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -97,6 +138,14 @@ class YeastarClient:
             "tlsVerification": self._settings.yeastar_verify_tls,
             "tokenAccepted": False,
             "apiReachable": False,
+            "history": {name: {
+                "state": "temporarily_unavailable" if name in self._history_errors else
+                         "ready" if name in self._history_success else "not_yet_observed",
+                "lastSuccessAgeSeconds": max(0, time.monotonic() - self._history_success[name])
+                                         if name in self._history_success else None,
+                "detail": self._history_errors.get(name, ""),
+            } for name in ("cdr", "voicemail")},
+            "dataSources": self._sources.export(),
         }
         if self._settings.yeastar_base_url.lower().startswith("http://"):
             result["securityWarning"] = (
@@ -215,9 +264,11 @@ class YeastarClient:
     def _queues(self) -> list[PbxQueue]:
         try:
             response = self._api("queue/search", {"page": 1, "page_size": 1000})
-        except OSError:
-            return []
+        except OSError as exc:
+            self._sources.record("queues", rejection_state(exc))
+            return list(self._cached_queues)
         queues: list[PbxQueue] = []
+        failed = False
         for row in _rows(response):
             queue_id = _integer(row.get("id"))
             if queue_id <= 0:
@@ -225,6 +276,7 @@ class YeastarClient:
             try:
                 status = self._api("queue/call_status", {"id": queue_id})
             except OSError:
+                failed = True
                 continue
             waiting_list = _list(status.get("waiting_list"))
             queues.append(
@@ -240,7 +292,13 @@ class YeastarClient:
                     ),
                 )
             )
-        return queues
+        self._sources.record("queueMembers", "unsupported")
+        if failed:
+            self._sources.record("queues", "temporarily_unavailable")
+            return list(self._cached_queues)
+        self._sources.record("queues")
+        self._cached_queues = queues
+        return list(queues)
 
     def _cdr_calls(self) -> list[CdrCall]:
         response = self._api(
@@ -249,13 +307,15 @@ class YeastarClient:
         )
         calls: list[CdrCall] = []
         for row in _rows(response):
+            disposition = _string(row, "last_status", "disposition").upper()
             calls.append(
                 CdrCall(
                     source=_string(row, "call_from_number", "call_from"),
                     destination=_string(row, "call_to_number", "call_to"),
-                    disposition=_string(row, "disposition").upper(),
+                    disposition="NO ANSWER" if disposition == "ABANDONED" else disposition,
+                    last_app="Queue" if disposition == "ABANDONED" and _object(row.get("queues")) else "",
                     started_at=_parse_datetime(_string(row, "time", "timestamp")),
-                    duration_seconds=_integer(row.get("duration")),
+                    duration_seconds=_integer(row.get("call_duration", row.get("duration"))),
                     recording_id=_string(row, "record_file"),
                 )
             )

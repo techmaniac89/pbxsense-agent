@@ -50,10 +50,11 @@ class CucmConnectorTest(unittest.TestCase):
         settings = replace(AgentSettings.from_env(), pbx_type="cucm", mode="cucm")
         client = CucmClient(settings)
         client._directory_inventory = lambda: []  # type: ignore[method-assign]
-        client._registration_status = lambda: {}  # type: ignore[method-assign]
+        client._registration_status = lambda names=None: {}  # type: ignore[method-assign]
         client._trunk_endpoints = lambda: []  # type: ignore[method-assign]
 
         class Calls:
+            configured = True
             count = 0
             def channels(self) -> list[AmiChannel]:
                 self.count += 1
@@ -62,7 +63,7 @@ class CucmConnectorTest(unittest.TestCase):
                     connected="2000", state="Up", linked_id=str(self.count),
                 )]
             def diagnostics(self) -> dict[str, object]:
-                return {}
+                return {"liveCallsAvailable": True}
 
         calls = Calls()
         client._jtapi = calls  # type: ignore[assignment]
@@ -178,7 +179,7 @@ class CucmConnectorTest(unittest.TestCase):
             health_status="healthy", health_confidence="high",
         )
         client._directory_inventory = lambda: []  # type: ignore[method-assign]
-        client._registration_status = lambda: {}  # type: ignore[method-assign]
+        client._registration_status = lambda names=None: {}  # type: ignore[method-assign]
         calls = iter(([known], OSError("temporary")))
 
         def trunks() -> list[AmiEndpoint]:

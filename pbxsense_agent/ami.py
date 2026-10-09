@@ -8,6 +8,7 @@ from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
 from .settings import AgentSettings
 from .version import AGENT_VERSION
 from .socket_deadline import socket_deadline
+from .source_status import SourceStatus, rejection_state
 
 
 MAX_AMI_PACKET_BYTES = 256 * 1024
@@ -39,16 +40,30 @@ class AmiClient:
         self._settings = settings
         self._known_trunks: dict[str, PbxEndpoint] = {}
         self._session_socket: socket.socket | None = None
+        self._sources = SourceStatus()
+        self._cached_queues: list[PbxQueue] = []
+        self._known_extensions: dict[str, PbxEndpoint] = {}
 
     def snapshot(self) -> PbxSnapshot:
         try:
             events = self._read_events()
+            self._sources.record("liveCalls")
             channels = _channels_from_events(events)
             endpoints = _endpoints_from_events(
                 events,
                 explicit_trunks=self._settings.trunk_endpoints,
             )
             endpoints = _reconcile_trunk_activity(endpoints, channels)
+            for endpoint in endpoints:
+                if endpoint.role != "trunk" and (endpoint.extension in self._known_extensions or len(self._known_extensions) < 10000):
+                    self._known_extensions[endpoint.extension] = endpoint
+            phone_ids = {endpoint.extension for endpoint in endpoints}
+            endpoints.extend(replace(item, device_state="Unknown", active_channels=0,
+                             health_status="unknown", health_confidence="low")
+                             for key, item in self._known_extensions.items() if key not in phone_ids)
+            actions = self._sources.export()
+            phone_actions = [actions.get(name, {}).get("state") for name in ("PJSIPShowEndpoints", "SIPpeers")]
+            self._sources.record("phones", "ready" if "ready" in phone_actions else "temporarily_unavailable")
             current_ids = {endpoint.extension for endpoint in endpoints}
             for endpoint in endpoints:
                 if endpoint.role == "trunk":
@@ -63,19 +78,29 @@ class AmiClient:
                         health_confidence="low",
                         health_evidence=("Missing from the current endpoint snapshot",),
                     ))
+            if self._sources.export().get("QueueStatus", {}).get("state", "ready") == "ready":
+                self._cached_queues = _queues_from_events(events)
+                self._sources.record("queues")
+            else:
+                self._sources.record("queues", self._sources.export()["QueueStatus"]["state"])
             return PbxSnapshot(
                 reachable=True,
                 agent_version=AGENT_VERSION,
                 channels=channels,
                 endpoints=endpoints,
-                queues=_queues_from_events(events),
+                queues=list(self._cached_queues),
+                sources=self._sources.export(),
             )
         except OSError:
+            self._sources.record("liveCalls", "temporarily_unavailable")
+            self._sources.record("phones", "temporarily_unavailable")
+            self._sources.record("queues", "temporarily_unavailable")
             self._close_session()
             return PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
                 error="The Asterisk AMI connection is unavailable.",
+                sources=self._sources.export(),
             )
 
     def diagnostics(self) -> dict:
@@ -123,6 +148,7 @@ class AmiClient:
             result["error"] = "The Asterisk AMI diagnostic check failed."
 
         result["ok"] = result["loginAccepted"] is True
+        result["dataSources"] = self._sources.export()
         return result
 
     def _read_events(self) -> list[AmiEvent]:
@@ -292,13 +318,19 @@ class AmiClient:
         complete_event: str,
     ) -> list[AmiEvent]:
         try:
-            return self._collect_action_events(
+            events = self._collect_action_events(
                 sock,
                 action=action,
                 complete_event=complete_event,
             )
-        except AmiActionResponseError:
+            self._sources.record(action)
+            return events
+        except AmiActionResponseError as exc:
+            self._sources.record(action, rejection_state(exc))
             return []
+        except OSError:
+            self._sources.record(action, "temporarily_unavailable")
+            raise
 
     def _read_until_response(self, sock: socket.socket, *, phase: str) -> dict[str, str]:
         with socket_deadline(sock, self._settings.timeout_seconds) as sock:

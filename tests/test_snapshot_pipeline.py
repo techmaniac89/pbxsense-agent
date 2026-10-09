@@ -109,6 +109,7 @@ class SnapshotPipelineTest(unittest.TestCase):
             read_calls=Mock(return_value=[]), read_voicemails=Mock(return_value=[]), read_security=security,
         )
         self.stack.enter_context(patch.object(main, "_history_collector", self.history))
+        self.stack.enter_context(patch.object(self.history, "_available", return_value=True))
         initial = self.publish(0)
         security.side_effect = OSError("history unavailable")
         self.seconds = 30

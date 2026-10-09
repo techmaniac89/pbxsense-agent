@@ -35,6 +35,52 @@ PBX connector
   -> App
 ```
 
+## Source availability and freshness
+
+Agent `0.6.37-beta` adds optional `dataSources` to `/home` (and therefore
+`/live`) and `/diagnostics`. Each source reports `state` and
+`lastSuccessAgeSeconds`. States are `ready`, `partial`, `unsupported`,
+`not_configured`, `permission_denied`, or `temporarily_unavailable`.
+An age of `null` means no successful observation yet; zero is a fresh read,
+not an assertion that the last call or history file was created recently.
+Missing keys are unspecified, not proof of support. This is additive:
+existing apps can ignore it, and no app version change is needed. A future app
+UI can label retained queue/history values as stale using these fields.
+
+- A successful empty read means zero. Failed optional queue reads retain the
+  last complete queue generation and report unavailable instead of silently
+  implying no callers. Queue-cleared activity and queue-target moments require
+  successful queue evidence. Queue-demand insights are suppressed when agent
+  coverage is unsupported; history-driven insights/moments do not use failed
+  CDR reads, and voicemail-free streaks require available voicemail evidence.
+- Asterisk and Grandstream additionally expose the individual AMI actions
+  (`PJSIPShowEndpoints`, `PJSIPShowContacts`,
+  `PJSIPShowRegistrationsOutbound`, `QueueStatus`, `SIPpeers`). Unsupported
+  optional actions are normal on some PBXs; denied permissions are distinct.
+  Actions are retried on subsequent polls, allowing permissions to recover.
+  Raw rejection messages are not published.
+- FreeSWITCH keeps up to 10,000 previously observed extension identities in
+  memory. A complete successful registration list confirms deregistration;
+  failed/incomplete lists make remembered phones unknown, not offline or
+  recovered. This inventory resets on Agent restart and cannot discover phones
+  that have never registered or appeared on an internal call leg.
+  `mod_callcenter` provides waiting/trying caller counts, longest wait from
+  `joined_epoch`, and deduplicated available/busy/on-break/total agents.
+  Logged-out agents and agents still within `ready_time` are not available.
+  Missing `mod_callcenter` does not take the core connector offline.
+- CUCM reports registration coverage separately from JTAPI live-call
+  availability; queues are unsupported. Yeastar reports live and history sources
+  independently; queue member coverage is currently unsupported.
+- Configured local history paths that disappear retain their last records and
+  report unavailable. Unconfigured paths do not count as confirmed empty
+  history. Local history readiness means the source path is accessible and the
+  bounded reader completed, not that every record is valid or the PBX has
+  emitted CDRs. Existing malformed-record and scan-limit safeguards still apply.
+
+FreeSWITCH parsing follows the upstream
+[callcenter implementation](https://github.com/signalwire/freeswitch/blob/master/src/mod/applications/mod_callcenter/mod_callcenter.c)
+and [JSON show implementation](https://github.com/signalwire/freeswitch/blob/master/src/mod/applications/mod_commands/mod_commands.c).
+
 ## Existing Connectors
 
 | PBX | Connector | Status |
@@ -42,7 +88,7 @@ PBX connector
 | Asterisk | `ami.py` | Active calls, endpoints, trunks, queue wait/member state, CDR history, voicemail |
 | FreePBX, Issabel, VitalPBX | `ami.py` | Supported as Asterisk-based systems |
 | Grandstream UCM / SoftwareUCM | `grandstream.py` | Restricted AMI with UCM port/TLS defaults, live calls, endpoints, trunks, queues; optional local history paths |
-| FreeSWITCH | `freeswitch.py` | Event Socket connection, registered extensions, active channels, optional mod_callcenter queue counts and JSON CDR/voicemail paths |
+| FreeSWITCH | `freeswitch.py` | Event Socket connection, retained observed extension inventory, active channels, optional mod_callcenter queue wait/agent state and JSON CDR/voicemail paths |
 | FusionPBX | `freeswitch.py` | Supported as a FreeSWITCH-based system |
 | Yeastar P-Series | `yeastar.py` | OAuth API, extension status, live calls, queue waiting status, CDR, voicemail, recordings |
 | Cisco Unified Communications Manager | `cucm.py`, `jtapi.py` | Read-only AXL inventory, RisPort70 registration presence, completed CDR/CMR history, and optional JTAPI live calls |
@@ -101,14 +147,14 @@ class PBXConnector(Protocol):
     name: str
     diagnostics_label: str
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         ...
 
     def diagnostics(self) -> dict:
         ...
 ```
 
-`snapshot()` is the normal data path. It should return an `AmiSnapshot` with
+`snapshot()` is the normal data path. It should return a `PbxSnapshot` with
 normalized channels, endpoints, trunks, history evidence, and reachability
 state. If the PBX cannot be reached or authentication fails, return a snapshot
 with `reachable=False` and a useful error instead of raising into the app layer.
@@ -117,9 +163,8 @@ with `reachable=False` and a useful error instead of raising into the app layer.
 JSON-compatible dictionary with enough detail to explain which step failed, such
 as TCP connection, authentication, command support, or missing configuration.
 
-The names `AmiSnapshot`, `AmiChannel`, and `AmiEndpoint` are historical from the
-first Asterisk connector. Treat them as the Agent's current neutral snapshot
-shape until the internal model is renamed.
+The historical `AmiSnapshot`, `AmiChannel` and `AmiEndpoint` names remain exact
+compatibility aliases; new code should use the neutral observation names.
 
 ### Extension Presence
 
@@ -137,7 +182,7 @@ The `people` entries in `GET /home` include an additive `presence` object:
 The supported neutral states are `available`, `on_call`, `busy`, `ringing`,
 `away`, `do_not_disturb`, `offline`, and `unknown`. `on_call` takes priority
 over a PBX-provided presence state while a live channel exists. Connectors may
-provide a raw presence value through `AmiEndpoint.presence`; otherwise the
+provide a raw presence value through `PbxEndpoint.presence`; otherwise the
 Agent derives presence from the endpoint device state. Existing `status`,
 `statusText`, and `detail` fields remain available for older app versions.
 When a non-trunk endpoint transitions from reachable to offline, the Agent may
@@ -155,16 +200,16 @@ class ExampleClient:
     name = "example"
     diagnostics_label = "Example PBX"
 
-    def snapshot(self) -> AmiSnapshot:
+    def snapshot(self) -> PbxSnapshot:
         ...
 
     def diagnostics(self) -> dict:
         ...
 ```
 
-3. Return `AmiSnapshot` from `snapshot()`.
-4. Map active calls to `AmiChannel`.
-5. Map people/devices/trunks to `AmiEndpoint`.
+3. Return `PbxSnapshot` from `snapshot()`.
+4. Map active calls to `PbxChannel`.
+5. Map people/devices/trunks to `PbxEndpoint`.
 6. Keep raw PBX details in diagnostics or `technical` evidence, not the first
    app layer.
 7. Register the connector in `connector_for_settings()` in
@@ -245,6 +290,39 @@ that directory. Point `FREESWITCH_CDR_JSON_PATH` at whichever directory actually
 contains the files; do not assume that a `json_cdr/` child exists.
 
 ## Yeastar P-Series Notes
+
+Live snapshots retain their two-second API refresh, while CDR and voicemail
+refresh independently at `PBXSENSE_HISTORY_POLL_SECONDS` (30 seconds by default).
+An optional history failure retains the last successful records and does not
+hide live calls or make Core unavailable. Raw diagnostics expose each history
+source's readiness/error and last-success age; cached data is not a fresh read.
+Core extension/live-call failures still mark the connector unavailable.
+CDR parsing accepts v1 `disposition`/`duration` and v2 `last_status`/`call_duration`.
+V2 abandoned calls map to missed calls, with queue evidence when supplied.
+`YEASTAR_API_VERSION` still controls the requested API version; firmware support
+must be checked before selecting `v2.0`. No automatic firmware/version switch is
+performed, and history remains bounded to the latest 1,000 records.
+
+## CUCM Registration Completeness
+
+Schema reference: [Cisco RisPort70 API](https://developer.cisco.com/docs/sxml/risport70-api/).
+
+Phone registration is queried by explicit AXL device names using
+`selectCmDeviceExt`, in batches of 200 with a 10,000-device per-collection safety
+cap. The method consolidates cross-node registration state. The parser accepts
+the documented `CmDevices/item` response as well as legacy `CmDevice` elements.
+Missing devices, failed batches and devices beyond the cap remain unknown;
+they do not imply offline or recovery. A shared line is reachable if any device
+is registered, and confirmed offline only if every device explicitly reports
+unregistered/rejected. Total query failure still marks Core unavailable.
+Raw diagnostics include registration coverage, missing devices, failed batches
+and whether the safety cap was reached. These are bounded observations, not an
+unlimited cluster inventory. Unknown evidence does not update last-active time
+or confirm phone recovery; an existing confirmed incident stays visible.
+
+## Yeastar Setup
+
+CDR v2 reference: [Yeastar CDR API](https://help.yeastar.com/en/p-series-software-edition/developer-guide/query-cdr-list-v2.html).
 
 The Yeastar connector supports both local P-Series PBXs and P-Series Cloud
 Edition through the P-Series OpenAPI. Enable API access under `Integrations >

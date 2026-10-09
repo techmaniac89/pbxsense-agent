@@ -19,6 +19,7 @@ from .history import CdrCall
 from .jtapi import JtapiBridge
 from .settings import AgentSettings
 from .version import AGENT_VERSION
+from .source_status import SourceStatus
 
 
 class CucmError(OSError):
@@ -49,23 +50,30 @@ class CucmClient:
         self._perfmon_attempted = False
         self._previous_perfmon: dict[str, int] = {}
         self._known_trunks: list[PbxEndpoint] = []
+        self._registration_details: dict[str, object] = {}
+        self._sources = SourceStatus()
+        self._sources.record("queues", "unsupported")
 
     def snapshot(self) -> PbxSnapshot:
         if self._cached_snapshot and time.monotonic() < self._refresh_after:
-            return replace(self._cached_snapshot, channels=self._jtapi.channels())
+            return self._with_live_calls(self._cached_snapshot)
         try:
             inventory = self._directory_inventory()
-            registration = self._registration_status()
+            self._sources.record("inventory")
+            registration = self._registration_status([row["device_name"] for row in inventory])
             endpoints = _merge_inventory_and_registration(inventory, registration)
+            self._sources.record("phones", "partial" if self._registration_details.get("missingDevices") else "ready")
             try:
                 trunks = self._trunk_endpoints()
                 self._known_trunks = trunks
                 endpoints.extend(trunks)
                 self._trunk_error = ""
+                self._sources.record("trunks")
             except OSError:
                 # Trunk serviceability is additive. A missing optional service
                 # must not make phone inventory and registration unreachable.
                 self._trunk_error = "CUCM trunk serviceability is unavailable."
+                self._sources.record("trunks", "temporarily_unavailable")
                 endpoints.extend(uncertain_trunks(
                     self._known_trunks,
                     "CUCM trunk serviceability evidence is temporarily unavailable",
@@ -76,6 +84,7 @@ class CucmClient:
                 endpoints=endpoints,
             )
         except OSError:
+            self._sources.record("phones", "temporarily_unavailable")
             result = PbxSnapshot(
                 reachable=False,
                 agent_version=AGENT_VERSION,
@@ -85,7 +94,17 @@ class CucmClient:
         # RisPort is a bulk real-time query; avoid turning the one-second app
         # refresh into a one-second CUCM SOAP poll.
         self._refresh_after = time.monotonic() + 10
-        return replace(result, channels=self._jtapi.channels())
+        return self._with_live_calls(result)
+
+    def _with_live_calls(self, snapshot: PbxSnapshot) -> PbxSnapshot:
+        channels = self._jtapi.channels()
+        status = self._jtapi.diagnostics()
+        self._sources.record("liveCalls", "ready" if status.get("liveCallsAvailable") else
+                             "temporarily_unavailable" if self._jtapi.configured else "not_configured")
+        sources = self._sources.export()
+        if status.get("jtapiSnapshotAgeSeconds") is not None:
+            sources["liveCalls"]["lastSuccessAgeSeconds"] = status["jtapiSnapshotAgeSeconds"]
+        return replace(snapshot, channels=channels, sources=sources)
 
     def diagnostics(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -106,12 +125,12 @@ class CucmClient:
                 "cluster data are vulnerable to interception."
             )
         try:
-            self._directory_inventory()
+            inventory = self._directory_inventory()
             result["axlReachable"] = True
         except OSError:
             result["axlError"] = "The CUCM AXL diagnostic check failed."
         try:
-            self._registration_status()
+            self._registration_status([row["device_name"] for row in inventory] if result["axlReachable"] else None)
             result["risPortReachable"] = True
         except OSError:
             result["risPortError"] = "The CUCM RisPort diagnostic check failed."
@@ -140,6 +159,8 @@ class CucmClient:
             if result["ok"]
             else "CUCM AXL or RisPort needs attention."
         )
+        result["registrationCoverage"] = dict(self._registration_details)
+        result["dataSources"] = self._sources.export()
         return result
 
     def _directory_inventory(self) -> list[dict[str, str]]:
@@ -164,9 +185,16 @@ class CucmClient:
                 rows.append(values)
         return rows
 
-    def _registration_status(self) -> dict[str, dict[str, str]]:
-        body = """
-          <ns:SelectCmDevice xmlns:ns="http://schemas.cisco.com/ast/soap">
+    def _registration_status(self, names: list[str] | None = None) -> dict[str, dict[str, str]]:
+        selected = sorted(set(names)) if names is not None else ["*"]
+        devices: dict[str, dict[str, str]] = {}
+        failures = 0
+        operation = "selectCmDeviceExt" if names is not None else "selectCmDevice"
+        for offset in range(0, min(len(selected), 10000), 200):
+            items = "".join(f"<ns:item><ns:Item>{_xml_escape(name)}</ns:Item></ns:item>"
+                            for name in selected[offset:offset + 200])
+            body = f"""
+          <ns:{operation} xmlns:ns="http://schemas.cisco.com/ast/soap">
             <ns:StateInfo></ns:StateInfo>
             <ns:CmSelectionCriteria>
               <ns:MaxReturnedDevices>1000</ns:MaxReturnedDevices>
@@ -174,17 +202,29 @@ class CucmClient:
               <ns:Model>255</ns:Model><ns:Status>Any</ns:Status>
               <ns:NodeName></ns:NodeName>
               <ns:SelectBy>Name</ns:SelectBy>
-              <ns:SelectItems><ns:item><ns:Item>*</ns:Item></ns:item></ns:SelectItems>
+              <ns:SelectItems>{items}</ns:SelectItems>
               <ns:Protocol>Any</ns:Protocol><ns:DownloadStatus>Any</ns:DownloadStatus>
             </ns:CmSelectionCriteria>
-          </ns:SelectCmDevice>
+          </ns:{operation}>
         """
-        root = self._soap(
-            "/realtimeservice2/services/RISService70",
-            body,
-            "SelectCmDevice",
-        )
-        return _risport_devices(root)
+            try:
+                root = self._soap("/realtimeservice2/services/RISService70", body, operation)
+            except OSError:
+                failures += 1
+                continue
+            batch = _risport_devices(root)
+            devices.update({name: value for name, value in batch.items()
+                            if names is None or name in selected[offset:offset + 200]})
+        batches = (min(len(selected), 10000) + 199) // 200
+        self._registration_details = {
+            "requestedDevices": len(selected) if names is not None else None,
+            "reportedDevices": len(devices), "failedBatches": failures,
+            "queryLimitReached": len(selected) > 10000,
+            "missingDevices": len(set(selected) - devices.keys()) if names is not None else None,
+        }
+        if failures and failures == batches:
+            raise CucmError("CUCM registration queries are unavailable")
+        return devices
 
     def _trunk_endpoints(self) -> list[PbxEndpoint]:
         inventory = self._sip_trunk_inventory()
@@ -416,6 +456,8 @@ def _merge_inventory_and_registration(
     for extension, rows in sorted(lines.items()):
         states = [registration.get(row["device_name"], {}) for row in rows]
         registered = any(state.get("status", "").lower() == "registered" for state in states)
+        confirmed_offline = all(state.get("status", "").lower() in {"unregistered", "rejected"}
+                                for state in states)
         label = next(
             (row.get("line_description", "") or row.get("device_description", "") for row in rows
              if row.get("line_description", "") or row.get("device_description", "")),
@@ -426,7 +468,9 @@ def _merge_inventory_and_registration(
             extension=extension,
             number=extension,
             label=label,
-            device_state="Reachable" if registered else "Unavailable",
+            device_state="Reachable" if registered else "Unavailable" if confirmed_offline else "Unknown",
+            health_status="healthy" if registered else "down" if confirmed_offline else "unknown",
+            health_confidence="high" if registered or confirmed_offline else "low",
             ip_address=ip,
         ))
     return endpoints
@@ -486,7 +530,10 @@ def enrich_cucm_trunks_with_history(
 
 def _risport_devices(root: ET.Element) -> dict[str, dict[str, str]]:
     devices: dict[str, dict[str, str]] = {}
-    for device in _elements(root, "CmDevice"):
+    candidates = _elements(root, "CmDevice")
+    for collection in _elements(root, "CmDevices"):
+        candidates.extend(child for child in collection if _local(child.tag) == "item")
+    for device in candidates:
         name = _child_text(device, "Name")
         if not name:
             continue

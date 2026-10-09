@@ -1,5 +1,24 @@
 # PBXSense Agent Install Guide
 
+## Authorize a new PC
+
+A new browser now shows an authorization page instead of a raw token error.
+On an already-authorized PC, open Agent home and choose **Authorize another
+browser**, then **Create access code**. Share the code only with someone who
+should have full administrator access. On the new PC, open `/session` and enter
+the code over private HTTPS or a loopback SSH tunnel.
+
+For an SSH tunnel, run `ssh -L 8765:127.0.0.1:8765 user@agent-host` on the new PC,
+then open `http://localhost:8765/session` while the tunnel is running. Substitute
+your server username/host. Plain LAN HTTP shows guidance but never accepts a
+code. The existing installer setup links still work over protected transport.
+
+Codes work once, expire after 15 minutes and are invalidated by an Agent restart.
+After authorization, the browser keeps the existing installation-lived session.
+If no authorized browser remains, the server administrator can rerun native
+installation or Docker setup for a fresh short-lived setup link. This does not
+require sharing or changing the long-lived `PBXSENSE_AGENT_TOKEN`.
+
 This guide covers the supported ways to run PBXSense Agent near a PBX.
 
 Use the Linux service installer for most production deployments. Use Docker
@@ -15,11 +34,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.34-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.37-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.34-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.34-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.37-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.37-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where

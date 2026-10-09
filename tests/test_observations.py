@@ -23,13 +23,15 @@ class ObservationTest(unittest.TestCase):
 
     def test_snapshot_field_contract_and_owned_defaults_are_preserved(self):
         expected = ["reachable", "agent_version", "channels", "endpoints", "queues",
-                    "recent_calls", "voicemails", "security_events", "error"]
+                    "recent_calls", "voicemails", "security_events", "error", "sources"]
         self.assertEqual([f.name for f in fields(observations.PbxSnapshot)], expected)
         first = observations.PbxSnapshot(True, "test")
         second = observations.PbxSnapshot(False, "test", error="offline")
-        for name in expected[2:-1]:
+        for name in expected[2:-2]:
             self.assertEqual(getattr(first, name), [])
             self.assertIsNot(getattr(first, name), getattr(second, name))
+        self.assertEqual(first.sources, {})
+        self.assertIsNot(first.sources, second.sources)
         with self.assertRaises(FrozenInstanceError):
             first.reachable = False
         self.assertEqual(replace(second, reachable=True).error, "offline")

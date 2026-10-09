@@ -18,7 +18,13 @@ def build_engine_signals(
     security_events: list[SecurityEvent],
     extension_names: dict[str, str],
     now: datetime,
+    data_sources: dict[str, dict] | None = None,
 ) -> list[dict]:
+    sources = data_sources or {}
+    if sources.get("queues", {}).get("state", "ready") != "ready":
+        queues = []
+    if sources.get("cdr", {}).get("state", "ready") != "ready":
+        recent_calls = []
     signals: list[dict] = []
     signals.extend(
         _missed_call_recommendations(endpoints, recent_calls, extension_names, now)
@@ -31,6 +37,10 @@ def build_engine_signals(
     signals.extend(_missed_rate_recommendations(recent_calls, now))
     signals.extend(_endpoint_recommendations(endpoints, extension_names))
     signals.extend(_security_signals(recent_calls, security_events, now))
+    if sources.get("queueMembers", {}).get("state", "ready") != "ready":
+        signals = [signal for signal in signals if signal.get("kind") != "queue_demand_vs_agents"]
+    if sources.get("voicemail", {}).get("state", "ready") != "ready":
+        signals = [signal for signal in signals if signal.get("kind") != "voicemail_free_service_streak"]
     return signals
 
 

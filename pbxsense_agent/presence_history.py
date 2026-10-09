@@ -25,7 +25,7 @@ class EndpointLastActiveTracker:
         changed = False
         with self._lock:
             for endpoint in snapshot.endpoints:
-                if endpoint.role == "trunk":
+                if endpoint.role == "trunk" or endpoint.health_status == "unknown":
                     continue
                 extension = endpoint.extension
                 available = not _endpoint_unavailable(endpoint)

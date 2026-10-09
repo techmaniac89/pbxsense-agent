@@ -65,4 +65,5 @@ class PbxSnapshot:
     voicemails: list[VoicemailMessage] = field(default_factory=list)
     security_events: list[SecurityEvent] = field(default_factory=list)
     error: str | None = None
+    sources: dict[str, dict] = field(default_factory=dict)
 

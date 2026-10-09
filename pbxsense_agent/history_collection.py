@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+import os
 import time
 from typing import Callable
 
@@ -14,6 +15,7 @@ from .history import (
 )
 from .observations import PbxSnapshot
 from .settings import AgentSettings
+from .source_status import SourceStatus
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,7 @@ class HistoryCollector:
         self._cdr_signature = None
         self._voicemail_signature = None
         self._security_signature = None
+        self._sources = SourceStatus()
 
     def enrich(self, snapshot: PbxSnapshot, settings: AgentSettings) -> PbxSnapshot:
         if settings.pbx_type not in {"asterisk", "grandstream", "cucm"}:
@@ -101,13 +104,33 @@ class HistoryCollector:
         if settings.pbx_type == "cucm":
             endpoints = enrich_cucm_trunks_with_history(endpoints, records.calls)
         return replace(snapshot, endpoints=endpoints, recent_calls=records.calls,
-                       voicemails=records.voicemails, security_events=records.security_events)
+                       voicemails=records.voicemails, security_events=records.security_events,
+                       sources={**snapshot.sources, **self._sources.export()})
+
+    def source_status(self) -> dict[str, dict]:
+        return self._sources.export()
+
+    def _available(self, name: str, path: str) -> bool:
+        if not path.strip():
+            self._sources.record(name, "not_configured")
+            return False
+        try:
+            present = Path(path).exists() and os.access(path, os.R_OK)
+        except OSError:
+            present = False
+        if not present:
+            self._sources.record(name, "temporarily_unavailable")
+        return present
 
     def _refresh(self, settings: AgentSettings) -> None:
         if settings.pbx_type == "cucm":
-            self._records = HistoryRecords(calls=self._read_cucm(
-                settings.cucm_cdr_path, settings.cucm_cmr_path, limit=1000,
-            ))
+            self._sources.record("voicemail", "unsupported")
+            self._sources.record("security", "unsupported")
+            if self._available("cdr", settings.cucm_cdr_path):
+                self._records = HistoryRecords(calls=self._read_cucm(
+                    settings.cucm_cdr_path, settings.cucm_cmr_path, limit=1000,
+                ))
+                self._sources.record("cdr")
             return
         cdr_path, voicemail_path = history_paths(settings)
         cdr_signature = file_signature(cdr_path)
@@ -117,18 +140,31 @@ class HistoryCollector:
         calls = self._records.calls
         voicemails = self._records.voicemails
         security_events = self._records.security_events
-        if self._cdr_signature != cdr_signature:
-            calls = self._read_calls(cdr_path, limit=1000)
-        if self._voicemail_signature != voicemail_fingerprint:
-            voicemails = self._read_voicemails(voicemail_path)
-        if self._security_signature != security_signature:
+        cdr_available = self._available("cdr", cdr_path)
+        voicemail_available = self._available("voicemail", voicemail_path)
+        security_available = self._available("security", security_path)
+        if cdr_available:
+            if self._cdr_signature != cdr_signature:
+                calls = self._read_calls(cdr_path, limit=1000)
+            self._sources.record("cdr")
+        if voicemail_available:
+            if self._voicemail_signature != voicemail_fingerprint:
+                voicemails = self._read_voicemails(voicemail_path)
+            self._sources.record("voicemail")
+        if security_available and self._security_signature != security_signature:
             security_events = self._read_security(security_path)
+            self._sources.record("security")
         else:
             cutoff = self._now() - timedelta(minutes=15)
             security_events = [event for event in security_events
                                if event.occurred_at is not None and event.occurred_at >= cutoff]
+            if security_available:
+                self._sources.record("security")
         # Commit records and fingerprints only after every reader succeeded.
         self._records = HistoryRecords(calls, voicemails, security_events)
-        self._cdr_signature = cdr_signature
-        self._voicemail_signature = voicemail_fingerprint
-        self._security_signature = security_signature
+        if cdr_available:
+            self._cdr_signature = cdr_signature
+        if voicemail_available:
+            self._voicemail_signature = voicemail_fingerprint
+        if security_available:
+            self._security_signature = security_signature

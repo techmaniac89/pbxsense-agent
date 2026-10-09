@@ -20,6 +20,7 @@ from starlette.responses import Response, StreamingResponse
 from .connectors import connector_for_settings
 from .collected_state import CollectedHomeState
 from .credentials import AppCredentials
+from .browser_access import BrowserAccessGrants
 from .history_collection import (
     HistoryCollector, file_signature as _file_signature,
     voicemail_signature as _voicemail_signature, history_paths, security_log_path,
@@ -126,6 +127,7 @@ _snapshot_runtime: SnapshotRuntime[CollectedHomeState] = SnapshotRuntime(
     stall_after=max(30.0, settings.timeout_seconds * 20),
 )
 _browser_bootstrap_lock = threading.Lock()
+_browser_access_grants = BrowserAccessGrants()
 _app_credentials: AppCredentials | None = None
 _app_credentials_lock = threading.Lock()
 _history_collector = HistoryCollector(poll_interval=HISTORY_POLL_INTERVAL_SECONDS)
@@ -162,6 +164,13 @@ async def protect_agent_responses(request: Request, call_next):
         "base-uri 'none'; frame-ancestors 'none'"
     )
     return response
+
+
+@app.exception_handler(HTTPException)
+async def browser_authorization_error(request: Request, exc: HTTPException):
+    if request.method == "GET" and _wants_html(request) and exc.status_code in {401, 403}:
+        return HTMLResponse(_browser_access_page(request), status_code=exc.status_code)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
 
 
 @app.on_event("startup")
@@ -402,6 +411,7 @@ def index(request: Request):
               <span>{status_text}<small>{status_detail}</small></span>
             </div>
             {_agent_navigation_html(request, current="home", primary="pair")}
+            <div class="actions"><a href="/browser-access">Authorize another browser</a></div>
             {diagnostic_html}
             {_agent_footer_html()}
           </section>
@@ -409,43 +419,107 @@ def index(request: Request):
     )
 
 
-def _browser_session_page() -> str:
-    return _page(
-        title="Authorize PBXSense Agent",
-        body="""
-          <section class="hero-card">
-            <div class="brand">
-              <div>
-                <h1>Authorize this browser</h1>
-                <p class="subtitle" id="session-status">Checking the secure setup link...</p>
-              </div>
-            </div>
-            <p>This page exchanges the setup link for a protected browser session. The short-lived setup credential is removed from browser history before it is sent.</p>
-            <script>
-              (() => {
-                const status = document.getElementById("session-status");
-                const fragment = new URLSearchParams(window.location.hash.slice(1));
-                const token = fragment.get("token") || "";
-                window.history.replaceState(null, "", window.location.pathname);
-                if (!token) {
-                  status.textContent = "This setup link is incomplete. Run the installer again to print a fresh link.";
-                  return;
-                }
-                fetch("/session", {
-                  method: "POST",
-                  credentials: "same-origin",
-                  headers: {Authorization: `Bearer ${token}`},
-                }).then((response) => {
-                  if (!response.ok) throw new Error("not authorized");
-                  window.location.replace("/");
-                }).catch(() => {
-                  status.textContent = "The setup credential was not accepted. Run the installer again to print a fresh link.";
-                });
-              })();
-            </script>
-          </section>
-        """,
+def _browser_access_page(request: Request) -> str:
+    protected = _browser_session_transport_allowed(request)
+    instruction = (
+        '<form id="browser-access-form"><label for="access-code">Single-use access code</label>'
+        '<p><input id="access-code" type="password" autocomplete="off" maxlength="256" required></p>'
+        '<button type="submit">Authorize this browser</button></form>'
+        if protected else
+        '<p>For your safety, access codes cannot be entered over plain LAN HTTP. '
+        'Use the Agent\'s private HTTPS address, or an SSH tunnel and open '
+        '<code>http://localhost:8765/session</code>. Do not paste credentials into the address bar.</p>'
     )
+    return _page(title="Authorize PBXSense Agent", body=f"""
+      <section class="hero-card">
+        <style>#access-code {{ max-width:100%; padding:12px; border:1px solid #6d604b;
+        border-radius:10px; background:#151310; color:#fff; font:inherit; }}
+        button {{ padding:12px 18px; border:0; border-radius:10px; background:#b8c48d;
+        color:#151310; font:inherit; cursor:pointer; }}</style>
+        <h1>Authorize this browser</h1>
+        <p class="subtitle">This PC does not have administrator access yet.</p>
+        <p>On an already-authorized PC, open the Agent home page and choose
+        <strong>Authorize another browser</strong>. Share its single-use code with this PC.
+        Codes expire after 15 minutes and stop working after use or an Agent restart.</p>
+        {instruction}
+        <p>If no browser is authorized, the server administrator can rerun the installer
+        or Docker setup to obtain a fresh secure setup link. The Agent token is not needed here.</p>
+        <p id="session-status" role="status"></p>
+        <script>
+        const form = document.getElementById('browser-access-form');
+        if (!form) window.history.replaceState(null, '', window.location.pathname);
+        if (form) form.addEventListener('submit', async (event) => {{
+          event.preventDefault();
+          const input = document.getElementById('access-code');
+          const token = input.value.trim(); input.value = '';
+          try {{
+            const response = await fetch('/session', {{method:'POST', credentials:'same-origin',
+              headers:{{Authorization:`Bearer ${{token}}`}}}});
+            if (!response.ok) throw new Error();
+            window.location.replace('/');
+          }} catch (_) {{ document.getElementById('session-status').textContent =
+            'The code was not accepted. It may have expired or already been used. Request a new code.'; }}
+        }});
+        </script>
+      </section>""")
+
+
+@app.get("/browser-access", response_class=HTMLResponse, include_in_schema=False)
+def browser_access(request: Request):
+    _require_token(request)
+    return HTMLResponse(_page(title="Authorize another browser", body="""
+      <section class="hero-card"><h1>Authorize another browser</h1>
+      <style>button {padding:12px 18px;border:0;border-radius:10px;background:#b8c48d;color:#151310;font:inherit;cursor:pointer;}
+      #access-code {overflow-wrap:anywhere;user-select:all;}</style>
+      <p>Only share this code with someone who should have full administrator access.
+      It works once, expires after 15 minutes, and is invalidated by an Agent restart.</p>
+      <button id="create-code" type="button">Create access code</button>
+      <p><output id="access-code"></output></p><p id="access-status" role="status"></p>
+      <div class="actions"><a href="/">Back to home</a></div>
+      <script>document.getElementById('create-code').addEventListener('click', async () => {
+        document.getElementById('access-code').textContent = '';
+        try {
+          const response = await fetch('/browser-access', {method:'POST', credentials:'same-origin'});
+          if (!response.ok) throw new Error();
+          const result = await response.json();
+          document.getElementById('access-code').textContent = result.code;
+          document.getElementById('access-status').textContent = 'Enter this code on the new PC over private HTTPS or an SSH tunnel.';
+        } catch (_) {document.getElementById('access-status').textContent = 'Could not create a code. Refresh this authorized browser or wait for pending codes to expire.';}
+      });</script></section>"""))
+
+
+@app.post("/browser-access", include_in_schema=False)
+def create_browser_access(request: Request):
+    if not settings.token or not _has_valid_local_web_cookie(request):
+        raise HTTPException(status_code=403, detail="Administrator browser session required")
+    _require_safe_cookie_mutation(request)
+    try:
+        code = _browser_access_grants.issue()
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return JSONResponse({"code": code, "expiresInSeconds": 900})
+
+
+def _browser_session_fragment_script() -> str:
+    return """
+      <script>
+      (() => {
+        const token = new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
+        window.history.replaceState(null, '', window.location.pathname);
+        if (!token) return;
+        const status = document.getElementById('session-status');
+        status.textContent = 'Authorizing this browser...';
+        fetch('/session', {method:'POST', credentials:'same-origin',
+          headers:{Authorization:`Bearer ${token}`}})
+          .then(response => {
+            if (!response.ok) throw new Error();
+            window.location.replace('/');
+          }).catch(() => {
+            status.textContent = 'The setup link has expired or already been used. Request a new code or setup link.';
+          });
+      })();
+      </script>
+    """
 
 
 def _page(*, title: str, body: str) -> str:
@@ -794,11 +868,12 @@ def browser_session(request: Request):
     if not settings.token:
         return RedirectResponse("/", status_code=303)
     if not _browser_session_transport_allowed(request):
-        raise HTTPException(
-            status_code=403,
-            detail="Browser setup requires loopback HTTP or private HTTPS",
-        )
-    return HTMLResponse(_browser_session_page())
+        return HTMLResponse(_browser_access_page(request), status_code=403)
+    # Fragments never reach the server. A setup link auto-submits client-side;
+    # without one, the same page offers manual short-lived code entry.
+    return HTMLResponse(_browser_access_page(request).replace(
+        "</section>", _browser_session_fragment_script() + "</section>", 1,
+    ))
 
 
 @app.post("/session", include_in_schema=False)
@@ -818,7 +893,7 @@ async def authorize_browser_session(request: Request) -> JSONResponse:
         else ""
     )
     try:
-        authorized = _consume_browser_bootstrap(bootstrap_token)
+        authorized = _browser_access_grants.consume(bootstrap_token) or _consume_browser_bootstrap(bootstrap_token)
     except OSError as exc:
         raise HTTPException(
             status_code=503, detail="Browser setup state could not be saved"
@@ -1184,6 +1259,7 @@ def _public_diagnostics(value: object, *, field: str = "") -> object:
 
 def _diagnostics_response(request: Request):
     payload = connector.diagnostics()
+    payload["dataSources"] = {**payload.get("dataSources", {}), **_history_collector.source_status()}
     payload["internetRelay"] = internet_relay.status()
     ready, readiness_detail = _readiness()
     payload["runtime"] = {

@@ -29,6 +29,11 @@ class HistoryCollectionTest(unittest.TestCase):
             grandstream_security_log_path="ucm-security", cucm_cdr_path="cucm-cdr", cucm_cmr_path="cucm-cmr",
         )
         self.snapshot = PbxSnapshot(True, "test")
+        # These tests inject readers rather than real files; availability is
+        # exercised separately with real temporary paths.
+        self.available = patch.object(self.collector, "_available", return_value=True)
+        self.available.start()
+        self.addCleanup(self.available.stop)
 
     def test_poll_boundary_and_unchanged_fingerprints_preserve_records(self):
         first = self.collector.enrich(self.snapshot, self.settings)
