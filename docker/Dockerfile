@@ -18,6 +18,7 @@ RUN apt-get update \
   && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY pbxsense_agent ./pbxsense_agent
+COPY scripts/installer_paths.py ./scripts/installer_paths.py
 COPY jtapi_bridge ./jtapi_bridge
 COPY docker/healthcheck.sh /usr/local/bin/pbxsense-healthcheck
 

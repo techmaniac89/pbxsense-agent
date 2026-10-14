@@ -1,4 +1,6 @@
 .env
+# Installation-specific read-only PBX host paths; never publish these.
+docker/docker-compose.detected.yml
 CODEX.md
 .venv/
 .review-deps/

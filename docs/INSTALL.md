@@ -11,7 +11,43 @@ the code over private HTTPS or a loopback SSH tunnel.
 For an SSH tunnel, run `ssh -L 8765:127.0.0.1:8765 user@agent-host` on the new PC,
 then open `http://localhost:8765/session` while the tunnel is running. Substitute
 your server username/host. Plain LAN HTTP shows guidance but never accepts a
-code. The existing installer setup links still work over protected transport.
+code by default. The existing installer setup links still work over protected transport.
+
+### Optional trusted-LAN HTTP (Agent 0.6.40-beta)
+
+No reverse proxy is required. Customers who deliberately accept unencrypted
+administrator access on a trusted private LAN can set:
+
+```dotenv
+PBXSENSE_TRUSTED_LAN_HTTP=true
+```
+
+The native/Docker setup wizard offers this option, disabled by default, and
+prints a LAN setup link when enabled without TLS. Existing installations can
+add it to `.env` (Docker) or `/etc/pbxsense-agent.env` (native). Generate a fresh
+browser setup code using `python3 scripts/ensure_token.py .env` from the source
+folder (substitute the native env path if applicable). Recreate Docker using
+the same Compose files/options as usual; restarting alone does not load changed
+environment values. Restart the native service after changing its env file.
+If a custom Compose file lists environment variables individually instead of
+using `env_file`, include the new variable there too.
+
+Within 15 minutes, open `http://<Agent-LAN-IP>:8765/session` and enter the new
+`PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` value, not `PBXSENSE_AGENT_TOKEN`. Use your
+configured port if different. Codes remain single-use. An already-authorized
+browser can instead create a code through **Authorize another browser**.
+
+Only RFC1918 IPv4 and IPv6 ULA peer addresses qualify for the HTTP opt-in;
+public, link-local and reserved/documentation addresses remain blocked. The page
+shows an explicit warning. HTTP setup codes AND subsequent admin cookies can be
+intercepted by anyone able to observe the network. Never port-forward this
+Agent or publish it through an Internet-facing proxy; a private proxy peer is
+not proof that its downstream users are private. Restrict access at the firewall.
+Turning the option off prevents new LAN-HTTP authorization, but does not revoke
+previously issued browser cookies. Clear site data or rotate the administrator
+credential when responding to a suspected compromise. This setting is browser
+administration only: paired apps, API credentials and release-app TLS rules do
+not change.
 
 Codes work once, expire after 15 minutes and are invalidated by an Agent restart.
 After authorization, the browser keeps the existing installation-lived session.
@@ -40,11 +76,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.39-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.42-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -78,7 +114,7 @@ Both distribution-specific installers:
 - Lets you confirm `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or `mock` mode interactively.
 - Prompts for timezone, Agent port, and connector timeout.
 - Prompts for AMI, ESL, or Yeastar API credentials and keeps existing values on reinstall.
-- Suggests Asterisk CDR CSV, voicemail, and recording paths from common local locations.
+- Offers detected Asterisk/FreeSWITCH CDR, voicemail and recording paths, with manual entry under an advanced choice.
 - Reuses a readable Asterisk `manager.conf` user secret or FreeSWITCH Event
   Socket password as a default when it can find one.
 - Creates `/opt/pbxsense-agent`.
@@ -293,8 +329,9 @@ Asterisk-based PBX, it reads PBX history and voicemail directly from local
 filesystem paths and needs no Docker volume mapping.
 
 Set `FREESWITCH_CDR_JSON_PATH` only when `mod_json_cdr` writes local JSON CDR
-files visible to the Agent. The installer detects common local JSON CDR
-directories and offers the first one as the default. Event Socket itself does
+files visible to the Agent. The installer reads running PBX directory variables
+and local configuration, then offers detected directories and common-location
+fallbacks. Event Socket itself does
 not expose completed call history. Depending on the FreeSWITCH build,
 `mod_json_cdr` may write `*.cdr.json` directly in its configured `log-dir`; use
 the directory that actually contains the files. Set `FREESWITCH_VOICEMAIL_PATH` only when
@@ -305,6 +342,72 @@ so idle registered phones remain visible in People. If `mod_callcenter` is
 loaded, it also reads queue names and waiting counts through
 `callcenter_config`. Missing `mod_callcenter` support does not make the
 connector unhealthy; queue data is simply omitted.
+
+## Asterisk/FreeSWITCH discovery and verification (Agent 0.6.42-beta)
+
+For a new native installation, the installer asks for connection details first,
+then offers numbered choices for completed calls, voicemail and recordings.
+Press Enter to accept the first detected candidate, choose another number,
+choose `m` for an advanced absolute path, or `s` to disable an optional source.
+Existing native settings are preserved by default on reinstall; choose a detected
+number explicitly to replace them. A nonexistent default is no longer invented
+when nothing is detected. Remote PBXs do not use local discovery; provide files
+already synchronized or mounted on the Agent host, or skip optional sources.
+
+Asterisk discovery checks `core show settings` and the `[directories]` section
+of `asterisk.conf`, then searches supported CSV locations under its log directory
+and voicemail/monitor folders under its spool directory. `cdr show status`
+warns when logging is disabled or no standard CSV backend is confirmed. Arbitrary
+SQL/custom layouts are not converted into the Agent's standard Master.csv format.
+Custom dialplan recording locations may still need the advanced choice.
+
+FreeSWITCH discovery checks directory variables through local `fs_cli`, literal
+directory settings in `vars.xml`, and `json_cdr.conf.xml` disk `log-dir`.
+It expands known directory variables and offers both direct JSON output and
+the `json_cdr` subdirectory, followed by common paths. It checks whether
+`mod_json_cdr` is loaded when the CLI is reachable. No module is loaded and no
+PBX configuration is edited. Conditional includes, runtime per-channel overrides,
+unknown XML variables, custom voicemail/recording layouts, and CLI authentication
+failures can still require an administrator's manual choice.
+
+At the end of native installation, a read-only capability report uses `runuser`
+to check the selected sources as `pbxsense`, not as root. It performs a live
+snapshot with the configured connector and parses a small recent-CDR sample
+without displaying caller data. Missing files, permission failures, no parseable
+records and unavailable live monitoring are reported separately. Native service
+sandbox paths such as `/home`, `/root` and `/tmp` are not treated as ready.
+This is an account-level preflight, not a full reproduction of every systemd
+namespace/SELinux/AppArmor rule; verify Agent diagnostics after startup too.
+The installer never broadens PBX file permissions or changes ownership. Grant
+only necessary read access through your site's group/ACL policy if required.
+
+The installer prints a standalone `watch-cdr` command. Run it, make and end an
+answered test call, and it watches up to 60 seconds for changed parseable call
+evidence under the same runtime user. A changed file containing only old valid
+rows does not qualify. Other PBX calls may also produce new evidence, so confirm
+the specific test call in the app. No evidence is a failed/unverified test, not
+proof that live connectivity means CDR works. Longer vendor write delays need
+another check. Voicemail/recordings directory access does not prove that every
+nested file is readable or that the PBX is producing content.
+
+For interactive Docker setup, select native-host discovery or supply the local
+PBX container name. Container discovery reads its directories/configuration and
+maps paths through inspected mounts into host paths. Files only inside the PBX
+container's writable layer cannot be safely shared this way; expose an existing
+volume/bind source explicitly. Detected source choices create the local ignored
+`docker/docker-compose.detected.yml` override with read-only long-syntax binds,
+`create_host_path: false`, and separate container-visible environment paths.
+It replaces the generic Asterisk/FreeSWITCH prepared-root override in commands
+printed by the wizard. Sources must already exist; no empty host directories
+are created. Existing detected overrides are preserved, not overwritten.
+
+After Docker startup, the report runs inside the Agent container as its default
+non-root user. Actual numeric group ownership, Docker namespace access and
+SELinux restrictions still matter; discovery cannot grant access. Noninteractive
+Docker setup preserves existing path/mount configuration and skips automatic
+mount generation. Existing manual/prepared-root and named-volume overrides remain
+supported; keep the same Compose files/options for subsequent updates. Native
+installation remains the recommended default on on-premise PBX hosts.
 
 ## Cisco CUCM Install Notes
 

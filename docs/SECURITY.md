@@ -9,7 +9,16 @@ check can mint browser access codes; paired app credentials cannot mint them.
 Codes use 256-bit randomness, are stored only as SHA-256 digests in process
 memory, expire after 15 minutes, and are consumed atomically once. At most ten
 unexpired codes may be pending. Restarting the Agent invalidates every code.
-Redemption retains the private-HTTPS or loopback-only transport requirement.
+By default, redemption retains the private-HTTPS or loopback-only transport requirement.
+Agent 0.6.40-beta adds an explicit, default-off exception via
+`PBXSENSE_TRUSTED_LAN_HTTP=true` for HTTP from RFC1918/IPv6 ULA peer addresses.
+It does not permit public peers, forwarded-header spoofing, permanent-token
+redemption or unauthenticated administration. HTTP cookies stay HttpOnly and
+SameSite=Strict, but cannot use Secure and are vulnerable to interception.
+Single-use codes do not protect the subsequent session. Use firewall restrictions
+and never expose this mode through a public proxy/port-forward; a private proxy
+can mask downstream public clients. Existing cookies are not revoked merely by
+disabling enrollment over HTTP. See the Install Guide for this opt-in workflow.
 No unauthenticated endpoint reveals the Agent token or installation details.
 Issued codes grant full browser administration; share them as credentials.
 
@@ -18,6 +27,17 @@ Do not expose PBX management protocols or the Agent directly to the public
 internet.
 
 ## Network Boundaries
+
+Agent 0.6.42-beta installer discovery is read-only: CLI directory/status queries,
+bounded local configuration reads and explicit path selection. It never loads
+PBX modules, edits PBX configuration or changes PBX file permissions. Runtime
+verification passes credentials to a local child through stdin, not command-line
+arguments or logs, and drops to the service user through `runuser` when requested.
+Output contains capability states, not call details or authentication messages.
+Docker-generated mounts are read-only, refuse missing host sources and contain
+no credentials; the local override is excluded from Git. Keep it private because
+host paths can reveal installation layout. Discovery and account checks do not
+replace firewall, sandbox, SELinux or actual-call validation.
 
 Agent 0.6.39-beta stores daily Moment evidence in a mode-0600 SQLite file within
 the Agent data directory. It retains bounded aggregate counts and coverage,
@@ -179,7 +199,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.39-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

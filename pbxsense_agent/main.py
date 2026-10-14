@@ -36,7 +36,7 @@ from .history import (
 from .internet_relay import SecureInternetRelay
 from .live import home_live_events
 from .mock import mock_snapshot
-from .network import is_loopback_host, is_private_or_loopback_host
+from .network import is_loopback_host, is_private_or_loopback_host, is_trusted_lan_host
 from .pulse import (
     ActivityTracker,
     EndpointAvailabilitySignalTracker,
@@ -416,7 +416,6 @@ def index(request: Request):
               <span>{status_text}<small>{status_detail}</small></span>
             </div>
             {_agent_navigation_html(request, current="home", primary="pair")}
-            <div class="actions"><a href="/browser-access">Authorize another browser</a></div>
             {diagnostic_html}
             {_agent_footer_html()}
           </section>
@@ -433,7 +432,9 @@ def _browser_access_page(request: Request) -> str:
         if protected else
         '<p>For your safety, access codes cannot be entered over plain LAN HTTP. '
         'Use the Agent\'s private HTTPS address, or an SSH tunnel and open '
-        '<code>http://localhost:8765/session</code>. Do not paste credentials into the address bar.</p>'
+        '<code>http://localhost:8765/session</code>. Alternatively, the server administrator '
+        'can explicitly enable trusted-LAN HTTP, accepting its interception risk. '
+        'Do not paste permanent credentials into the address bar.</p>'
     )
     return _page(title="Authorize PBXSense Agent", body=f"""
       <section class="hero-card">
@@ -528,6 +529,12 @@ def _browser_session_fragment_script() -> str:
 
 
 def _page(*, title: str, body: str) -> str:
+    warning = (
+        '<div class="status attention" role="note" style="margin:0 0 8px">'
+        'Trusted-LAN HTTP is enabled. HTTP administrator sessions are not encrypted; '
+        'use only on a trusted private network and never expose this Agent publicly.</div>'
+        if settings.trusted_lan_http else ""
+    )
     return f"""<!doctype html>
     <html lang="en">
       <head>
@@ -831,7 +838,7 @@ def _page(*, title: str, body: str) -> str:
       </head>
       <body>
         <main>
-          {body}
+          <div class="page-content">{warning}{body}</div>
         </main>
       </body>
     </html>"""
@@ -889,7 +896,7 @@ async def authorize_browser_session(request: Request) -> JSONResponse:
     if not _browser_session_transport_allowed(request):
         raise HTTPException(
             status_code=403,
-            detail="Browser setup requires loopback HTTP or private HTTPS",
+            detail="Browser setup requires loopback HTTP, private HTTPS, or explicitly enabled trusted-LAN HTTP",
         )
     authorization = request.headers.get("authorization", "")
     bootstrap_token = (
@@ -1620,6 +1627,8 @@ def _agent_navigation_html(
         for key, label, href in links
         if key != current and key not in excluded
     )
+    if current == "home":
+        rendered += '<a class="button" href="/browser-access">Authorize another browser</a>'
     return f'<div class="actions">{rendered}</div>'
 
 
@@ -1816,6 +1825,7 @@ def _browser_session_transport_allowed(request: Request) -> bool:
     client_host = request.client.host if request.client else ""
     return _is_trusted_request(request) and (
         is_loopback_host(client_host) or _local_web_cookie_secure(request)
+        or (settings.trusted_lan_http and request.url.scheme == "http" and is_trusted_lan_host(client_host))
     )
 
 

@@ -27,6 +27,7 @@ class AgentSettings:
     token: str
     public_url: str = ""
     browser_bootstrap_token: str = ""
+    trusted_lan_http: bool = False
     browser_bootstrap_expires_at: int = 0
     browser_bootstrap_state_path: str = "/var/lib/pbxsense-agent/browser_bootstrap_used"
     relay_url: str = ""
@@ -139,6 +140,7 @@ class AgentSettings:
             browser_bootstrap_token=os.getenv(
                 "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN", ""
             ).strip(),
+            trusted_lan_http=_env_bool("PBXSENSE_TRUSTED_LAN_HTTP", False),
             browser_bootstrap_expires_at=_env_int(
                 "PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT", 0
             ),

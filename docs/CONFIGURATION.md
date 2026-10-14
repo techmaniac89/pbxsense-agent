@@ -15,6 +15,15 @@ mode normally use `.env`; Linux service installs use:
 
 Use `.env.example` as the starting point.
 
+Agent 0.6.42-beta's installer detects Asterisk/FreeSWITCH history paths from PBX
+directories/configuration, preserving existing native values unless changed.
+Optional sources can be skipped instead of setting nonexistent defaults. Docker
+wizard-generated paths belong inside the Agent container and are paired with
+read-only host mounts in `docker/docker-compose.detected.yml`; do not substitute
+host paths for container environment values. See the Install Guide's discovery
+and runtime-account verification section. No public API or mobile app change is
+required.
+
 ## Core Settings
 
 | Variable | Default | Description |
@@ -27,6 +36,7 @@ Use `.env.example` as the starting point.
 | `PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` | generated | Installer-rotated, single-use credential printed only in the browser setup URL; it does not grant API access and expires after 15 minutes. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT` | generated | Unix expiry for the browser bootstrap credential. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_STATE_PATH` | `/var/lib/pbxsense-agent/browser_bootstrap_used` | Durable consumed-credential marker that prevents reuse after an Agent restart. |
+| `PBXSENSE_TRUSTED_LAN_HTTP` | `false` | Explicitly allow administrator-browser setup over unencrypted HTTP from RFC1918 IPv4 or IPv6 ULA peers. Codes and admin sessions can be intercepted. Never expose publicly; this does not relax app TLS or API authentication. |
 | `PBXSENSE_CONNECT_TIMEOUT` | `3` | Connector TCP timeout and absolute AMI/ESL command/login response deadline in seconds; each command gets its own budget. |
 | `PBXSENSE_AGENT_PORT` | `8765` | Agent HTTP or HTTPS port used by the Linux service and Docker container, including its health check and LAN port mapping. |
 | `PBXSENSE_AGENT_TLS_CERTFILE` | empty | PEM certificate chain for native Agent HTTPS/WSS. Configure together with `PBXSENSE_AGENT_TLS_KEYFILE`; release apps require TLS for direct LAN/VPN access. |

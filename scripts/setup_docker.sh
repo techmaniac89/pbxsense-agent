@@ -27,16 +27,27 @@ pbx_type="$(awk -F= '$1 == "PBXSENSE_PBX_TYPE" {sub(/^[^=]*=/, ""); print; exit}
 compose_files="--env-file .env -f docker/docker-compose.yml"
 case "$pbx_type" in
   asterisk|ami|freepbx|issabel|vitalpbx)
-    compose_files="$compose_files -f docker/docker-compose.asterisk.yml"
+    if [ ! -f "$PROJECT_DIR/docker/docker-compose.detected.yml" ]; then
+      compose_files="$compose_files -f docker/docker-compose.asterisk.yml"
+    fi
     ;;
   freeswitch|fusionpbx)
-    compose_files="$compose_files -f docker/docker-compose.freeswitch.yml"
+    if [ ! -f "$PROJECT_DIR/docker/docker-compose.detected.yml" ]; then
+      compose_files="$compose_files -f docker/docker-compose.freeswitch.yml"
+    fi
     ;;
   grandstream|grandstream-ucm|ucm6300)
     compose_files="$compose_files -f docker/docker-compose.grandstream.yml"
     ;;
   cucm|cisco|cisco-cucm)
     compose_files="$compose_files -f docker/docker-compose.cucm.yml"
+    ;;
+esac
+case "$pbx_type" in
+  asterisk|ami|freepbx|issabel|vitalpbx|freeswitch|fusionpbx)
+    if [ -f "$PROJECT_DIR/docker/docker-compose.detected.yml" ]; then
+      compose_files="$compose_files -f docker/docker-compose.detected.yml"
+    fi
     ;;
 esac
 
@@ -55,6 +66,12 @@ if [ "$start_agent" = "yes" ]; then
   # Intentional word splitting passes each -f argument to Docker Compose.
   docker compose $compose_files up -d --build
   echo "PBXSense Agent is running."
+  case "$pbx_type" in
+    asterisk|freeswitch)
+      docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker || true
+      echo "For a completed-call check, run: docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py watch-cdr --mode docker"
+      ;;
+  esac
 else
   echo "Configuration saved. Start later with: docker compose $compose_files up -d --build"
 fi
@@ -64,21 +81,27 @@ port="$(awk -F= '$1 == "PBXSENSE_AGENT_PORT" {sub(/^[^=]*=/, ""); print; exit}' 
 [ -n "$port" ] || port="8765"
 public_url="$(awk -F= '$1 == "PBXSENSE_AGENT_PUBLIC_URL" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
 certificate="$(awk -F= '$1 == "PBXSENSE_AGENT_TLS_CERTFILE" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+trusted_lan="$(awk -F= '$1 == "PBXSENSE_TRUSTED_LAN_HTTP" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
 if [ -n "$public_url" ]; then
   admin_origin="${public_url%/}"
-elif [ -n "$certificate" ]; then
+elif [ -n "$certificate" ] || [ "$trusted_lan" = "true" ]; then
   host="${PBXSENSE_ACCESS_HOST:-}"
   if [ -z "$host" ]; then
     host="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi
   [ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
-  admin_origin="https://$host:$port"
+  if [ -n "$certificate" ]; then
+    admin_origin="https://$host:$port"
+  else
+    admin_origin="http://$host:$port"
+    echo "WARNING: trusted-LAN HTTP is unencrypted; codes and admin sessions can be intercepted."
+  fi
 else
   admin_origin="http://127.0.0.1:$port"
 fi
 echo "Open PBXSense Agent on this PC:"
 echo "$admin_origin/session#token=$bootstrap_token"
-if [ -z "$certificate" ] && [ -z "$public_url" ]; then
+if [ -z "$certificate" ] && [ -z "$public_url" ] && [ "$trusted_lan" != "true" ]; then
   echo "Because TLS is not configured, open this loopback setup link on the Agent host."
 fi
 echo "This setup credential is single-use and expires after 15 minutes."

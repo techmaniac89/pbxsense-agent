@@ -318,6 +318,29 @@ runtime behavior change was found in this integration pass.
 
 ## Architectural extraction status
 
+### Installer discovery and capability preflight (Agent 0.6.42-beta)
+
+`scripts/installer_paths.py` is a standalone standard-library discovery/selection
+helper. It queries PBX directories and configuration without modifying them,
+keeps existing native choices, and generates an installation-specific read-only
+Docker override only after explicit interactive selection. `check` runs under
+the native service/container account and reuses the production connector and
+CDR readers; credentials travel only over local stdin. The post-install report
+and optional `watch-cdr` test are separate from Agent runtime background loops.
+No polling/API/Relay/app contract changes are introduced. CLI/config discovery,
+permissions and live functional validation are distinct evidence stages.
+
+### Trusted-LAN browser administration (Agent 0.6.40-beta)
+
+The default browser setup transport policy is unchanged. A default-off
+`PBXSENSE_TRUSTED_LAN_HTTP` setting adds a narrowly scoped RFC1918/IPv6 ULA
+peer-address exception for HTTP setup. Bootstrap and generated access-code
+validation, expiry, single use, administrator cookies, same-origin mutations
+and individual app credentials are unchanged. Pages warn when the mode is
+enabled. Installers offer it explicitly; Compose's existing `env_file` passes
+the setting through. This is not a mobile-app/API transport relaxation, adds
+no Relay endpoint, and needs no companion app update.
+
 ### Persistent daily evidence (Agent 0.6.39-beta)
 
 `SignalCollector` owns `DailySummaryTracker` under the existing serialized

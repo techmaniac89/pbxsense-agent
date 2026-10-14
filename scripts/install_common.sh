@@ -251,17 +251,7 @@ configure_asterisk_env() {
   prompt_value ASTERISK_AMI_USERNAME "Asterisk AMI username" "$detected_user"
   prompt_secret ASTERISK_AMI_PASSWORD "Asterisk AMI password" "${ASTERISK_AMI_PASSWORD:-$detected_secret}"
 
-  cdr_path="$(first_existing_path \
-    /var/log/asterisk/cdr-csv/Master.csv \
-    /var/log/asterisk/cdr-custom/Master.csv \
-    /var/log/asterisk/cdr/Master.csv)"
-  voicemail_path="$(first_existing_path \
-    /var/spool/asterisk/voicemail \
-    /var/lib/asterisk/voicemail)"
-  prompt_value ASTERISK_CDR_CSV_PATH "Asterisk CDR CSV path" "$cdr_path"
-  prompt_value ASTERISK_VOICEMAIL_PATH "Asterisk voicemail path" "$voicemail_path"
-  recordings_path="$(first_existing_path /var/spool/asterisk/monitor /var/lib/asterisk/monitor)"
-  prompt_value ASTERISK_RECORDINGS_PATH "Asterisk recordings path" "$recordings_path"
+  configure_history_paths asterisk
 }
 
 configure_freeswitch_env() {
@@ -272,13 +262,15 @@ configure_freeswitch_env() {
   prompt_value FREESWITCH_ESL_HOST "FreeSWITCH ESL host" "${FREESWITCH_ESL_HOST:-127.0.0.1}"
   prompt_value FREESWITCH_ESL_PORT "FreeSWITCH ESL port" "${FREESWITCH_ESL_PORT:-8021}"
   prompt_secret FREESWITCH_ESL_PASSWORD "FreeSWITCH ESL password" "${FREESWITCH_ESL_PASSWORD:-$(detect_freeswitch_password || true)}"
-  cdr_path="$(first_existing_path \
-    /var/log/freeswitch/json_cdr \
-    /var/log/freeswitch/cdr-json \
-    /var/log/cdr-json)"
-  prompt_value FREESWITCH_CDR_JSON_PATH "FreeSWITCH JSON CDR folder (optional)" "${FREESWITCH_CDR_JSON_PATH:-$cdr_path}"
-  prompt_value FREESWITCH_VOICEMAIL_PATH "FreeSWITCH voicemail metadata folder (optional)" "${FREESWITCH_VOICEMAIL_PATH:-}"
-  prompt_value FREESWITCH_RECORDINGS_PATH "FreeSWITCH recordings folder (optional)" "${FREESWITCH_RECORDINGS_PATH:-}"
+  configure_history_paths freeswitch
+}
+
+configure_history_paths() {
+  path_mode="native"
+  [ "${PBXSENSE_CONFIGURE_ONLY:-false}" != "true" ] || path_mode="docker"
+  fresh=""
+  [ "$ENV_CREATED" -ne 1 ] || fresh="--fresh"
+  python3 "$SOURCE_DIR/scripts/installer_paths.py" select --env-file "$ENV_FILE" --pbx "$1" --mode "$path_mode" $fresh
 }
 
 print_admin_link() {
@@ -287,21 +279,27 @@ print_admin_link() {
   [ -n "$port" ] || port="8765"
   public_url="$(env_value PBXSENSE_AGENT_PUBLIC_URL)"
   certificate="$(env_value PBXSENSE_AGENT_TLS_CERTFILE)"
+  trusted_lan="$(env_value PBXSENSE_TRUSTED_LAN_HTTP)"
   if [ -n "$public_url" ]; then
     admin_origin="${public_url%/}"
-  elif [ -n "$certificate" ]; then
+  elif [ -n "$certificate" ] || [ "$trusted_lan" = "true" ]; then
     host="${PBXSENSE_ACCESS_HOST:-}"
     if [ -z "$host" ] && command -v hostname >/dev/null 2>&1; then
       host="$(hostname -I 2>/dev/null | awk '{print $1}')"
     fi
     [ -n "$host" ] || host="$(hostname 2>/dev/null || printf '%s' '127.0.0.1')"
-    admin_origin="https://$host:$port"
+    if [ -n "$certificate" ]; then
+      admin_origin="https://$host:$port"
+    else
+      admin_origin="http://$host:$port"
+      echo "WARNING: trusted-LAN HTTP is unencrypted; codes and admin sessions can be intercepted."
+    fi
   else
     admin_origin="http://127.0.0.1:$port"
   fi
   echo "Open PBXSense Agent on this PC:"
   echo "$admin_origin/session#token=$bootstrap_token"
-  if [ -z "$certificate" ] && [ -z "$public_url" ]; then
+  if [ -z "$certificate" ] && [ -z "$public_url" ] && [ "$trusted_lan" != "true" ]; then
     echo "Because TLS is not configured, open this loopback setup link on the Agent host."
   fi
   echo "This setup credential is single-use and expires after 15 minutes."
@@ -376,6 +374,9 @@ configure_agent_env() {
   prompt_value PBXSENSE_CONNECT_TIMEOUT "Connector timeout seconds" "${PBXSENSE_CONNECT_TIMEOUT:-3}"
   prompt_value PBXSENSE_AGENT_PORT "Agent HTTP port" "$AGENT_PORT"
   AGENT_PORT="$(env_value PBXSENSE_AGENT_PORT)"
+  echo "Optional trusted-LAN HTTP avoids certificates/tunnels, but codes and admin sessions are unencrypted."
+  echo "Never expose it publicly. Leave disabled unless you accept this private-network risk."
+  prompt_value PBXSENSE_TRUSTED_LAN_HTTP "Allow trusted-LAN HTTP administrator access (true/false)" "${PBXSENSE_TRUSTED_LAN_HTTP:-false}"
 
   case "$pbx_type" in
     grandstream) configure_grandstream_env ;;
@@ -554,4 +555,10 @@ fi
 echo "PBXSense Agent installed."
 echo "Environment: $ENV_FILE"
 echo "Service: sudo systemctl status $SERVICE_NAME"
+case "$(env_value PBXSENSE_PBX_TYPE)" in
+  asterisk|freeswitch)
+    "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/installer_paths.py" report --env-file "$ENV_FILE" --service-user "$SERVICE_USER" || true
+    echo "To watch a completed test call: sudo $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/scripts/installer_paths.py watch-cdr --env-file $ENV_FILE --service-user $SERVICE_USER"
+    ;;
+esac
 print_admin_link

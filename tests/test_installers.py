@@ -75,8 +75,17 @@ class InstallerStructureTest(unittest.TestCase):
             common,
         )
 
+    def test_trusted_lan_opt_in_is_off_and_installers_print_lan_guidance(self):
+        example = Path('.env.example').read_text(encoding='utf-8')
+        self.assertIn('PBXSENSE_TRUSTED_LAN_HTTP=false', example)
+        for file in ('scripts/install_common.sh', 'scripts/setup_docker.sh'):
+            source = Path(file).read_text(encoding='utf-8')
+            self.assertIn('PBXSENSE_TRUSTED_LAN_HTTP', source)
+            self.assertIn('http://$host:$port', source)
+            self.assertIn('codes and admin sessions can be intercepted', source)
+
     def test_freeswitch_setup_detects_common_json_cdr_directories(self) -> None:
-        common = Path("scripts/install_common.sh").read_text(encoding="utf-8")
+        common = Path("scripts/installer_paths.py").read_text(encoding="utf-8")
 
         self.assertIn("/var/log/freeswitch/json_cdr", common)
         self.assertIn("/var/log/freeswitch/cdr-json", common)
