@@ -195,6 +195,11 @@ class Discovery:
 
 def select_path(label, candidates, current, *, interactive, ask=input):
     print('\n' + label)
+    print('  Detected locations are suggestions; runtime access and content are checked after installation.')
+    if label == LABELS[0]:
+        print('  Optional: skipping disables completed-call history, not live monitoring.')
+    else:
+        print('  Optional: skipping disables this file-based feature, not the PBX connection.')
     for index, candidate in enumerate(candidates, 1):
         print(f"  {index}. {candidate['path']} ({candidate['origin']})")
     if current:
@@ -202,7 +207,8 @@ def select_path(label, candidates, current, *, interactive, ask=input):
     if not interactive:
         return current or (candidates[0]['path'] if candidates else '')
     print('  m. Advanced: enter a path manually    s. Skip/disable this optional feature')
-    answer = ask('Choose a number, m or s [keep existing / first detected / skip]: ').strip()
+    default = ('keep ' + current) if current else ('use ' + candidates[0]['path'] if candidates else 'skip; no location detected')
+    answer = ask(f'Choose a number, m or s [Enter: {default}]: ').strip().lower()
     if answer == 's':
         return ''
     if answer == 'm':
@@ -294,7 +300,11 @@ def sandbox_blocked(path):
 def report(values, *, user='', docker=False):
     result = child(values, user)
     print('\nAgent capability check (' + ('container runtime account' if docker else 'service account ' + (user or 'current user')) + ')')
-    print('  Live monitoring: ' + result.get('live', 'not verified'))
+    live = result.get('live', 'not verified')
+    attention = not live.startswith('ready')
+    print('  Live monitoring: ' + ('Ready — ' if not attention else 'Needs attention — ') + live)
+    if attention:
+        print('    Next: check the PBX host/port, connector credentials and monitoring permissions in Agent diagnostics. Do not use your Linux login or browser setup code as PBX credentials.')
     pbx = values.get('PBXSENSE_PBX_TYPE', '')
     for index, key in enumerate(KEYS.get(pbx, ())):
         row = result.get('paths', [{}, {}, {}])[index]
@@ -304,7 +314,22 @@ def report(values, *, user='', docker=False):
         text = row.get('state', 'not verified under runtime account')
         if index == 0 and text == 'readable':
             text += ': parsed completed records found' if row.get('records') else ': no parseable completed records yet; logging/format still needs a test call'
-        print('  ' + LABELS[index] + ': ' + text)
+        grade = 'Not enabled' if text == 'not configured' else ('Ready' if text == 'readable' or row.get('records', 0) > 0 else 'Needs attention')
+        if index == 0 and text.startswith('readable') and not row.get('records'):
+            grade = 'Needs confirmation'
+        attention = attention or grade in ('Needs attention','Needs confirmation')
+        print('  ' + LABELS[index] + ': ' + grade + ' — ' + text)
+        if grade == 'Not enabled':
+            print('    You can enable this optional source later; live monitoring can still work.')
+        elif row.get('state') == 'permission denied':
+            print('    Next: grant only the required read access to the Agent account/group. Do not make PBX files world-readable.')
+        elif row.get('state') == 'missing':
+            print('    Next: choose an existing PBX source; for Docker, check the host mount and container-visible path separately.')
+        elif grade == 'Needs confirmation':
+            print('    Next: run the completed-call check. Confirm CDR logging is enabled and uses a supported format.')
+        elif grade == 'Needs attention':
+            print('    Next: inspect the selected path and Agent diagnostics; sandbox restrictions may require a different source location.')
+    print('  Summary: ' + ('Needs attention / functional confirmation' if attention else 'Ready for functional checks; optional disabled sources are not errors'))
     print('  No PBX files, modules, ownership or permissions were changed.')
     print('  Next: answer and end a test call, then verify it in Agent diagnostics and the app Calls screen.')
     return result

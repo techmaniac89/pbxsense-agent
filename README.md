@@ -5,7 +5,12 @@ It runs near the PBX, observes PBX state through the safest available connector,
 and exposes a small PBXSense-shaped API that the app can consume without knowing
 PBX-specific protocols.
 
-The current Agent release is `0.6.42-beta` on the **Breeze** channel.
+The current Agent release is `0.6.43-beta` on the **Breeze** channel.
+
+Manual setup is now organized into four stages, explains credential types and
+exact default choices, and ends with capability labels and actionable guidance.
+Printed recheck commands let you verify corrections without reinstalling. No
+new automation or PBX configuration changes are introduced by this UX update.
 
 Installer update: Asterisk/FreeSWITCH paths are discovered from running PBX
 directories and local configuration, with numbered choices, advanced manual
@@ -138,11 +143,11 @@ configured.
 Download and verify the current server installer from GitHub Releases:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.42-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.43-beta-linux-source-installer
 ```
 
 Then run the installer for the server's Linux family:
@@ -811,7 +816,7 @@ Recommended release asset layout:
 
 ```text
 dist/
-  PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
+  PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
 ```
 
 Every push to `main` runs `.github/workflows/release-agent.yml`. The workflow
@@ -825,7 +830,7 @@ uninstall script. It installs under `/opt/pbxsense-agent`, creates the systemd
 service, writes `/etc/pbxsense-agent.env`, and creates the Python virtual
 environment on the target machine.
 
-The workflow creates a tag such as `agent-v0.6.42-beta` from the pushed commit
+The workflow creates a tag such as `agent-v0.6.43-beta` from the pushed commit
 and generates the initial release notes. A published version is immutable: if
 the tag/release already exists, tests and packaging still run but publishing is
 skipped successfully. Bump `pbxsense_agent/version.py` when a new release is

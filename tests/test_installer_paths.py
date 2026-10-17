@@ -125,6 +125,30 @@ class InstallerPathsTest(unittest.TestCase):
         with patch.object(paths.shutil, 'which', return_value=None):
             self.assertEqual(paths.child({}, 'pbxsense'), {})
 
+    def test_path_prompt_explains_exact_default_and_optional_effect(self):
+        prompts = []
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            value = paths.select_path(paths.LABELS[0], [], '/existing', interactive=True,
+                                      ask=lambda prompt: prompts.append(prompt) or '')
+        self.assertEqual(value, '/existing')
+        self.assertIn('Enter: keep /existing', prompts[0])
+        self.assertIn('not live monitoring', output.getvalue())
+
+    def test_report_provides_status_labels_and_permission_next_step(self):
+        output = io.StringIO()
+        result = {'live':'ready (successful live snapshot)', 'paths':[
+            {'state':'readable','records':0}, {'state':'permission denied','records':0},
+            {'state':'not configured','records':0}]}
+        with patch.object(paths, 'child', return_value=result), patch('sys.stdout', output):
+            paths.report({'PBXSENSE_PBX_TYPE':'asterisk'}, docker=True)
+        text = output.getvalue()
+        self.assertIn('Live monitoring: Ready', text)
+        self.assertIn('Completed calls (CDR): Needs confirmation', text)
+        self.assertIn('Voicemail: Needs attention', text)
+        self.assertIn('Recordings: Not enabled', text)
+        self.assertIn('Do not make PBX files world-readable', text)
+
     def test_standalone_child_reuses_actual_cdr_reader(self):
         with TemporaryDirectory() as directory:
             file = Path(directory)/'Master.csv'

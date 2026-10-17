@@ -199,7 +199,7 @@ consumers can verify provenance with:
 
 ```bash
 gh attestation verify \
-  PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz \
+  PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz \
   --repo techmaniac89/pbxsense-agent
 ```
 

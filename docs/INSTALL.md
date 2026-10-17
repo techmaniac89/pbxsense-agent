@@ -76,11 +76,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.42-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.42-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.43-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -344,6 +344,18 @@ loaded, it also reads queue names and waiting counts through
 connector unhealthy; queue data is simply omitted.
 
 ## Asterisk/FreeSWITCH discovery and verification (Agent 0.6.42-beta)
+
+Agent 0.6.43-beta improves the manual workflow without adding automation:
+four named setup stages, explicit Enter/keep guidance, PBX-account versus
+Linux/browser-credential explanations, and exact path-selection defaults.
+Optional sources explain which feature is disabled when skipped. The final
+report labels capabilities **Ready**, **Not enabled**, **Needs confirmation**
+or **Needs attention**, with suggested actions. Ready live connectivity or
+folder access is not proof of call delivery or complete history. Both native
+and Docker installers print a capability recheck command so you can fix an item
+and validate it without repeating installation. Existing settings remain
+preserved by default; setup is not transactional, so answers already saved
+before Ctrl+C may remain. No PBX configuration/permissions are changed.
 
 For a new native installation, the installer asks for connection details first,
 then offers numbered choices for completed calls, voicemail and recordings.

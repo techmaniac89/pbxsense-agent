@@ -106,9 +106,13 @@ prompt_secret() {
       printf "%s: " "$label"
     fi
     if command -v stty >/dev/null 2>&1; then
+      trap 'stty echo 2>/dev/null || true' 0
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
       stty -echo
       read -r answer
       stty echo
+      trap - 0 INT TERM
       printf "\n"
     else
       read -r answer
@@ -238,6 +242,7 @@ choose_pbx_type() {
 
 configure_asterisk_env() {
   echo "Configuring Asterisk AMI settings in $ENV_FILE"
+  echo "Use a PBX AMI monitoring account, not your Linux login or Agent browser code."
   set_env_value PBXSENSE_PBX_TYPE "asterisk"
   set_env_value PBXSENSE_AGENT_MODE "ami"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Asterisk"
@@ -256,6 +261,7 @@ configure_asterisk_env() {
 
 configure_freeswitch_env() {
   echo "Configuring FreeSWITCH Event Socket settings in $ENV_FILE"
+  echo "Use the PBX Event Socket password, not your Linux login or Agent browser code."
   set_env_value PBXSENSE_PBX_TYPE "freeswitch"
   set_env_value PBXSENSE_AGENT_MODE "freeswitch"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "FreeSWITCH"
@@ -369,7 +375,17 @@ configure_mock_env() {
 }
 
 configure_agent_env() {
+  echo ""
+  echo "PBXSense setup: Enter keeps the displayed value. Passwords are hidden."
+  echo "Existing settings are kept unless you explicitly replace them. Ctrl+C stops setup; saved answers may remain."
+  echo "[1/4] Choose your phone system"
   pbx_type="$(choose_pbx_type)"
+  case "$pbx_type" in
+    asterisk|freeswitch|yeastar|grandstream|cucm|mock) ;;
+    *) echo "Unrecognized PBX type. Rerun setup and choose asterisk, freeswitch, yeastar, grandstream, cucm or mock." >&2; exit 1 ;;
+  esac
+  echo "[2/4] Agent location and browser access"
+  echo "Timezone controls dates in calls and signals. Keep the default port/timeout unless your site needs another value."
   prompt_value PBXSENSE_TIMEZONE "Agent timezone" "$(detect_timezone)"
   prompt_value PBXSENSE_CONNECT_TIMEOUT "Connector timeout seconds" "${PBXSENSE_CONNECT_TIMEOUT:-3}"
   prompt_value PBXSENSE_AGENT_PORT "Agent HTTP port" "$AGENT_PORT"
@@ -377,6 +393,9 @@ configure_agent_env() {
   echo "Optional trusted-LAN HTTP avoids certificates/tunnels, but codes and admin sessions are unencrypted."
   echo "Never expose it publicly. Leave disabled unless you accept this private-network risk."
   prompt_value PBXSENSE_TRUSTED_LAN_HTTP "Allow trusted-LAN HTTP administrator access (true/false)" "${PBXSENSE_TRUSTED_LAN_HTTP:-false}"
+  echo "[3/4] PBX connection and optional history sources"
+  echo "Use PBX monitoring/API credentials here, not your Linux login or browser setup code."
+  echo "PBX host means the phone-system server. Use 127.0.0.1 only when this Agent can reach the PBX locally."
 
   case "$pbx_type" in
     grandstream) configure_grandstream_env ;;
@@ -553,12 +572,16 @@ EOF
 fi
 
 echo "PBXSense Agent installed."
+echo "[4/4] Check the installation and authorize your browser"
 echo "Environment: $ENV_FILE"
 echo "Service: sudo systemctl status $SERVICE_NAME"
 case "$(env_value PBXSENSE_PBX_TYPE)" in
   asterisk|freeswitch)
     "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/installer_paths.py" report --env-file "$ENV_FILE" --service-user "$SERVICE_USER" || true
+    echo "Recheck without reinstalling: sudo $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/scripts/installer_paths.py report --env-file $ENV_FILE --service-user $SERVICE_USER"
     echo "To watch a completed test call: sudo $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/scripts/installer_paths.py watch-cdr --env-file $ENV_FILE --service-user $SERVICE_USER"
     ;;
 esac
 print_admin_link
+echo "Open the single-use setup link above within 15 minutes. Pair the mobile app from the Agent page."
+echo "If a capability needs attention, fix that item and rerun the printed check; a successful install alone does not verify calls or history."

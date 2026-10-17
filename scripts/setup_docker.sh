@@ -52,6 +52,8 @@ case "$pbx_type" in
 esac
 
 start_agent="yes"
+echo "[4/4] Start and check the Agent"
+echo "Starting builds the Agent image and uses the read-only PBX mounts selected above."
 if [ -t 0 ]; then
   printf "Build and start PBXSense Agent now? [Y/n]: "
   read -r answer
@@ -69,6 +71,7 @@ if [ "$start_agent" = "yes" ]; then
   case "$pbx_type" in
     asterisk|freeswitch)
       docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker || true
+      echo "Recheck without reinstalling: docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker"
       echo "For a completed-call check, run: docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py watch-cdr --mode docker"
       ;;
   esac
@@ -105,4 +108,6 @@ if [ -z "$certificate" ] && [ -z "$public_url" ] && [ "$trusted_lan" != "true" ]
   echo "Because TLS is not configured, open this loopback setup link on the Agent host."
 fi
 echo "This setup credential is single-use and expires after 15 minutes."
+echo "Open the setup link above to authorize this browser, then pair the mobile app from the Agent page."
+echo "If you chose not to start now, the link may expire before startup; generate a fresh setup credential before recreating the container."
 echo "The browser remains authorized until its site data is cleared or the Agent token changes."
