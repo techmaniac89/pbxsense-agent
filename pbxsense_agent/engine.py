@@ -796,7 +796,7 @@ def _trunk_display_for_call(call: CdrCall, endpoints: list[Any], extension_names
 
 
 def _trunk_name_for_context(context: str, endpoints: list[Any], extension_names: dict[str, str]) -> str | None:
-    """Resolve dialplan contexts like from-Cosmote without calling them departments."""
+    """Resolve dialplan contexts like from-Telekom without calling them departments."""
     normalized = re.sub(r"[^a-z0-9]", "", context.lower())
     if not normalized.startswith("from"):
         return None

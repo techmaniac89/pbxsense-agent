@@ -33,14 +33,15 @@ class BrowserAccessTest(unittest.TestCase):
             self.assertIn('<div class="page-content"><div class="status attention" role="note" style="margin:0 0 8px">', page)
             self.assertIn('publicly.</div><section class="hero-card">', page)
         source = Path(main.__file__).read_text(encoding='utf-8')
-        self.assertIn('<a class="button" href="/browser-access">Authorize another browser</a>', source)
+        self.assertIn('<a class="button" href="/browser-access">Authorize a browser</a>', source)
 
     def test_authorize_button_shares_home_navigation_row(self):
         navigation = main._agent_navigation_html(request(), current='home', primary='pair')
         self.assertEqual(navigation.count('<div class="actions">'), 1)
-        self.assertIn('href="/browser-access">Authorize another browser</a>', navigation)
+        self.assertIn('href="/browser-access">Authorize a browser</a>', navigation)
         self.assertIn('href="/pair"', navigation)
         self.assertIn('href="/diagnostics"', navigation)
+        self.assertLess(navigation.index('href="/browser-access"'), navigation.index('href="/diagnostics"'))
         self.assertNotIn('/browser-access', main._agent_navigation_html(request(), current='apps', primary='pair'))
 
     def test_trusted_lan_allows_only_explicit_private_peer_ranges(self):

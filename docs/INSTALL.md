@@ -35,7 +35,7 @@ using `env_file`, include the new variable there too.
 Within 15 minutes, open `http://<Agent-LAN-IP>:8765/session` and enter the new
 `PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` value, not `PBXSENSE_AGENT_TOKEN`. Use your
 configured port if different. Codes remain single-use. An already-authorized
-browser can instead create a code through **Authorize another browser**.
+browser can instead create a code through **Authorize a browser**.
 
 Only RFC1918 IPv4 and IPv6 ULA peer addresses qualify for the HTTP opt-in;
 public, link-local and reserved/documentation addresses remain blocked. The page
@@ -76,11 +76,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.47-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.51-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.47-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.47-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.51-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.51-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where

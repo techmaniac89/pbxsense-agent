@@ -327,7 +327,7 @@ class EndpointAvailabilitySignalTracker:
         with self._lock:
             # A configuration-confirmed role change is not a missing phone.
             changed_roles = {e.extension for e in snapshot.endpoints
-                             if e.role in {"extension", "trunk"} and e.role != self._role}
+                             if e.role in {"extension", "trunk", "ignore"} and e.role != self._role}
             for extension in changed_roles:
                 self._states.pop(extension, None)
             if self._role == "trunk":
@@ -1581,7 +1581,7 @@ def _is_active_channel(channel: PbxChannel) -> bool:
 
 
 def _endpoint_unavailable(endpoint: PbxEndpoint) -> bool:
-    if endpoint.role == "unknown":
+    if endpoint.role not in {"extension", "trunk"}:
         return False
     if endpoint.role == "trunk":
         return _trunk_health_state(endpoint) == "down"

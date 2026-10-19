@@ -21,6 +21,7 @@ from .connectors import connector_for_settings
 from .collected_state import CollectedHomeState
 from .daily_summary import DailySummaryTracker
 from .credentials import AppCredentials
+from .endpoint_roles import role_store
 from .browser_access import BrowserAccessGrants
 from .history_collection import (
     HistoryCollector, file_signature as _file_signature,
@@ -417,6 +418,9 @@ def index(request: Request):
             </div>
             {_agent_navigation_html(request, current="home", primary="pair")}
             {diagnostic_html}
+            <section class="panel"><div class="section-heading">Endpoint roles</div>
+              <p>Choose Phone or Trunk for endpoints the PBX cannot classify.</p>
+              <a class="button" href="/endpoints">Manage endpoint roles</a></section>
             {_agent_footer_html()}
           </section>
         """,
@@ -445,7 +449,7 @@ def _browser_access_page(request: Request) -> str:
         <h1>Authorize this browser</h1>
         <p class="subtitle">This PC does not have administrator access yet.</p>
         <p>On an already-authorized PC, open the Agent home page and choose
-        <strong>Authorize another browser</strong>. Share its single-use code with this PC.
+        <strong>Authorize a browser</strong>. Share its single-use code with this PC.
         Codes expire after 15 minutes and stop working after use or an Agent restart.</p>
         {instruction}
         <p>If no browser is authorized, the server administrator can rerun the installer
@@ -473,8 +477,8 @@ def _browser_access_page(request: Request) -> str:
 @app.get("/browser-access", response_class=HTMLResponse, include_in_schema=False)
 def browser_access(request: Request):
     _require_token(request)
-    return HTMLResponse(_page(title="Authorize another browser", body="""
-      <section class="hero-card"><h1>Authorize another browser</h1>
+    return HTMLResponse(_page(title="Authorize a browser", body="""
+      <section class="hero-card"><h1>Authorize a browser</h1>
       <style>button {padding:12px 18px;border:0;border-radius:10px;background:#b8c48d;color:#151310;font:inherit;cursor:pointer;}
       #access-code {overflow-wrap:anywhere;user-select:all;}</style>
       <p>Only share this code with someone who should have full administrator access.
@@ -1357,8 +1361,58 @@ def _refresh_home_state(*, only_if_missing: bool = False) -> CollectedHomeState:
     return _snapshot_runtime.refresh(only_if_missing=only_if_missing)
 
 
+def _endpoint_role_store():
+    return role_store(str(Path(settings.relay_identity_path).with_name("endpoint_roles.json")))
+
+
+def _endpoint_role_scope() -> str:
+    return hashlib.sha256(json.dumps([settings.pbx_type, _pbx_host(), _pbx_port()], separators=(",", ":")).encode()).hexdigest()
+
+
+@app.get("/endpoints", response_class=HTMLResponse)
+def endpoint_roles_page(request: Request):
+    _require_token(request)
+    state = _refresh_home_state(only_if_missing=True)
+    choices = _endpoint_role_store().choices(_endpoint_role_scope())
+    unknown = {e.extension for e in state.snapshot.endpoints if e.role == "unknown"}
+    names = sorted(unknown | set(choices))
+    rows = []
+    for name in names:
+        controls = "".join(
+            f'<form method="post" action="/endpoints/role?{escape(urlencode({"endpoint": name, "role": role, "csrf": _local_web_csrf_value()}), quote=True)}" style="display:inline">'
+            f'<button class="button" type="submit">{label}</button></form>'
+            for role, label in (("extension", "Phone"), ("trunk", "Trunk"), ("auto", "Automatic"))
+        )
+        label = {"extension": "Phone", "trunk": "Trunk"}.get(choices.get(name), "Unclassified")
+        rows.append(f'<section class="panel"><h3>{escape(name)}</h3><p>{label}</p><div class="actions">{controls}</div></section>')
+    content = "".join(rows) or '<p>No unclassified endpoints or saved role choices.</p>'
+    return _page(title="Endpoint roles", body=f'<section class="hero-card">{_brand_html()}<h2>Endpoint roles</h2>'
+        f'<p>Unclassified endpoints are not shown as phones and do not generate phone alerts. Choices apply to this configured PBX. Automatic removes your choice.</p>'
+        f'<div class="actions"><a class="button" href="/">Home</a></div>{content}{_agent_footer_html()}</section>')
+
+
+@app.post("/endpoints/role")
+def set_endpoint_role(request: Request):
+    if not _has_valid_local_web_cookie(request):
+        raise HTTPException(status_code=403, detail="Administrator browser session required")
+    _require_safe_cookie_mutation(request)
+    endpoint = request.query_params.get("endpoint", "")
+    role = request.query_params.get("role", "")
+    store = _endpoint_role_store()
+    state = _refresh_home_state(only_if_missing=True)
+    known = {e.extension for e in state.snapshot.endpoints} | set(store.choices(_endpoint_role_scope()))
+    if endpoint not in known:
+        raise HTTPException(status_code=400, detail="Endpoint is not in the current inventory")
+    try:
+        store.set(_endpoint_role_scope(), endpoint, role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse("/endpoints", status_code=303)
+
+
 def _collect_home_state() -> CollectedHomeState:
-    snapshot = _history_collector.enrich(connector.snapshot(), settings)
+    snapshot = _endpoint_role_store().apply(connector.snapshot(), _endpoint_role_scope())
+    snapshot = _history_collector.enrich(snapshot, settings)
     return _signal_collector.collect(snapshot, _now(settings.timezone))
 
 
@@ -1614,7 +1668,6 @@ def _agent_navigation_html(
         ("pair", "Pair app", "/pair"),
         ("apps", "Paired apps", "/apps"),
         ("home", "Agent status", "/"),
-        ("diagnostics", "Diagnostics", "/diagnostics"),
     )
     rendered = "".join(
         f'<a class="button{" primary" if is_primary else ""}" '
@@ -1628,7 +1681,12 @@ def _agent_navigation_html(
         if key != current and key not in excluded
     )
     if current == "home":
-        rendered += '<a class="button" href="/browser-access">Authorize another browser</a>'
+        rendered += '<a class="button" href="/browser-access">Authorize a browser</a>'
+    if current != "diagnostics" and "diagnostics" not in excluded:
+        rendered += (
+            f'<a class="button{" primary" if primary == "diagnostics" else ""}" '
+            f'href="/diagnostics">{labels.get("diagnostics", "Diagnostics")}</a>'
+        )
     return f'<div class="actions">{rendered}</div>'
 
 

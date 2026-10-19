@@ -853,16 +853,16 @@ external::backup gateway sip:user@backup.test NOREG
             [AmiEvent(
                 name="OutboundRegistrationDetail",
                 fields={
-                    "ObjectName": "Cosmote",
+                    "ObjectName": "Telekom",
                     "ServerUri": "sip:ims.otenet.gr",
                     "Status": "Registered",
                 },
             )],
-            explicit_trunks=frozenset({"Cosmote"}),
+            explicit_trunks=frozenset({"Telekom"}),
         )
 
         self.assertEqual(len(endpoints), 1)
-        self.assertEqual(endpoints[0].extension, "Cosmote")
+        self.assertEqual(endpoints[0].extension, "Telekom")
         self.assertEqual(endpoints[0].role, "trunk")
         self.assertEqual(endpoints[0].device_state, "Registered")
         self.assertEqual(endpoints[0].health_confidence, "high")
@@ -873,14 +873,14 @@ external::backup gateway sip:user@backup.test NOREG
             [
                 AmiEvent(
                     name="EndpointList",
-                    fields={"ObjectName": "cosmote", "DeviceState": "Unknown"},
+                    fields={"ObjectName": "telekom", "DeviceState": "Unknown"},
                 ),
                 AmiEvent(
                     name="OutboundRegistrationDetail",
-                    fields={"ObjectName": "Cosmote", "Status": "Rejected"},
+                    fields={"ObjectName": "Telekom", "Status": "Rejected"},
                 ),
             ],
-            explicit_trunks=frozenset({"Cosmote"}),
+            explicit_trunks=frozenset({"Telekom"}),
         )
 
         self.assertEqual(len(endpoints), 1)
@@ -891,9 +891,9 @@ external::backup gateway sip:user@backup.test NOREG
         endpoints = _endpoints_from_events(
             [AmiEvent(
                 name="OutboundRegistrationDetail",
-                fields={"ObjectName": "Cosmote", "Status": "Trying"},
+                fields={"ObjectName": "Telekom", "Status": "Trying"},
             )],
-            explicit_trunks=frozenset({"cosmote"}),
+            explicit_trunks=frozenset({"telekom"}),
         )
 
         self.assertEqual(endpoints[0].device_state, "Trying")
@@ -914,9 +914,9 @@ external::backup gateway sip:user@backup.test NOREG
                 AmiEvent(
                     name="PeerEntry",
                     fields={
-                        "ObjectName": "cosmote",
+                        "ObjectName": "telekom",
                         "Status": "Unreachable",
-                        "Description": "Cosmote SIP trunk",
+                        "Description": "Telekom SIP trunk",
                         "Context": "from-trunk",
                     },
                 ),
@@ -1044,8 +1044,8 @@ external::backup gateway sip:user@backup.test NOREG
             ],
             "trunks": [
                 {
-                    "endpoint": "cosmote",
-                    "name": "Cosmote",
+                    "endpoint": "telekom",
+                    "name": "Telekom",
                     "statusText": "Available",
                 }
             ],
@@ -1078,8 +1078,8 @@ external::backup gateway sip:user@backup.test NOREG
             ],
             "trunks": [
                 {
-                    "endpoint": "cosmote",
-                    "name": "Cosmote",
+                    "endpoint": "telekom",
+                    "name": "Telekom",
                     "statusText": "Carrying a call",
                 }
             ],
@@ -1634,9 +1634,9 @@ external::backup gateway sip:user@backup.test NOREG
                 agent_version="test",
                 endpoints=[
                     AmiEndpoint(
-                        extension="cosmote",
+                        extension="telekom",
                         device_state="Registered",
-                        label="Cosmote",
+                        label="Telekom",
                         role="trunk",
                         connection_type="PRI",
                     ),
@@ -1660,22 +1660,22 @@ external::backup gateway sip:user@backup.test NOREG
                 agent_version="test",
                 channels=[
                     AmiChannel(
-                        channel="PJSIP/cosmote-00000044",
+                        channel="PJSIP/telekom-00000044",
                         extension="2105550000",
                         caller="2101234567",
                         connected="",
                         state="Up",
-                        endpoint="cosmote",
+                        endpoint="telekom",
                         caller_number="102",
                         connected_number="2105550000",
                     )
                 ],
                 endpoints=[
                     AmiEndpoint(
-                        extension="cosmote",
+                        extension="telekom",
                         device_state="Registered",
                         active_channels=1,
-                        label="Cosmote",
+                        label="Telekom",
                         role="trunk",
                     ),
                 ],
@@ -1700,21 +1700,21 @@ external::backup gateway sip:user@backup.test NOREG
                 agent_version="test",
                 channels=[
                     AmiChannel(
-                        channel="PJSIP/cosmote-00000045",
+                        channel="PJSIP/telekom-00000045",
                         extension="s",
                         caller="2101234567",
                         connected="",
                         state="Up",
-                        endpoint="cosmote",
+                        endpoint="telekom",
                         caller_number="2101234567",
                     )
                 ],
                 endpoints=[
                     AmiEndpoint(
-                        extension="cosmote",
+                        extension="telekom",
                         device_state="Registered",
                         active_channels=1,
-                        label="Cosmote",
+                        label="Telekom",
                         role="trunk",
                         number="2105550000",
                     ),
@@ -1770,8 +1770,8 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(len(payload["people"]), 1)
         self.assertEqual(payload["people"][0]["name"], "Linphone")
 
-    def test_cosmote_endpoint_is_classified_as_trunk(self) -> None:
-        self.assertEqual(_endpoint_role("cosmote", {}), "unknown")
+    def test_telekom_endpoint_is_classified_as_trunk(self) -> None:
+        self.assertEqual(_endpoint_role("telekom", {}), "unknown")
         self.assertEqual(
             _endpoint_role("main-line", {"Context": "from-trunk"}),
             "trunk",
@@ -2129,36 +2129,36 @@ external::backup gateway sip:user@backup.test NOREG
         calls = [CdrCall(
             source=str(2100000000 + index), destination="100", disposition="NO ANSWER",
             started_at=(now - timedelta(minutes=index)).replace(tzinfo=None),
-            duration_seconds=10, context="from-Cosmote",
+            duration_seconds=10, context="from-Telekom",
         ) for index in range(6)]
         payload = build_home_payload(
             AmiSnapshot(reachable=True, agent_version="test", recent_calls=calls,
-                endpoints=[AmiEndpoint(extension="cosmote", device_state="Reachable",
-                    label="Cosmote SIP trunk", role="trunk")]),
+                endpoints=[AmiEndpoint(extension="telekom", device_state="Reachable",
+                    label="Telekom SIP trunk", role="trunk")]),
             display_name="Office PBX", extension_names={}, now=now,
         )
         self.assertNotIn("department_missed_call_load", [s["kind"] for s in payload["signals"]])
         self.assertNotIn("trunk_missed_call_load", [s["kind"] for s in payload["signals"]])
-        self.assertNotIn("from-Cosmote carries most", " ".join(s["title"] for s in payload["signals"]))
+        self.assertNotIn("from-Telekom carries most", " ".join(s["title"] for s in payload["signals"]))
 
     def test_trunk_missed_load_uses_name_and_requires_multiple_trunks(self) -> None:
         now = datetime(2026, 6, 26, 12, tzinfo=ZoneInfo("Europe/Athens"))
         calls = [CdrCall(
             source=str(2100000000 + index), destination="100", disposition="NO ANSWER",
             started_at=(now - timedelta(minutes=index)).replace(tzinfo=None),
-            duration_seconds=10, context="from-Cosmote" if index < 5 else "from-Backup",
+            duration_seconds=10, context="from-Telekom" if index < 5 else "from-Backup",
         ) for index in range(6)]
         payload = build_home_payload(
             AmiSnapshot(reachable=True, agent_version="test", recent_calls=calls,
                 endpoints=[
-                    AmiEndpoint(extension="cosmote", device_state="Reachable", label="Cosmote SIP trunk", role="trunk"),
+                    AmiEndpoint(extension="telekom", device_state="Reachable", label="Telekom SIP trunk", role="trunk"),
                     AmiEndpoint(extension="backup", device_state="Reachable", label="Backup SIP trunk", role="trunk"),
                 ]),
             display_name="Office PBX", extension_names={}, now=now,
         )
         signal = next(s for s in payload["signals"] if s["kind"] == "trunk_missed_call_load")
-        self.assertEqual(signal["title"], "Cosmote carries most of the visible missed-call load.")
-        self.assertEqual(signal["technical"]["trunk"], "Cosmote")
+        self.assertEqual(signal["title"], "Telekom carries most of the visible missed-call load.")
+        self.assertEqual(signal["technical"]["trunk"], "Telekom")
 
     def test_activity_tracker_emits_real_pbx_transitions(self) -> None:
         now = datetime(2026, 6, 26, 20, tzinfo=ZoneInfo("Europe/Athens"))
@@ -2449,7 +2449,7 @@ external::backup gateway sip:user@backup.test NOREG
             disposition="ANSWERED",
             started_at=datetime(2026, 6, 26, 19, 55),
             duration_seconds=20,
-            channel="PJSIP/cosmote-00000001",
+            channel="PJSIP/telekom-00000001",
         )
 
         payload = build_home_payload(
@@ -2458,9 +2458,9 @@ external::backup gateway sip:user@backup.test NOREG
                 agent_version="test",
                 endpoints=[
                     AmiEndpoint(
-                        extension="cosmote",
+                        extension="telekom",
                         device_state="Registered",
-                        label="Cosmote",
+                        label="Telekom",
                         role="trunk",
                         number="2105550000",
                     )

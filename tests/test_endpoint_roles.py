@@ -9,7 +9,7 @@ from pbxsense_agent.pulse import build_home_payload, _endpoint_unavailable
 
 class EndpointRoleTest(unittest.TestCase):
     def test_names_and_descriptions_never_establish_a_role(self):
-        for name in ('101', 'openai-live', 'fusionpbx', 'Cosmote', 'my-trunk'):
+        for name in ('101', 'openai-live', 'fusionpbx', 'Telekom', 'my-trunk'):
             self.assertEqual(_endpoint_role(name, {'Description': 'SIP trunk provider'}), 'unknown')
             self.assertEqual(_endpoint_role(name, {'MaxContacts': '1'}), 'extension')
             self.assertEqual(_endpoint_role(name, {'MaxContacts': '0', 'HasIdentify': 'yes'}), 'unknown')
@@ -42,7 +42,7 @@ class EndpointRoleTest(unittest.TestCase):
 
     def test_rejected_configuration_does_not_fall_back_to_names(self):
         client = AmiClient(AgentSettings.from_env())
-        events = [AmiEvent('EndpointList', {'ObjectName': 'Cosmote'})]
+        events = [AmiEvent('EndpointList', {'ObjectName': 'Telekom'})]
         with patch.object(client, '_collect_action_events', side_effect=AmiActionResponseError('Permission denied')):
             client._enrich_endpoint_config(Mock(), events)
         self.assertEqual(_endpoints_from_events(events)[0].role, 'unknown')

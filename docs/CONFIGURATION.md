@@ -176,6 +176,21 @@ administrator role declaration, not automatic name guessing. Asterisk does not
 provide a universal phone/trunk flag; a custom context and static contact alone
 cannot safely distinguish a static phone from a PBX/service peer.
 
+The Agent home page also links to **Manage endpoint roles**. Unclassified
+endpoints and existing choices are listed with **Phone**, **Trunk**
+and **Automatic** buttons. Automatic removes the saved declaration and restores
+connector detection. Previously saved Ignore choices revert to Automatic on
+upgrade. Saved choices take precedence over connector and
+environment role declarations and apply before signal calculation on the next
+snapshot. Role changes do not constitute a recovery notification.
+
+Choices are saved in `endpoint_roles.json` alongside the relay identity, scoped
+by PBX type, host and port. Keep this file in backups and persistent storage.
+Changing the configured PBX address starts a separate set of choices. Only an
+authorized administrator browser can change roles; paired-app credentials
+cannot. Writes use the existing same-origin protection. Automatic diagnostic
+classification counts describe connector evidence, before manual choices.
+
 FreeSWITCH uses registration and Sofia gateway inventories, never call-leg names
 alone to create People. Yeastar uses extension/trunk API inventories. CUCM uses
 configured phone and SIP-trunk inventories. Grandstream inherits the AMI
