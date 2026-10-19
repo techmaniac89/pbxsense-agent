@@ -215,3 +215,10 @@ class InstallerPathsTest(unittest.TestCase):
         self.assertIn('-f docker/docker-compose.detected.yml', source)
         self.assertIn('if [ ! -f "$PROJECT_DIR/docker/docker-compose.detected.yml" ]', source)
         self.assertIn('COPY scripts/installer_paths.py ./scripts/installer_paths.py', Path('docker/Dockerfile').read_text())
+
+    def test_docker_configuration_survives_source_replacement(self):
+        source = Path('scripts/setup_docker.sh').read_text()
+        self.assertIn('/pbxsense-config}', source)
+        self.assertIn('if [ ! -f "$ENV_FILE" ] && [ -f "$PROJECT_DIR/.env" ]', source)
+        self.assertIn('docker compose --env-file "$ENV_FILE" $compose_files up', source)
+        self.assertIn('PBXSENSE_DOCKER_ENV_FILE:-../.env', Path('docker/docker-compose.yml').read_text())

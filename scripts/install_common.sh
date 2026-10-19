@@ -419,6 +419,9 @@ if [ "${PBXSENSE_CONFIGURE_ONLY:-false}" = "true" ]; then
   fi
   python3 "$SOURCE_DIR/scripts/ensure_token.py" "$ENV_FILE"
   configure_agent_env
+  if [ -n "${PBXSENSE_DOCKER_ENV_FILE:-}" ]; then
+    set_env_value PBXSENSE_DOCKER_ENV_FILE "$PBXSENSE_DOCKER_ENV_FILE"
+  fi
   # Prompts can take longer than the bootstrap lifetime; rotate immediately
   # before returning the link to the administrator.
   python3 "$SOURCE_DIR/scripts/ensure_token.py" "$ENV_FILE"

@@ -153,6 +153,36 @@ queued. The relay status exposes the rejected count and latest rejection.
 | `ASTERISK_SECURITY_LOG_PATH` | `/var/log/asterisk/security` | Local Asterisk security log used for aggregate authentication/ACL Security Signals. |
 | `PBXSENSE_TRUNK_ENDPOINTS` | empty | Comma-separated exact Asterisk endpoint or outbound-registration names used as SIP trunks. Matching is case-insensitive. |
 
+Asterisk outbound registrations are trunk evidence, including numeric or custom
+names; an explicit registration `Endpoint` association takes precedence over its
+registration object name. Endpoint names, provider names and descriptions never
+determine roles. Asterisk and Grandstream collect `PJSIPShowEndpoint` configuration
+or legacy `SIPshowpeer` details. An inbound-trunk context (`from-trunk`,
+`from-pstn`, `from-sip-external`) establishes a trunk; registration-capable AORs
+(`MaxContacts > 0`) or dynamic SIP peers establish device accounts. Static AORs
+and IP/header identify objects alone do not establish a role: static phones and
+service peers can share that configuration. Context-based rules follow common
+PBX dialplan conventions, not a universal Asterisk type flag.
+
+Configuration is cached for five minutes and refreshed at most five endpoints
+per snapshot, without caching auth objects or secrets. Unsupported or denied
+configuration queries do not fall back to names. Ambiguous endpoints have an
+internal `unknown` role and are excluded from People and new phone notifications.
+Diagnostics report role counts and configuration-source availability. Existing
+confirmed phone incidents remain uncertain rather than falsely recovering.
+
+For ambiguous static links, `PBXSENSE_TRUNK_ENDPOINTS` remains an explicit
+administrator role declaration, not automatic name guessing. Asterisk does not
+provide a universal phone/trunk flag; a custom context and static contact alone
+cannot safely distinguish a static phone from a PBX/service peer.
+
+FreeSWITCH uses registration and Sofia gateway inventories, never call-leg names
+alone to create People. Yeastar uses extension/trunk API inventories. CUCM uses
+configured phone and SIP-trunk inventories. Grandstream inherits the AMI
+configuration rules and reports unclassified objects when its restricted API
+does not expose sufficient evidence. No PBX configuration or permissions are
+modified automatically.
+
 For PJSIP provider trunks, the Agent combines endpoint/contact qualification,
 `PJSIPShowRegistrationsOutbound`, and observed active calls. `Registered`
 confirms healthy service; `Rejected`, `Unregistered`, `Stopped`, or `Failed`

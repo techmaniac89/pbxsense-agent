@@ -171,10 +171,14 @@ class FreeSwitchClient:
             endpoints = {key: replace(item, device_state="Unknown", active_channels=0,
                          health_status="unknown", health_confidence="low")
                          for key, item in self._known_extensions.items()}
-            endpoints.update(active)
+            endpoints.update({key: item for key, item in active.items() if key in self._known_extensions})
             return list(endpoints.values())
 
-        endpoints: dict[str, PbxEndpoint] = dict(active)
+        registered = {_string(row, "reg_user", "user", "username") for row in rows}
+        endpoints: dict[str, PbxEndpoint] = {
+            key: item for key, item in active.items()
+            if key in registered or key in self._known_extensions
+        }
         for row in rows:
             extension = _string(row, "reg_user", "user", "username")
             if not extension:

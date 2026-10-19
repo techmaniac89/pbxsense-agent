@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - ./pbxsense-agent/.env
+      - ./pbxsense-config/.env
     volumes:
       - pbxsense-agent-data:/var/lib/pbxsense-agent
       - pbxsense-agent-logs:/var/log/pbxsense-agent

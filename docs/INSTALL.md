@@ -76,11 +76,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.47-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.43-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.43-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.47-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.47-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -516,6 +516,24 @@ Run the interactive Docker setup wizard:
 ```bash
 sh ./scripts/setup_docker.sh
 ```
+
+The Docker wizard creates a sibling `pbxsense-config/.env` outside the source
+folder. Existing source-folder `.env` credentials are copied only when no saved
+configuration exists. Subsequent runs reuse the saved configuration. Override
+the location with `PBXSENSE_DOCKER_CONFIG_DIR` if required.
+
+The standard Compose setup stores authorization, pairing and history in named
+Docker volumes, not in the source directory. Keep the same Compose project name
+when updating; never use `docker compose down -v` unless intentionally resetting
+the installation. Replace the source and rerun `sh ./scripts/setup_docker.sh`,
+or use the exact Compose command printed by the wizard (including connector
+overrides and the external `--env-file`). Recheck discovered PBX mounts after
+replacing source files. Manual legacy `../.env` setups remain supported.
+
+Custom Compose installations that bind the source directory to
+`/var/lib/pbxsense-agent` must back up and migrate their existing runtime state
+before switching to a named volume; changing the mount alone creates a fresh
+identity. The wizard does not automatically migrate custom running containers.
 
 It checks Docker Compose, creates or preserves `.env`, generates the Agent
 token, and presents the same connector-specific questions as the native Linux

@@ -45,12 +45,12 @@ class InstallerStructureTest(unittest.TestCase):
         self.assertIn('PBXSENSE_CONFIGURE_ONLY:-false', common)
         self.assertIn("configure_agent_env", common)
         self.assertIn("PBXSENSE_CONFIGURE_ONLY=true", setup)
-        self.assertIn('docker compose $compose_files up -d --build', setup)
+        self.assertIn('docker compose --env-file "$ENV_FILE" $compose_files up -d --build', setup)
         self.assertIn('docker/docker-compose.asterisk.yml', setup)
         self.assertIn('docker/docker-compose.freeswitch.yml', setup)
         self.assertIn('docker/docker-compose.grandstream.yml', setup)
         self.assertIn('docker/docker-compose.cucm.yml', setup)
-        self.assertIn('--env-file .env', setup)
+        self.assertIn('--env-file "$ENV_FILE"', setup)
 
     def test_installers_print_the_authenticated_pc_link(self) -> None:
         common = Path("scripts/install_common.sh").read_text(encoding="utf-8")

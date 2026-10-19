@@ -321,10 +321,15 @@ class EndpointAvailabilitySignalTracker:
         endpoints = {
             endpoint.extension: endpoint
             for endpoint in snapshot.endpoints
-            if (endpoint.role == "trunk") == (self._role == "trunk")
+            if endpoint.role == self._role
         }
         visible: set[str] = set()
         with self._lock:
+            # A configuration-confirmed role change is not a missing phone.
+            changed_roles = {e.extension for e in snapshot.endpoints
+                             if e.role in {"extension", "trunk"} and e.role != self._role}
+            for extension in changed_roles:
+                self._states.pop(extension, None)
             if self._role == "trunk":
                 for extension in list(self._states):
                     if extension in endpoints:
@@ -355,7 +360,7 @@ class EndpointAvailabilitySignalTracker:
             for extension, endpoint in endpoints.items():
                 state = self._states.setdefault(extension, _EndpointSignalState())
                 state.missing_started_at = None
-                if endpoint.role != "trunk" and endpoint.health_status == "unknown":
+                if endpoint.role == "extension" and endpoint.health_status == "unknown":
                     state.recovery_started_at = None
                     if state.episode_notified:
                         state.signal_visible = True
@@ -477,7 +482,7 @@ class EndpointAggregateTipTracker:
 
     def observe(self, snapshot: PbxSnapshot, now: datetime) -> bool:
         unavailable = sum(
-            endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
+            endpoint.role == "extension" and _endpoint_unavailable(endpoint)
             for endpoint in snapshot.endpoints
         )
         with self._lock:
@@ -495,12 +500,12 @@ def _moment_state(snapshot: PbxSnapshot) -> _MomentState:
     unavailable_extensions = frozenset(
         endpoint.extension
         for endpoint in snapshot.endpoints
-        if endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
+        if endpoint.role == "extension" and _endpoint_unavailable(endpoint)
     )
     monitored_extensions = frozenset(
         endpoint.extension
         for endpoint in snapshot.endpoints
-        if endpoint.role != "trunk" and endpoint.health_status != "unknown"
+        if endpoint.role == "extension" and endpoint.health_status != "unknown"
     )
     voicemail_keys = frozenset(
         f"{message.mailbox}|{message.caller}|{message.created_at.isoformat()}"
@@ -692,7 +697,7 @@ def _build_people(
 
     people: list[dict] = []
     for endpoint in sorted(endpoints, key=lambda item: item.extension):
-        if endpoint.role == "trunk":
+        if endpoint.role != "extension":
             continue
 
         name = _extension_name(endpoint.extension, extension_names, endpoint.label)
@@ -1576,6 +1581,8 @@ def _is_active_channel(channel: PbxChannel) -> bool:
 
 
 def _endpoint_unavailable(endpoint: PbxEndpoint) -> bool:
+    if endpoint.role == "unknown":
+        return False
     if endpoint.role == "trunk":
         return _trunk_health_state(endpoint) == "down"
     return endpoint.health_status != "unknown" and _device_state_is_unavailable(endpoint.device_state)

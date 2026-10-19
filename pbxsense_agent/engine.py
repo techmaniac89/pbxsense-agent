@@ -309,7 +309,7 @@ def _endpoint_recommendations(
     unavailable = [
         endpoint
         for endpoint in endpoints
-        if endpoint.role != "trunk" and _endpoint_unavailable(endpoint)
+        if endpoint.role == "extension" and _endpoint_unavailable(endpoint)
     ]
     if len(unavailable) < 2:
         return []
@@ -343,7 +343,7 @@ def _person_endpoint_labels(endpoints: list[Any]) -> dict[str, str]:
     return {
         endpoint.extension: endpoint.label
         for endpoint in endpoints
-        if endpoint.role != "trunk" and endpoint.extension
+        if endpoint.role == "extension" and endpoint.extension
     }
 
 
@@ -602,7 +602,7 @@ def _operational_insights(endpoints: list[Any], queues: list[Any], calls: list[C
             [f"{len(after_hours)} of {len(dated)} visible calls were before 08:00 or after 18:00."],
             {"after_hours_calls": len(after_hours), "visible_calls": len(dated)}, "Recent history"))
 
-    endpoint_ids = {endpoint.extension for endpoint in endpoints if endpoint.role != "trunk"}
+    endpoint_ids = {endpoint.extension for endpoint in endpoints if endpoint.role == "extension"}
     failed = Counter(call.destination for call in dated if call.destination in endpoint_ids and interpreted_call_kind(call) == "missed")
     if failed:
         extension, count = failed.most_common(1)[0]

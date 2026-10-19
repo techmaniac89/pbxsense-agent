@@ -908,6 +908,7 @@ external::backup gateway sip:user@backup.test NOREG
                         "ObjectName": "102",
                         "Status": "OK (12 ms)",
                         "Description": "Warehouse phone",
+                        "Dynamic": "yes",
                     },
                 ),
                 AmiEvent(
@@ -916,6 +917,7 @@ external::backup gateway sip:user@backup.test NOREG
                         "ObjectName": "cosmote",
                         "Status": "Unreachable",
                         "Description": "Cosmote SIP trunk",
+                        "Context": "from-trunk",
                     },
                 ),
             ]
@@ -1524,7 +1526,7 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(by_id["backup-01"].health_status, "unknown")
 
     def test_remote_named_phone_is_not_misclassified_as_ote_trunk(self) -> None:
-        self.assertEqual(_endpoint_role("remote-office", {}), "extension")
+        self.assertEqual(_endpoint_role("remote-office", {"MaxContacts": "1"}), "extension")
 
     def test_active_channel_confirms_health_and_updates_trunk_count(self) -> None:
         endpoints = [AmiEndpoint(
@@ -1769,11 +1771,42 @@ external::backup gateway sip:user@backup.test NOREG
         self.assertEqual(payload["people"][0]["name"], "Linphone")
 
     def test_cosmote_endpoint_is_classified_as_trunk(self) -> None:
-        self.assertEqual(_endpoint_role("cosmote", {}), "trunk")
+        self.assertEqual(_endpoint_role("cosmote", {}), "unknown")
         self.assertEqual(
-            _endpoint_role("main-line", {"Description": "Cosmote SIP line"}),
+            _endpoint_role("main-line", {"Context": "from-trunk"}),
             "trunk",
         )
+
+    def test_inter_pbx_and_service_peers_are_not_phones(self) -> None:
+        from pbxsense_agent.ami import _endpoint_from_channel
+        self.assertEqual(_endpoint_from_channel("PJSIP/gpt-live-00000042"), "gpt-live")
+        self.assertEqual(_endpoint_from_channel("PJSIP/fusionpbx-000000ab"), "fusionpbx")
+        self.assertEqual(_endpoint_from_channel("PJSIP/desk-phone"), "desk-phone")
+        endpoints = _endpoints_from_events([
+            AmiEvent("EndpointList", {"ObjectName": name, "DeviceState": "Not in use",
+                                      **({"Context": "from-trunk", "MaxContacts": "0", "HasIdentify": "yes"}
+                                         if name in {"fusionpbx", "gpt-live", "openai-live", "openai_live"}
+                                         else {"MaxContacts": "1"})})
+            for name in ("fusionpbx", "gpt-live", "openai-live", "openai_live", "101", "reception", "fusionpbx-reception")
+        ])
+        self.assertEqual([item.role for item in endpoints],
+                         ["trunk", "trunk", "trunk", "trunk", "extension", "extension", "extension"])
+        payload = build_home_payload(
+            AmiSnapshot(reachable=True, agent_version="test", endpoints=endpoints),
+            display_name="Office PBX", extension_names={},
+        )
+        self.assertEqual(len(payload["people"]), 3)
+
+    def test_outbound_registration_proves_trunk_regardless_of_name(self) -> None:
+        endpoints = _endpoints_from_events([
+            AmiEvent("EndpointList", {"ObjectName": "900"}),
+            AmiEvent("OutboundRegistrationDetail", {
+                "ObjectName": "registration-id", "Endpoint": "900", "Status": "Registered"}),
+            AmiEvent("OutboundRegistrationDetail", {
+                "ObjectName": "another-link", "Status": "Registered"}),
+        ])
+        self.assertEqual({item.extension: item.role for item in endpoints},
+                         {"900": "trunk", "another-link": "trunk"})
 
     def test_internal_call_uses_channel_endpoint_and_display_names(self) -> None:
         payload = build_home_payload(

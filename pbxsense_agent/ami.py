@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import socket
+import time
 from dataclasses import dataclass, replace
 
 from .observations import PbxChannel, PbxEndpoint, PbxQueue, PbxSnapshot
@@ -43,6 +44,8 @@ class AmiClient:
         self._sources = SourceStatus()
         self._cached_queues: list[PbxQueue] = []
         self._known_extensions: dict[str, PbxEndpoint] = {}
+        self._role_config: dict[str, tuple[float, dict[str, str]]] = {}
+        self._role_counts: dict[str, int] = {}
 
     def snapshot(self) -> PbxSnapshot:
         try:
@@ -54,8 +57,14 @@ class AmiClient:
                 explicit_trunks=self._settings.trunk_endpoints,
             )
             endpoints = _reconcile_trunk_activity(endpoints, channels)
+            self._role_counts = {role: sum(e.role == role for e in endpoints)
+                                 for role in ("extension", "trunk", "unknown")}
             for endpoint in endpoints:
-                if endpoint.role != "trunk" and (endpoint.extension in self._known_extensions or len(self._known_extensions) < 10000):
+                if endpoint.role == "trunk":
+                    self._known_extensions.pop(endpoint.extension, None)
+                elif endpoint.role == "extension":
+                    self._known_trunks.pop(endpoint.extension, None)
+                if endpoint.role == "extension" and (endpoint.extension in self._known_extensions or len(self._known_extensions) < 10000):
                     self._known_extensions[endpoint.extension] = endpoint
             phone_ids = {endpoint.extension for endpoint in endpoints}
             endpoints.extend(replace(item, device_state="Unknown", active_channels=0,
@@ -149,6 +158,11 @@ class AmiClient:
 
         result["ok"] = result["loginAccepted"] is True
         result["dataSources"] = self._sources.export()
+        result["endpointClassification"] = {
+            "basis": "PBX configuration, not endpoint names",
+            "counts": dict(self._role_counts),
+            "unclassifiedDetail": "Unclassified endpoints are excluded from People and phone alerts.",
+        }
         return result
 
     def _read_events(self) -> list[AmiEvent]:
@@ -200,10 +214,56 @@ class AmiClient:
                 )
             )
 
+            self._enrich_endpoint_config(sock, events)
             return events
         except OSError:
             self._close_session()
             raise
+
+    def _enrich_endpoint_config(self, sock: socket.socket, events: list[AmiEvent]) -> None:
+        """Bounded, slow inventory refresh; never cache AMI authentication fields."""
+        now = time.monotonic()
+        inventory = [e for e in events if e.name in {"EndpointList", "PeerEntry"}]
+        keys = {e.fields.get("ObjectName") or e.fields.get("Endpoint") or e.fields.get("Peer") or e.fields.get("PeerName", "") for e in inventory}
+        self._role_config = {k: v for k, v in self._role_config.items() if k in keys}
+        budget = 5
+        for event in inventory:
+            name = event.fields.get("ObjectName") or event.fields.get("Endpoint") or event.fields.get("Peer") or event.fields.get("PeerName", "")
+            if not name or any(c in name for c in "\r\n"):
+                continue
+            cached = self._role_config.get(name)
+            if budget and (cached is None or now - cached[0] >= 300):
+                budget -= 1
+                config: dict[str, str] = {}
+                try:
+                    if event.name == "EndpointList":
+                        details = self._collect_action_events(sock, action="PJSIPShowEndpoint",
+                            complete_event="EndpointDetailComplete", parameters={"Endpoint": name})
+                        aors = [d.fields for d in details if d.name == "AorDetail"]
+                        for detail in details:
+                            if detail.name == "EndpointDetail":
+                                config["Context"] = detail.fields.get("Context", "")
+                            elif detail.name == "IdentifyDetail" and any(detail.fields.get(k) for k in ("Match", "MatchHeader", "MatchRequestUri")):
+                                config["HasIdentify"] = "yes"
+                        if aors:
+                            limits = [a.get("MaxContacts", "") for a in aors]
+                            if all(v.isdigit() for v in limits):
+                                config["MaxContacts"] = str(max(map(int, limits)))
+                    else:
+                        self._send_action(sock, {"Action": "SIPshowpeer", "Peer": name})
+                        detail = self._read_until_response(sock, phase="SIPshowpeer")
+                        if detail.get("Response") == "Error":
+                            raise AmiActionResponseError("SIPshowpeer unavailable")
+                        config = {k: detail[k] for k in ("Context", "Dynamic") if k in detail}
+                    self._sources.record("endpointClassification")
+                except AmiActionResponseError as exc:
+                    self._sources.record("endpointClassification", rejection_state(exc))
+                    config = {}
+                # Transport failures propagate: do not reuse a desynchronized stream.
+                self._role_config[name] = (now, config)
+                cached = (now, config)
+            if cached:
+                event.fields.update(cached[1])
 
     def _session(self) -> socket.socket:
         if self._session_socket is not None:
@@ -281,9 +341,10 @@ class AmiClient:
         *,
         action: str,
         complete_event: str,
+        parameters: dict[str, str] | None = None,
     ) -> list[AmiEvent]:
         with socket_deadline(sock, self._settings.timeout_seconds) as sock:
-            self._send_action(sock, {"Action": action})
+            self._send_action(sock, {"Action": action, **(parameters or {})})
             events: list[AmiEvent] = []
             received_bytes = 0
 
@@ -468,6 +529,7 @@ def _endpoints_from_events(
         role = (
             "trunk"
             if extension.casefold() in explicit_trunks_folded
+            or extension.casefold() in registration_states
             else _endpoint_role(extension, fields)
         )
         registration = registration_states.get(extension.casefold())
@@ -523,11 +585,6 @@ def _endpoints_from_events(
     for normalized, registration in sorted(registration_states.items()):
         name, status, server_uri = registration
         if normalized in existing_folded:
-            continue
-        if (
-            name.casefold() not in explicit_trunks_folded
-            and not _looks_like_trunk(name, {"ServerUri": server_uri})
-        ):
             continue
         state = _outbound_registration_device_state(status)
         endpoints.append(PbxEndpoint(
@@ -677,7 +734,8 @@ def _outbound_registration_states_from_events(
             continue
         fields = event.fields
         name = (
-            fields.get("ObjectName", "")
+            fields.get("Endpoint", "")
+            or fields.get("ObjectName", "")
             or fields.get("Registration", "")
         ).strip()
         status = fields.get("Status", "").strip()
@@ -829,48 +887,19 @@ def _endpoint_from_channel(channel: str) -> str:
     if "/" not in channel:
         return ""
     endpoint = channel.split("/", 1)[1]
-    return endpoint.split("-", 1)[0]
+    return re.sub(r"-[0-9a-fA-F]{8,}$", "", endpoint)
 
 
 def _endpoint_role(name: str, fields: dict[str, str]) -> str:
-    if _looks_like_trunk(name, fields):
+    """Classify configuration, never names, descriptions or addressing alone."""
+    context = fields.get("Context", "").strip().casefold()
+    # These contexts explicitly select an inbound-trunk dialplan.
+    if context in {"from-trunk", "from-pstn", "from-sip-external"}:
         return "trunk"
-    return "extension"
-
-
-def _looks_like_trunk(name: str, fields: dict[str, str]) -> bool:
-    normalized = name.strip().lower()
-    searchable = " ".join(
-        [
-            normalized,
-            fields.get("Description", ""),
-            fields.get("Aor", ""),
-            fields.get("Auths", ""),
-            fields.get("OutboundAuths", ""),
-            fields.get("Transport", ""),
-        ]
-    ).lower()
-
-    trunk_markers = (
-        "trunk",
-        "provider",
-        "carrier",
-        "sipgate",
-        "voip",
-        "pstn",
-        "itsp",
-        "cosmote",
-        "vodafone",
-        "nova",
-        "wind",
-        "telekom",
-        "twilio",
-        "flowroute",
-        "voipms",
-        "voip.ms",
-        "didww",
-        "telnyx",
-        "bandwidth",
-        "siptrunk",
-    )
-    return any(marker in searchable for marker in trunk_markers)
+    dynamic = fields.get("Dynamic", "").strip().casefold()
+    if dynamic in {"yes", "y", "true"}:
+        return "extension"
+    maximum = fields.get("MaxContacts", "")
+    if maximum.isdigit() and int(maximum) > 0:
+        return "extension"
+    return "unknown"

@@ -16,7 +16,7 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777
     env_file:
-      - ../.env
+      - ${PBXSENSE_DOCKER_ENV_FILE:-../.env}
     volumes:
       - pbxsense-agent-data:/var/lib/pbxsense-agent
       - pbxsense-agent-logs:/var/log/pbxsense-agent

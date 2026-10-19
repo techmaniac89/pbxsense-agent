@@ -4,7 +4,8 @@ set -e
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-ENV_FILE="$PROJECT_DIR/.env"
+CONFIG_DIR="${PBXSENSE_DOCKER_CONFIG_DIR:-$(dirname "$PROJECT_DIR")/pbxsense-config}"
+ENV_FILE="$CONFIG_DIR/.env"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker with the Compose plugin is required."
@@ -19,12 +20,20 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+umask 077
+mkdir -p "$CONFIG_DIR"
+# Preserve an existing installation's credentials; never overwrite saved config.
+if [ ! -f "$ENV_FILE" ] && [ -f "$PROJECT_DIR/.env" ]; then
+  cp "$PROJECT_DIR/.env" "$ENV_FILE"
+fi
+export PBXSENSE_DOCKER_ENV_FILE="$ENV_FILE"
+
 PBXSENSE_CONFIGURE_ONLY=true \
 PBXSENSE_ENV_FILE="$ENV_FILE" \
   sh "$SCRIPT_DIR/install_common.sh"
 
 pbx_type="$(awk -F= '$1 == "PBXSENSE_PBX_TYPE" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
-compose_files="--env-file .env -f docker/docker-compose.yml"
+compose_files="-f docker/docker-compose.yml"
 case "$pbx_type" in
   asterisk|ami|freepbx|issabel|vitalpbx)
     if [ ! -f "$PROJECT_DIR/docker/docker-compose.detected.yml" ]; then
@@ -66,17 +75,17 @@ if [ "$start_agent" = "yes" ]; then
   cd "$PROJECT_DIR"
   # compose_files contains repository-controlled filenames without spaces.
   # Intentional word splitting passes each -f argument to Docker Compose.
-  docker compose $compose_files up -d --build
+  docker compose --env-file "$ENV_FILE" $compose_files up -d --build
   echo "PBXSense Agent is running."
   case "$pbx_type" in
     asterisk|freeswitch)
-      docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker || true
-      echo "Recheck without reinstalling: docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker"
-      echo "For a completed-call check, run: docker compose $compose_files exec -T pbxsense-agent python scripts/installer_paths.py watch-cdr --mode docker"
+      docker compose --env-file "$ENV_FILE" $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker || true
+      echo "Recheck without reinstalling: docker compose --env-file \"$ENV_FILE\" $compose_files exec -T pbxsense-agent python scripts/installer_paths.py report --mode docker"
+      echo "For a completed-call check, run: docker compose --env-file \"$ENV_FILE\" $compose_files exec -T pbxsense-agent python scripts/installer_paths.py watch-cdr --mode docker"
       ;;
   esac
 else
-  echo "Configuration saved. Start later with: docker compose $compose_files up -d --build"
+  echo "Configuration saved. Start later with: docker compose --env-file \"$ENV_FILE\" $compose_files up -d --build"
 fi
 
 bootstrap_token="$(awk -F= '$1 == "PBXSENSE_BROWSER_BOOTSTRAP_TOKEN" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
