@@ -21,6 +21,9 @@ from .connectors import connector_for_settings
 from .collected_state import CollectedHomeState
 from .daily_summary import DailySummaryTracker
 from .credentials import AppCredentials
+from .browser_icon import favicon_ico
+from .diagnostics_page import diagnostics_sections
+from .page_status import capability_statuses, push_pairing_status, readable_timestamp, readable_iso_timestamp, page_timezone
 from .endpoint_roles import role_store
 from .browser_access import BrowserAccessGrants
 from .history_collection import (
@@ -112,6 +115,7 @@ internet_relay = SecureInternetRelay(
     snapshot_publisher=push_relay.publish_secure_snapshot,
 )
 app = FastAPI(title="PBXSense Agent", version=AGENT_VERSION)
+AGENT_STARTED_AT = time.time()
 LOCAL_WEB_COOKIE = "pbxsense_agent_local_web"
 # Browser authorization is effectively installation-lived and is renewed on
 # every HTML visit. Token rotation or clearing browser site data revokes it.
@@ -393,19 +397,31 @@ def index(request: Request):
         if ok
         else f"The Agent is running, but {settings.display_name} still needs a little attention."
     )
-    diagnostic_message = diagnostics.get(
-        "message",
-        diagnostics.get("error", "The latest check completed."),
+    state = _refresh_home_state(only_if_missing=True)
+    stale = (time.time() - state.observed_at.timestamp()) > max(10, settings.snapshot_poll_seconds * 3 + settings.timeout_seconds)
+    if stale or not state.snapshot.reachable:
+        ok = False
+        status_text = "Needs attention"
+        status_detail = "PBX updates are unavailable or stale. Open Diagnostics for the detailed checks."
+    capabilities = ''.join(
+        f'<div class="capability"><span>{label}</span><span class="capability-state {style}">{text}</span></div>'
+        for label, text, style in capability_statuses(state.snapshot, stale=stale, pbx_type=settings.pbx_type)
     )
-    diagnostic_html = f"""
-        <section class="panel">
-          <div class="section-heading">
-            <span>Connection check</span>
-            <small>{escape(connector.diagnostics_label)}</small>
-          </div>
-          <dl class="diagnostics">{_diagnostic_rows(diagnostics, diagnostic_message)}</dl>
-        </section>
-        """
+    unknown_count = sum(e.role == "unknown" for e in state.snapshot.endpoints)
+    if unknown_count:
+        roles_html = (f'<section class="panel"><div class="status attention"><span class="dot"></span>'
+                      f'<span>{unknown_count} endpoint{"s need" if unknown_count != 1 else " needs"} classification</span></div>'
+                      '<a class="button" href="/endpoints">Manage endpoint roles</a></section>')
+    else:
+        roles_html = ('<section class="panel"><div class="section-heading">Endpoint roles</div>'
+                      '<p>Review how endpoints are classified as phones or trunks.</p>'
+                      '<a class="button" href="/endpoints">Manage endpoint roles</a></section>')
+    with _runtime_lock:
+        last_success = _runtime_state.get("snapshot", {}).get("lastSuccessAt", 0)
+    if state.snapshot.reachable and not stale:
+        last_success = state.observed_at.timestamp()
+    def timestamp(value):
+        return readable_timestamp(value, settings.timezone)
 
     return _page(
         title="PBXSense Agent",
@@ -417,10 +433,12 @@ def index(request: Request):
               <span>{status_text}<small>{status_detail}</small></span>
             </div>
             {_agent_navigation_html(request, current="home", primary="pair")}
-            {diagnostic_html}
-            <section class="panel"><div class="section-heading">Endpoint roles</div>
-              <p>Choose Phone or Trunk for endpoints the PBX cannot classify.</p>
-              <a class="button" href="/endpoints">Manage endpoint roles</a></section>
+            <section class="panel"><div class="section-heading">PBX capabilities</div>{capabilities}
+              <p class="status-note">Available means the data source works, not that every phone or trunk is healthy. Empty call or queue lists can still be available. Detailed checks are in Diagnostics.</p>
+              <dl class="diagnostics"><div><dt>Last successful PBX update</dt><dd>{escape(timestamp(last_success))}</dd></div>
+              <div><dt>Agent running since</dt><dd>{escape(timestamp(AGENT_STARTED_AT))}</dd></div>
+              <div><dt>Time basis</dt><dd>{escape(page_timezone(settings.timezone)[1])}</dd></div></dl></section>
+            {roles_html}
             {_agent_footer_html()}
           </section>
         """,
@@ -479,13 +497,14 @@ def browser_access(request: Request):
     _require_token(request)
     return HTMLResponse(_page(title="Authorize a browser", body="""
       <section class="hero-card"><h1>Authorize a browser</h1>
-      <style>button {padding:12px 18px;border:0;border-radius:10px;background:#b8c48d;color:#151310;font:inherit;cursor:pointer;}
-      #access-code {overflow-wrap:anywhere;user-select:all;}</style>
+      <style>#access-code {overflow-wrap:anywhere;user-select:all;}</style>
       <p>Only share this code with someone who should have full administrator access.
       It works once, expires after 15 minutes, and is invalidated by an Agent restart.</p>
-      <button id="create-code" type="button">Create access code</button>
+      <div class="actions">
+        <button id="create-code" class="button primary" type="button">Create access code</button>
+        <a class="button" href="/">Agent status</a>
+      </div>
       <p><output id="access-code"></output></p><p id="access-status" role="status"></p>
-      <div class="actions"><a href="/">Back to home</a></div>
       <script>document.getElementById('create-code').addEventListener('click', async () => {
         document.getElementById('access-code').textContent = '';
         try {
@@ -545,6 +564,7 @@ def _page(*, title: str, body: str) -> str:
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+          <link rel="alternate icon" href="/favicon.ico" type="image/x-icon">
         <title>{escape(title)}</title>
         <style>
           :root {{
@@ -572,13 +592,19 @@ def _page(*, title: str, body: str) -> str:
           }}
           main {{
             min-height: 100vh;
+            width: 100%;
             max-width: 920px;
             margin: 0 auto;
             padding: 42px 20px;
             display: grid;
             align-items: center;
+            grid-template-columns: minmax(0, 1fr);
           }}
+          .page-content {{ width: 100%; min-width: 0; }}
           .hero-card, .json-card {{
+            width: 100%;
+            min-width: 0;
+            overflow-wrap: anywhere;
             background: rgba(33, 29, 24, 0.94);
             border: 1px solid var(--line);
             border-radius: 26px;
@@ -637,6 +663,9 @@ def _page(*, title: str, body: str) -> str:
             margin-top: 18px;
           }}
           .button {{
+            font-family: inherit;
+            font-size: inherit;
+            cursor: pointer;
             display: inline-flex;
             align-items: center;
             min-height: 42px;
@@ -654,6 +683,7 @@ def _page(*, title: str, body: str) -> str:
             border-color: transparent;
           }}
           .panel {{
+            min-width: 0;
             margin-top: 24px;
             padding: 18px;
             border: 1px solid var(--line);
@@ -670,7 +700,7 @@ def _page(*, title: str, body: str) -> str:
             font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
             font-size: 12px;
           }}
-          button.button {{ cursor: pointer; font: inherit; }}
+          button.button {{ cursor: pointer; }}
           .button.danger {{
             background: rgba(240, 154, 131, 0.12);
             color: #ffb29f;
@@ -683,6 +713,21 @@ def _page(*, title: str, body: str) -> str:
             align-items: stretch;
             margin-top: 18px;
           }}
+          .pairing-text-toggle summary {{ cursor: pointer; margin: 12px 0; }}
+          .endpoint-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }}
+          .endpoint-heading h3 {{ margin: 0; overflow-wrap: anywhere; min-width: 0; }}
+          .endpoint-role {{ display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 999px; border: 1px solid; font-size: 12px; font-weight: 600; white-space: nowrap; }}
+          .endpoint-role::before {{ content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }}
+          .endpoint-role-phone {{ color: #a9d6f5; background: rgba(89, 168, 224, .10); border-color: rgba(89, 168, 224, .28); }}
+          .endpoint-role-trunk {{ color: #a8dcc0; background: rgba(102, 190, 143, .10); border-color: rgba(102, 190, 143, .28); }}
+          .endpoint-role-unknown {{ color: #e9ca91; background: rgba(211, 167, 85, .10); border-color: rgba(211, 167, 85, .28); }}
+          .capability {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 0; flex-wrap: wrap; }}
+          .capability-state {{ font-size: 12px; padding: 4px 9px; border-radius: 999px; background: rgba(255,255,255,.05); }}
+          .capability-state.ok {{ color: #a8dcc0; }}
+          .capability-state.attention {{ color: #e9ca91; }}
+          .capability-state.neutral, .status-note, .secondary-link {{ color: #b7aca1; }}
+          .status-note {{ font-size: 12px; line-height: 1.6; }}
+          .button.selected {{ background: #443c2e; border-color: #c4a76b; box-shadow: inset 0 0 0 1px #c4a76b; color: #f4dfb5; }}
           .copy-button {{
             position: relative;
             display: grid;
@@ -749,9 +794,11 @@ def _page(*, title: str, body: str) -> str:
             font-weight: 750;
           }}
           .diagnostics {{ margin: 0; }}
+          .diagnostic-section > summary {{ cursor: pointer; font-size: 18px; font-weight: 750; }}
+          .diagnostic-section[open] > summary {{ margin-bottom: 14px; }}
           .diagnostics div {{
             display: grid;
-            grid-template-columns: minmax(86px, 0.45fr) 1fr;
+            grid-template-columns: minmax(86px, 0.45fr) minmax(0, 1fr);
             gap: 16px;
             padding: 10px 0;
             border-bottom: 1px solid #3d3228;
@@ -878,6 +925,11 @@ def favicon() -> Response:
     return Response(_beacon_svg(), media_type="image/svg+xml")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def browser_favicon() -> Response:
+    return Response(favicon_ico(), media_type="image/x-icon", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/session", response_class=HTMLResponse, include_in_schema=False)
 def browser_session(request: Request):
     """Render a token-free browser bootstrap page on a protected transport."""
@@ -956,13 +1008,13 @@ def pair(request: Request):
         relay_status.get("configured") is True
         and "activation=" not in payload
     )
-    pairing_attention = relay_degraded and relay_status.get("enrolled") is not True
+    pairing_attention = relay_degraded
     if relay_status.get("enrolled") is True:
-        pairing_status = "Add another app"
+        pairing_status = "Pair another app"
         pairing_detail = (
             "Scan this QR on the additional phone. It will register its own push-notification device with this Agent."
             if not relay_degraded
-            else "Scan this QR while the additional phone is on the Agent's network. Push setup will continue through this Agent."
+            else "This QR supports local pairing only. Refresh before scanning to include closed-app push setup."
         )
     elif relay_degraded:
         pairing_status = "Local pairing ready"
@@ -988,6 +1040,8 @@ def pair(request: Request):
                 excluded=("diagnostics",),
             )}
             <div class="qr">{qr_svg}</div>
+            <details class="pairing-text-toggle">
+              <summary>QR text</summary>
             <div class="pairing-text-row">
               <div id="pairing-text" class="pairing-code">{escape(payload)}</div>
               <button id="copy-pairing-text" class="copy-button" type="button" title="Copy pairing text" aria-label="Copy pairing text">
@@ -998,6 +1052,7 @@ def pair(request: Request):
                 <span id="copy-feedback" class="copy-feedback" role="status" aria-live="polite">Copied</span>
               </button>
             </div>
+            </details>
             <script>
               (() => {{
                 const copyButton = document.getElementById('copy-pairing-text');
@@ -1129,7 +1184,7 @@ def paired_apps(request: Request):
                 current="apps",
                 primary="pair",
                 excluded=("diagnostics",),
-                label_overrides={"pair": "Add another app"},
+                label_overrides={"pair": "Pair another app"},
             )}
             {details}
             {_agent_footer_html()}
@@ -1185,7 +1240,7 @@ def _device_card(device: dict[str, object], request: Request) -> str:
         "Model": model or "Not reported",
         "App version": app_version or "Not reported",
         "Notifications": ", ".join(notifications) if notifications else "Disabled",
-        "Last registered": str(device.get("updatedAt") or "Not reported"),
+        "Last registered": readable_iso_timestamp(device.get("updatedAt"), settings.timezone),
         "Registration ID": str(device.get("id") or "Unknown"),
     }
     revoke_id = str(device.get("revokeId") or "").strip()
@@ -1361,6 +1416,14 @@ def _refresh_home_state(*, only_if_missing: bool = False) -> CollectedHomeState:
     return _snapshot_runtime.refresh(only_if_missing=only_if_missing)
 
 
+def _pairing_readiness_html(status: dict, *, qr_has_activation: bool | None = None) -> str:
+    text, detail, style = push_pairing_status(status, qr_has_activation=qr_has_activation)
+    return ('<section class="panel"><div class="section-heading">Pairing and notifications</div>'
+            '<div class="capability"><span>Local pairing</span><span class="capability-state ok">Available</span></div>'
+            f'<div class="capability"><span>Closed-app notifications</span><span class="capability-state {style}">{text}</span></div>'
+            f'<p class="status-note">{detail}</p></section>')
+
+
 def _endpoint_role_store():
     return role_store(str(Path(settings.relay_identity_path).with_name("endpoint_roles.json")))
 
@@ -1380,14 +1443,16 @@ def endpoint_roles_page(request: Request):
     for name in names:
         controls = "".join(
             f'<form method="post" action="/endpoints/role?{escape(urlencode({"endpoint": name, "role": role, "csrf": _local_web_csrf_value()}), quote=True)}" style="display:inline">'
-            f'<button class="button" type="submit">{label}</button></form>'
+            f'<button class="button{" selected" if choices.get(name, "auto") == role else ""}" '
+            f'aria-pressed="{"true" if choices.get(name, "auto") == role else "false"}" type="submit">{label}</button></form>'
             for role, label in (("extension", "Phone"), ("trunk", "Trunk"), ("auto", "Automatic"))
         )
-        label = {"extension": "Phone", "trunk": "Trunk"}.get(choices.get(name), "Unclassified")
-        rows.append(f'<section class="panel"><h3>{escape(name)}</h3><p>{label}</p><div class="actions">{controls}</div></section>')
+        rows.append(f'<section class="panel"><div class="endpoint-heading"><h3>{escape(name)}</h3>'
+                    '</div>'
+                    f'<div class="actions">{controls}</div></section>')
     content = "".join(rows) or '<p>No unclassified endpoints or saved role choices.</p>'
     return _page(title="Endpoint roles", body=f'<section class="hero-card">{_brand_html()}<h2>Endpoint roles</h2>'
-        f'<p>Unclassified endpoints are not shown as phones and do not generate phone alerts. Choices apply to this configured PBX. Automatic removes your choice.</p>'
+        f'<p>Unclassified endpoints are not shown in People or Trunks and do not generate phone alerts. Choices apply to this configured PBX. Automatic removes your choice.</p>'
         f'<div class="actions"><a class="button" href="/">Home</a></div>{content}{_agent_footer_html()}</section>')
 
 
@@ -1407,6 +1472,9 @@ def set_endpoint_role(request: Request):
         store.set(_endpoint_role_scope(), endpoint, role)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The role page filters a published snapshot. Publish the new effective
+    # roles before redirecting, especially when Automatic removes an override.
+    _refresh_home_state()
     return RedirectResponse("/endpoints", status_code=303)
 
 
@@ -1718,7 +1786,7 @@ def _agent_footer_html() -> str:
 def _beacon_svg() -> str:
     """Match the PBXBeaconIcon used by the companion Flutter app."""
     return """
-      <svg viewBox="0 0 32 32" fill="none" role="img" aria-label="PBXSense beacon" color="#75d49b">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="PBXSense beacon" color="#75d49b">
         <circle cx="16" cy="16" r="8.8" stroke="currentColor" stroke-width="2.4"
           stroke-linecap="round" stroke-dasharray="44.6 10.7" transform="rotate(17 16 16)" opacity="0.68"/>
         <circle cx="16" cy="16" r="13.9" stroke="currentColor" stroke-width="2.4"
@@ -1737,6 +1805,8 @@ def _json_page(
     include_agent_footer: bool = False,
 ) -> str:
     formatted = escape(json.dumps(payload, indent=2, ensure_ascii=False))
+    content = (diagnostics_sections(payload, settings.timezone) if navigation_current == "diagnostics"
+               else f'<pre><code>{formatted}</code></pre>')
     raw_json_query = {"format": "json"}
     moment_hours = request.query_params.get("momentHours", "").strip()
     if moment_hours:
@@ -1766,10 +1836,10 @@ def _json_page(
     return _page(
         title=title,
         body=f"""
-          <section class="json-card">
+          <section class="hero-card">
             {_brand_html()}
             {navigation}
-            <pre><code>{formatted}</code></pre>
+            {content}
             {_agent_footer_html() if include_agent_footer else ""}
           </section>
         """,

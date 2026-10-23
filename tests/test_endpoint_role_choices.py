@@ -1,7 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import patch, call
 import unittest
 from types import SimpleNamespace
 
@@ -20,7 +20,7 @@ class EndpointRoleChoicesTest(unittest.TestCase):
             snapshot = PbxSnapshot(reachable=True, agent_version='test', endpoints=[PbxEndpoint('peer', 'Reachable', role='unknown')])
             with patch.object(main, '_endpoint_role_store', return_value=store), \
                  patch.object(main, '_endpoint_role_scope', return_value='pbx'), \
-                 patch.object(main, '_refresh_home_state', return_value=SimpleNamespace(snapshot=snapshot)), \
+                 patch.object(main, '_refresh_home_state', return_value=SimpleNamespace(snapshot=snapshot)) as refresh, \
                  patch.object(main, '_has_valid_local_web_cookie', return_value=True), \
                  patch.object(main, '_local_web_csrf_value', return_value='session-proof'), \
                  patch.object(main, '_require_token'):
@@ -30,11 +30,21 @@ class EndpointRoleChoicesTest(unittest.TestCase):
                         'query_string': query, 'scheme': 'http',
                         'server': ('192.168.0.254', 8765), 'client': ('192.168.0.2', 1234)})
                 page = main.endpoint_roles_page(request(method='GET'))
+                self.assertIn('class="endpoint-heading"', page)
+                self.assertNotIn('<span class="endpoint-role ', page)
+                self.assertIn('aria-pressed="true" type="submit">Automatic</button>', page)
+                for saved_role, badge in (('extension', 'phone'), ('trunk', 'trunk')):
+                    store.set('pbx', 'peer', saved_role)
+                    label = 'Phone' if saved_role == 'extension' else 'Trunk'
+                    self.assertIn(f'aria-pressed="true" type="submit">{label}</button>', main.endpoint_roles_page(request(method='GET')))
+                store.set('pbx', 'peer', 'auto')
                 self.assertEqual(page.count('csrf=session-proof'), 3)
                 self.assertNotIn('>Ignore<', page)
                 for role in ('extension', 'trunk', 'auto'):
+                    refresh.reset_mock()
                     result = main.set_endpoint_role(request(f'endpoint=peer&role={role}&csrf=session-proof'.encode()))
                     self.assertEqual(result.status_code, 303)
+                    self.assertEqual(refresh.call_args_list, [call(only_if_missing=True), call()])
                 for token in ('', '&csrf=incorrect'):
                     with self.assertRaises(HTTPException) as error:
                         main.set_endpoint_role(request(f'endpoint=peer&role=trunk{token}'.encode()))

@@ -21,6 +21,29 @@ def request(path="/", *, method="GET", host="127.0.0.1", scheme="http", headers=
 
 
 class BrowserAccessTest(unittest.TestCase):
+    def test_create_code_uses_primary_style_and_status_is_on_right(self):
+        with patch.object(main, '_require_token'):
+            page = main.browser_access(request()).body.decode()
+        self.assertIn('class="actions"', page)
+        self.assertNotIn('authorize-actions', page)
+        self.assertNotIn('button.button {{ cursor: pointer; font: inherit; }}', Path(main.__file__).read_text())
+        self.assertIn('id="create-code" class="button primary"', page)
+        self.assertLess(page.index('id="create-code"'), page.index('href="/">Agent status'))
+
+    def test_browser_icons_use_valid_svg_and_ico_formats(self):
+        self.assertIn('xmlns="http://www.w3.org/2000/svg"', main.favicon().body.decode())
+        icon = main.browser_favicon()
+        self.assertEqual(icon.body[:6], b'\x00\x00\x01\x00\x01\x00')
+        self.assertEqual(icon.body[22:30], b'\x89PNG\r\n\x1a\n')
+        self.assertEqual(icon.media_type, 'image/x-icon')
+
+    def test_authorization_navigation_and_shared_fixed_frame(self):
+        source = Path(main.__file__).read_text(encoding='utf-8')
+        self.assertIn('<a class="button" href="/">Agent status</a>', source)
+        self.assertNotIn('Back to home</a>', source)
+        self.assertIn('grid-template-columns: minmax(0, 1fr);', source)
+        self.assertIn('.page-content {{ width: 100%; min-width: 0; }}', source)
+
     def test_trusted_lan_is_explicit_and_defaults_disabled(self):
         with patch.dict('os.environ', {}, clear=True):
             self.assertFalse(AgentSettings.from_env().trusted_lan_http)

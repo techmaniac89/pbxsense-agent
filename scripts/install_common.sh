@@ -198,46 +198,91 @@ detect_freeswitch_password() {
   sed -n 's/.*<param[[:space:]][^>]*name="password"[^>]*value="\([^"]*\)".*/\1/p' "$config" | head -n 1
 }
 
+choose_manual_pbx_type() {
+  manual_default="$1"
+  case "$manual_default" in
+    asterisk|freeswitch|yeastar|grandstream|cucm) ;;
+    *) manual_default="asterisk" ;;
+  esac
+  while :; do
+    echo "Available phone systems:" >&2
+    echo "  1) Asterisk (FreePBX / Issabel / VitalPBX)" >&2
+    echo "  2) FreeSWITCH / FusionPBX" >&2
+    echo "  3) Yeastar P-Series" >&2
+    echo "  4) Grandstream UCM" >&2
+    echo "  5) Cisco CUCM" >&2
+    printf "Choose a number or PBX type [%s]: " "$manual_default" >&2
+    read -r answer || return 1
+    case "$answer" in
+      1) answer="asterisk" ;; 2) answer="freeswitch" ;;
+      3) answer="yeastar" ;; 4) answer="grandstream" ;;
+      5) answer="cucm" ;; "") answer="$manual_default" ;;
+    esac
+    selected="$(normalize_pbx_type "$answer")"
+    case "$selected" in
+      asterisk|freeswitch|yeastar|grandstream|cucm) printf '%s\n' "$selected"; return ;;
+      *) echo "Choose one of the five supported phone systems." >&2 ;;
+    esac
+  done
+}
+
 choose_pbx_type() {
+  # Explicit automation configuration remains supported, including developer mock.
   if [ -n "${PBXSENSE_PBX_TYPE:-}" ]; then
     normalize_pbx_type "$PBXSENSE_PBX_TYPE"
     return
   fi
-
   requested=""
   if [ "$ENV_CREATED" -eq 0 ]; then
     requested="$(env_value PBXSENSE_PBX_TYPE)"
   fi
-  if [ -n "$requested" ]; then
+  if ! is_interactive && [ -n "$requested" ]; then
     normalize_pbx_type "$requested"
     return
   fi
-
+  if is_interactive; then
+    while :; do
+      echo "How would you like to select your PBX?" >&2
+      echo "  1) Automatically detect a local PBX" >&2
+      echo "  2) Select manually (also for remote PBXs and appliances)" >&2
+      printf "Choose [1/2] [2]: " >&2
+      read -r method || return 1
+      case "$method" in
+        1|auto|automatic) break ;;
+        2|manual|"") choose_manual_pbx_type "$requested"; return ;;
+        *) echo "Enter 1 or 2." >&2 ;;
+      esac
+    done
+  fi
   has_asterisk=0
   has_freeswitch=0
   detect_asterisk && has_asterisk=1
   detect_freeswitch && has_freeswitch=1
-
-  detected="asterisk"
-  if [ "$has_freeswitch" -eq 1 ] && [ "$has_asterisk" -eq 0 ]; then
-    detected="freeswitch"
-  elif [ "$has_asterisk" -eq 0 ] && [ "$has_freeswitch" -eq 0 ]; then
+  detected=""
+  if [ "$has_asterisk" -eq 1 ] && [ "$has_freeswitch" -eq 0 ]; then
     detected="asterisk"
+  elif [ "$has_freeswitch" -eq 1 ] && [ "$has_asterisk" -eq 0 ]; then
+    detected="freeswitch"
   fi
-
-  if is_interactive; then
-    echo "PBX detection:" >&2
-    [ "$has_asterisk" -eq 1 ] && echo "  - Asterisk files or commands found." >&2
-    [ "$has_freeswitch" -eq 1 ] && echo "  - FreeSWITCH files or commands found." >&2
-    [ "$has_asterisk" -eq 0 ] && [ "$has_freeswitch" -eq 0 ] && echo "  - No local PBX files found; using Asterisk defaults." >&2
-    printf "PBX type: asterisk, freeswitch, yeastar, grandstream, cucm, or mock [%s]: " "$detected" >&2
-    read -r answer
-    if [ -n "$answer" ]; then
-      detected="$answer"
+  if [ -n "$detected" ]; then
+    echo "Local $detected commands or configuration found; connection is not yet verified." >&2
+    if is_interactive; then
+      printf "Use this phone system? [Y/n]: " >&2
+      read -r answer || return 1
+      case "$answer" in
+        n|N|no|NO) choose_manual_pbx_type "$requested"; return ;;
+      esac
     fi
+    printf '%s\n' "$detected"
+    return
   fi
-
-  normalize_pbx_type "$detected"
+  echo "No single local PBX could be identified. Remote PBXs and appliances require manual selection." >&2
+  if is_interactive; then
+    choose_manual_pbx_type "$requested"
+  else
+    echo "Set PBXSENSE_PBX_TYPE explicitly for unattended setup." >&2
+    return 1
+  fi
 }
 
 configure_asterisk_env() {
@@ -314,6 +359,7 @@ print_admin_link() {
 
 configure_grandstream_env() {
   echo "Configuring Grandstream UCM AMI settings in $ENV_FILE"
+  echo "Use the UCM AMI monitoring account enabled in the PBX administrator interface."
   set_env_value PBXSENSE_PBX_TYPE "grandstream"
   set_env_value PBXSENSE_AGENT_MODE "ami"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Grandstream UCM"
@@ -337,6 +383,7 @@ configure_grandstream_env() {
 
 configure_yeastar_env() {
   echo "Configuring Yeastar P-Series API settings in $ENV_FILE"
+  echo "Use the Client ID and Client Secret from the PBX API integration, not a user-account password."
   set_env_value PBXSENSE_PBX_TYPE "yeastar"
   set_env_value PBXSENSE_AGENT_MODE "yeastar"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Yeastar P-Series"
@@ -349,6 +396,7 @@ configure_yeastar_env() {
 
 configure_cucm_env() {
   echo "Configuring Cisco Unified Communications Manager settings in $ENV_FILE"
+  echo "Use a CUCM application user with the required AXL and monitoring permissions."
   set_env_value PBXSENSE_PBX_TYPE "cucm"
   set_env_value PBXSENSE_AGENT_MODE "cucm"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Cisco Unified Communications Manager"
@@ -369,6 +417,7 @@ configure_cucm_env() {
 
 configure_mock_env() {
   echo "Configuring mock connector settings in $ENV_FILE"
+  echo "Demo mode uses simulated PBX data; no PBX credentials are required."
   set_env_value PBXSENSE_PBX_TYPE "mock"
   set_env_value PBXSENSE_AGENT_MODE "mock"
   prompt_value PBXSENSE_DISPLAY_NAME "Display name" "Mock PBX"
@@ -382,11 +431,12 @@ configure_agent_env() {
   pbx_type="$(choose_pbx_type)"
   case "$pbx_type" in
     asterisk|freeswitch|yeastar|grandstream|cucm|mock) ;;
-    *) echo "Unrecognized PBX type. Rerun setup and choose asterisk, freeswitch, yeastar, grandstream, cucm or mock." >&2; exit 1 ;;
+    *) echo "Unrecognized PBX type. Choose asterisk, freeswitch, yeastar, grandstream or cucm." >&2; exit 1 ;;
   esac
   echo "[2/4] Agent location and browser access"
-  echo "Timezone controls dates in calls and signals. Keep the default port/timeout unless your site needs another value."
-  prompt_value PBXSENSE_TIMEZONE "Agent timezone" "$(detect_timezone)"
+  echo "Choose the PBX timezone (for example Europe/Athens) to match its local dates and daylight-saving changes. The detected default is this server's timezone; verify it for a remote PBX."
+  echo "Keep the default port/timeout unless your site needs another value."
+  prompt_value PBXSENSE_TIMEZONE "PBX timezone" "$(detect_timezone)"
   prompt_value PBXSENSE_CONNECT_TIMEOUT "Connector timeout seconds" "${PBXSENSE_CONNECT_TIMEOUT:-3}"
   prompt_value PBXSENSE_AGENT_PORT "Agent HTTP port" "$AGENT_PORT"
   AGENT_PORT="$(env_value PBXSENSE_AGENT_PORT)"
@@ -394,7 +444,6 @@ configure_agent_env() {
   echo "Never expose it publicly. Leave disabled unless you accept this private-network risk."
   prompt_value PBXSENSE_TRUSTED_LAN_HTTP "Allow trusted-LAN HTTP administrator access (true/false)" "${PBXSENSE_TRUSTED_LAN_HTTP:-false}"
   echo "[3/4] PBX connection and optional history sources"
-  echo "Use PBX monitoring/API credentials here, not your Linux login or browser setup code."
   echo "PBX host means the phone-system server. Use 127.0.0.1 only when this Agent can reach the PBX locally."
 
   case "$pbx_type" in

@@ -76,11 +76,11 @@ Download the current archive and checksum from the repository's latest GitHub
 Release, verify it, and enter the extracted directory:
 
 ```bash
-curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.51-beta-linux-source-installer.tar.gz
+curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/PBXSenseAgent-0.6.62-beta-linux-source-installer.tar.gz
 curl -fLO https://github.com/techmaniac89/pbxsense-agent/releases/latest/download/SHA256SUMS.txt
 sha256sum --check --ignore-missing SHA256SUMS.txt
-tar -xzf PBXSenseAgent-0.6.51-beta-linux-source-installer.tar.gz
-cd PBXSenseAgent-0.6.51-beta-linux-source-installer
+tar -xzf PBXSenseAgent-0.6.62-beta-linux-source-installer.tar.gz
+cd PBXSenseAgent-0.6.62-beta-linux-source-installer
 ```
 
 The checksum command must report `OK` before installation. On a machine where
@@ -110,8 +110,18 @@ archives preserve executable modes.
 Both distribution-specific installers:
 
 - Install Python runtime packages through `apt-get` or `dnf`.
-- Auto-detect local Asterisk or FreeSWITCH files and commands when possible.
-- Lets you confirm `asterisk`, `grandstream`, `freeswitch`, `yeastar`, or `mock` mode interactively.
+- Starts with a choice of automatic local PBX detection or manual selection.
+- Lists Asterisk, FreeSWITCH / FusionPBX, Yeastar P-Series, Grandstream UCM and
+  Cisco CUCM in that order. Mock is not offered in the interactive menu.
+- Automatic detection checks local Asterisk/FreeSWITCH commands and configuration,
+  asks for confirmation, and falls back to manual selection when none or both are
+  found. It does not scan the LAN, discover remote appliances, or prove a working
+  PBX connection. Docker-only PBXs without host commands/configuration should use
+  manual selection. No default Asterisk selection is made when discovery fails.
+- Existing settings remain the manual defaults. Unattended installs retain an
+  explicit `PBXSENSE_PBX_TYPE` or existing configuration; otherwise ambiguous
+  detection stops with instructions. Developer Mock remains available only by
+  explicit configuration, not through the menu.
 - Prompts for timezone, Agent port, and connector timeout.
 - Prompts for AMI, ESL, or Yeastar API credentials and keeps existing values on reinstall.
 - Offers detected Asterisk/FreeSWITCH CDR, voicemail and recording paths, with manual entry under an advanced choice.
@@ -187,7 +197,7 @@ proxy's canonical HTTPS origin. Do not expose the Agent directly to the public
 Internet.
 
 After the first app enrolls the Agent with the push relay, the same protected
-page changes to **Add another app**. Scan its QR on each additional phone. The
+page changes to **Pair another app**. Scan its QR on each additional phone. The
 Agent installation and relay identity remain shared, while every app registers
 its own FCM device, notification preferences, encryption key, and relay access
 credential.

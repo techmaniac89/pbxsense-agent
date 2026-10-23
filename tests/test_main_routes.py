@@ -278,6 +278,9 @@ class MainRouteStructureTest(unittest.TestCase):
         source = Path("pbxsense_agent/main.py").read_text(encoding="utf-8")
 
         self.assertIn('id="copy-pairing-text"', source)
+        self.assertIn('<details class="pairing-text-toggle">', source)
+        self.assertIn('<summary>QR text</summary>', source)
+        self.assertNotIn('<details class="pairing-text-toggle" open', source)
         self.assertIn('id="copy-feedback"', source)
         self.assertIn("navigator.clipboard.writeText", source)
         self.assertIn("copyFeedback.classList.add('visible')", source)
@@ -290,7 +293,7 @@ class MainRouteStructureTest(unittest.TestCase):
         self.assertIn('<div class="qr">{qr_svg}</div>', source)
         self.assertIn("Local pairing ready", source)
         self.assertIn(
-            "Push setup will continue through this Agent.",
+            "This QR supports local pairing only. Refresh before scanning to include closed-app push setup.",
             source,
         )
 
@@ -627,7 +630,7 @@ class MainRouteStructureTest(unittest.TestCase):
         )
         self.assertGreaterEqual(source.count("{_agent_footer_html()}"), 3)
         self.assertIn(
-            'label_overrides={"pair": "Add another app"}',
+            'label_overrides={"pair": "Pair another app"}',
             source,
         )
         self.assertIn('excluded=("diagnostics",)', source)

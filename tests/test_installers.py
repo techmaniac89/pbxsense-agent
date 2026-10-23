@@ -71,7 +71,7 @@ class InstallerStructureTest(unittest.TestCase):
         common = Path("scripts/install_common.sh").read_text(encoding="utf-8")
 
         self.assertIn(
-            "PBX type: asterisk, freeswitch, yeastar, grandstream, cucm, or mock",
+            "1) Asterisk (FreePBX / Issabel / VitalPBX)",
             common,
         )
 

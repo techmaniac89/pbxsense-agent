@@ -31,7 +31,7 @@ required.
 | `PBXSENSE_PBX_TYPE` | `asterisk` | PBX family. Supports `asterisk`, `grandstream`, `freeswitch`, `yeastar`, `cucm`, `mock`, and aliases listed below. |
 | `PBXSENSE_AGENT_MODE` | derived | Connector mode. Usually `ami`, `freeswitch`, `yeastar`, `cucm`, or `mock`. |
 | `PBXSENSE_DISPLAY_NAME` | connector name | Friendly PBX name shown by the Agent. |
-| `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone for history and timestamps. |
+| `PBXSENSE_TIMEZONE` | `TZ` or empty | IANA timezone matching the PBX, for history and page timestamps (for example `Europe/Athens`). |
 | `PBXSENSE_AGENT_TOKEN` | empty | Shared token for local/VPN/direct-Agent pairing and protected endpoints; it is not sent to the hosted relay. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_TOKEN` | generated | Installer-rotated, single-use credential printed only in the browser setup URL; it does not grant API access and expires after 15 minutes. |
 | `PBXSENSE_BROWSER_BOOTSTRAP_EXPIRES_AT` | generated | Unix expiry for the browser bootstrap credential. |
@@ -167,7 +167,7 @@ PBX dialplan conventions, not a universal Asterisk type flag.
 Configuration is cached for five minutes and refreshed at most five endpoints
 per snapshot, without caching auth objects or secrets. Unsupported or denied
 configuration queries do not fall back to names. Ambiguous endpoints have an
-internal `unknown` role and are excluded from People and new phone notifications.
+internal `unknown` role and are excluded from People, Trunks and new phone notifications.
 Diagnostics report role counts and configuration-source availability. Existing
 confirmed phone incidents remain uncertain rather than falsely recovering.
 
@@ -190,6 +190,25 @@ Changing the configured PBX address starts a separate set of choices. Only an
 authorized administrator browser can change roles; paired-app credentials
 cannot. Writes use the existing same-origin protection. Automatic diagnostic
 classification counts describe connector evidence, before manual choices.
+
+The home page shows a classification warning only while unknown endpoints are
+present, and the roles page highlights the saved choice (Automatic when no
+manual declaration exists). Home capability indicators describe data-source
+availability, not endpoint health: successful empty results are Available,
+missing configuration is Not configured, unsupported features are Not supported,
+and failed or stale reads need attention. Missing evidence is Not yet verified.
+Dates use the configured PBX timezone (`PBXSENSE_TIMEZONE`) and readable full-month
+dates with the applicable GMT offset, including daylight-saving changes. This
+setting must match the PBX: connectors do not currently expose a common automatic
+PBX timezone query. The page labels the configured timezone, or an explicit
+Agent-local/UTC fallback if absent/invalid. Agent running since resets on restart.
+The home page keeps a dedicated endpoint-role management card. Role buttons
+highlight the current choice without an additional badge beside the name.
+Standard Diagnostics groups checks into readable sections with human-friendly
+labels, durations and timestamps; Raw JSON retains the technical API response.
+Relay enrollment alone does not confirm a registered app or successful delivery;
+use Paired apps for registration details. Local-only QR pairing remains explicitly
+marked as lacking closed-app push setup; there is no separate pairing status panel.
 
 FreeSWITCH uses registration and Sofia gateway inventories, never call-leg names
 alone to create People. Yeastar uses extension/trunk API inventories. CUCM uses
